@@ -1,0 +1,11 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+
+# Nav meshes and maps produced or consumed while testing. These are large, and the maps are not
+# ours to redistribute.
+*.bsp
+*.nav
