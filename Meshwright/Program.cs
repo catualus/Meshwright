@@ -56,6 +56,7 @@ namespace Meshwright
                     "floors" => Floors(args),
                     "spots" => Spots(args),
                     "build-spots" => BuildSpots(args),
+                    "bench" => Bench(args),
                     "hull-check" => HullCheck(args),
                     "area" => AreaInfo(args),
                     "why-not-connected" => WhyNotConnected(args),
@@ -665,6 +666,15 @@ namespace Meshwright
             Console.WriteLine($"      {tracer.VisibleLinks:N0} visible links from {tracer.RaysCast:N0} rays " +
                               $"in {stats.ElapsedMilliseconds:N0} ms on {NavConcurrency.MaxThreads} threads");
 
+            // Split by stage, because the three are very different bets and only counting tells you
+            // which is paying. The sweep is the one to watch: it runs sixteen traces on precisely the
+            // pairs everything cheaper has already failed on.
+            Console.WriteLine($"        centre: {tracer.RaysCentre:N0} rays -> {tracer.LinksCentre:N0} links");
+            Console.WriteLine($"        cross:  {tracer.RaysCross:N0} rays -> {tracer.LinksCross:N0} links " +
+                              $"({tracer.PairsToCross:N0} pairs reached it)");
+            Console.WriteLine($"        sweep:  {tracer.RaysSweep:N0} rays -> {tracer.LinksSweep:N0} links " +
+                              $"({tracer.PairsToSweep:N0} pairs reached it)");
+
             foreach (var ids in visible)
                 Array.Sort(ids);
 
@@ -737,16 +747,38 @@ namespace Meshwright
         /// silently reports open air over every piece of terrain on the map, and the command still runs
         /// and still prints plausible numbers.
         /// </summary>
+        /// <summary>
+        /// Reads a BSP and everything traced against it.
+        ///
+        /// Overlapped rather than sequential, because loading is not a small part of a run any more.
+        /// Once the passes themselves got fast, a cold `build-spots` on gm_construct was spending
+        /// roughly 590ms here against 933ms of actual work - all of it on one core while fifteen sat
+        /// idle, which is what the profiler was really showing when thread-wait climbed to half the
+        /// samples.
+        ///
+        /// Three of the four readers are independent, and the dependency graph says so plainly:
+        /// displacements need nothing but the file, so they start before anything else; models and
+        /// visibility both need the parsed lumps but never touch each other. Each opens its own handle,
+        /// and everything they read from <see cref="BspFile"/> is finished being written before either
+        /// is started, so none of them shares mutable state.
+        /// </summary>
         private static (BspFile Bsp, BspVisibility Vis) LoadBsp(string path)
         {
             if (!File.Exists(path))
                 throw new FileNotFoundException($"no such file: {path}");
 
+            // Depends only on the file itself, so it need not wait for the lump parse at all.
+            var displacements = System.Threading.Tasks.Task.Run(() => BspDisplacements.Load(path));
+
             var bsp = BspFile.Load(path);
+
+            // Both need `bsp` and neither needs the other. Visibility is much the heavier of the two -
+            // it decompresses the whole PVS - so it stays on this thread and models goes to the pool.
+            var models = System.Threading.Tasks.Task.Run(() => BspModels.Load(path, bsp));
             var vis = BspVisibility.Load(path, bsp);
 
-            vis.AttachModels(BspModels.Load(path, bsp));
-            vis.AttachDisplacements(BspDisplacements.Load(path));
+            vis.AttachModels(models.Result);
+            vis.AttachDisplacements(displacements.Result);
 
             return (bsp, vis);
         }
@@ -1818,6 +1850,101 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// Times the individual passes repeatedly, so a performance change can be judged against the
+        /// machine's own noise rather than against a single stopwatch reading.
+        ///
+        /// The geometry is loaded once and every repeat runs against it, because loading a large BSP
+        /// dwarfs the passes and is not what anyone is optimising. Each pass gets a fresh copy of the
+        /// mesh state it writes to, so repeats measure the same work rather than an increasingly
+        /// populated mesh.
+        /// </summary>
+        private static int Bench(string[] args)
+        {
+            if (args.Length < 3)
+                throw new ArgumentException(
+                    "expected: bench <file.bsp> <file.nav> [-n repeats] [-pass spots|snipers|encounters|all]");
+
+            string bspPath = args[1];
+            string navPath = args[2];
+
+            if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such file: {bspPath}");
+            if (!File.Exists(navPath)) throw new FileNotFoundException($"no such file: {navPath}");
+
+            int repeats = FlagValue(args, "-n") is { } n ? int.Parse(n) : 5;
+            string pass = FlagValue(args, "-pass") ?? "all";
+
+            // Loading is timed before anything is loaded, for obvious reasons, and reported per reader
+            // so the overlap in LoadBsp can be judged against what it is overlapping. A three-way
+            // overlap only pays if the three are of comparable size.
+            if (pass.Equals("load", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"bsp     {Path.GetFileName(bspPath)}");
+                Console.WriteLine($"config  {repeats} repeats after one discarded warm-up");
+                Console.WriteLine();
+
+                var parsed = BspFile.Load(bspPath);
+
+                Benchmark.Report(Benchmark.Measure("BspFile", repeats, () => BspFile.Load(bspPath)));
+                Benchmark.Report(Benchmark.Measure("BspVisibility", repeats,
+                    () => BspVisibility.Load(bspPath, parsed)));
+                Benchmark.Report(Benchmark.Measure("BspModels", repeats,
+                    () => BspModels.Load(bspPath, parsed)));
+                Benchmark.Report(Benchmark.Measure("BspDisplacements", repeats,
+                    () => BspDisplacements.Load(bspPath)));
+                Benchmark.Report(Benchmark.Measure("LoadBsp (overlapped)", repeats,
+                    () => LoadBsp(bspPath)));
+
+                return 0;
+            }
+
+            var (_, vis) = LoadBsp(bspPath);
+            var nav = NavFile.Load(navPath);
+
+            Console.WriteLine($"bsp     {Path.GetFileName(bspPath)}");
+            Console.WriteLine($"nav     {Path.GetFileName(navPath)}: {nav.Areas.Count:N0} areas");
+            Console.WriteLine($"config  {repeats} repeats after one discarded warm-up, " +
+                              $"{NavConcurrency.MaxThreads} threads");
+            Console.WriteLine();
+
+            var samples = new List<Benchmark.Sample>();
+
+            bool all = pass.Equals("all", StringComparison.OrdinalIgnoreCase);
+
+            if (all || pass.Equals("spots", StringComparison.OrdinalIgnoreCase))
+            {
+                samples.Add(Benchmark.Measure("hiding spots", repeats,
+                    () => HidingSpotFinder.Find(nav, vis)));
+            }
+
+            if (all || pass.Equals("snipers", StringComparison.OrdinalIgnoreCase))
+            {
+                // Hiding spots first: grading needs them to exist, and they are cheap next to it.
+                HidingSpotFinder.Find(nav, vis);
+                samples.Add(Benchmark.Measure("sniper grading", repeats,
+                    () => SniperSpotClassifier.Classify(nav, vis)));
+            }
+
+            if (all || pass.Equals("encounters", StringComparison.OrdinalIgnoreCase))
+            {
+                HidingSpotFinder.Find(nav, vis);
+                samples.Add(Benchmark.Measure("encounters", repeats,
+                    () => EncounterSpotBuilder.Build(nav, vis)));
+            }
+
+            if (samples.Count == 0)
+                throw new ArgumentException($"unknown pass '{pass}'");
+
+            foreach (var sample in samples)
+                Benchmark.Report(sample);
+
+            Console.WriteLine();
+            Console.WriteLine("  Compare runs on their minimum. A change smaller than the spread above");
+            Console.WriteLine("  is the machine talking, not the code.");
+
+            return 0;
+        }
+
+        /// <summary>
         /// Adds hiding spots to a mesh - the cover positions bots fall back to, which the engine
         /// computes during nav_generate and nothing here produced until now.
         /// </summary>
@@ -1903,7 +2030,7 @@ namespace Meshwright
             {
                 Console.WriteLine($"      encounters: {met.Encounters:N0} across " +
                                   $"{met.AreasWithEncounters:N0} areas, " +
-                                  $"{met.SpotOrders:N0} spot sightings ({met.Rays:N0} rays)");
+                                  $"{met.SpotOrders:N0} spot sightings ({met.Rays:N0} rays, " + $"{met.RaysCulledByPvs:N0} skipped by PVS)");
             }
 
             Console.WriteLine($"      done in {sw.ElapsedMilliseconds:N0} ms");

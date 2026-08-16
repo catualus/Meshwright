@@ -174,7 +174,17 @@ namespace Meshwright
                 bool found = false;
                 float loX = 0, loY = 0, hiX = 0, hiY = 0;
 
-                for (int i = 0; i < nav.Areas.Count; i++)
+                // Set once the grade can no longer change, which lets the scan stop where Valve's runs
+                // to the end of the mesh. The verdict below is an OR of two predicates over quantities
+                // that only ever grow - the longest sightline found, and the area of the box around the
+                // visible samples - so the moment either passes its threshold the answer is ideal and
+                // nothing further can unmake it. Exact rather than approximate, and worth having
+                // because most spots on an open map are ideal: on gm_construct 252 of 267 are, and
+                // every one of those was previously paying for a full sweep of every sample in the mesh
+                // to confirm what the first long sightline had already settled.
+                bool decided = false;
+
+                for (int i = 0; i < nav.Areas.Count && !decided; i++)
                 {
                     if (sampleCount[i] == 0)
                         continue;
@@ -245,6 +255,13 @@ namespace Meshwright
                             loX = hiX = sample.X;
                             loY = hiY = sample.Y;
                             found = true;
+                        }
+
+                        if (farthestSq >= LongSniperRange * LongSniperRange ||
+                            (hiX - loX) * (hiY - loY) >= MinIdealSniperArea)
+                        {
+                            decided = true;
+                            break;
                         }
                     }
                 }

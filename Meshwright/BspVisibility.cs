@@ -242,10 +242,16 @@ namespace Meshwright
             }
 
             int rowBytes = (ClusterCount + 7) / 8;
-            pvs = new byte[ClusterCount][];
+            var rows = new byte[ClusterCount][];
 
-            for (int i = 0; i < ClusterCount; i++)
-                pvs[i] = Decompress(raw, pvsOffsets[i], rowBytes);
+            // Every row expands from its own offset into its own array, reading a shared buffer that
+            // nothing writes to - so this is parallel without qualification. It is also the single
+            // largest piece of BSP loading on a map with real vis data, which is every map worth
+            // running this on.
+            System.Threading.Tasks.Parallel.For(0, ClusterCount, NavConcurrency.Options,
+                i => rows[i] = Decompress(raw, pvsOffsets[i], rowBytes));
+
+            pvs = rows;
         }
 
         /// <summary>
@@ -355,6 +361,19 @@ namespace Meshwright
 
             return merged;
         }
+
+        /// <summary>
+        /// The PVS row for a single cluster, without copying it.
+        ///
+        /// <see cref="MergeVisible"/> allocates, which is right when several clusters have to be ORed
+        /// together but wasteful for the common case of asking what one point can see. Callers must
+        /// treat the result as read-only; it is the live row.
+        ///
+        /// Null when there is no vis data or the cluster is unknown, which every consumer already
+        /// reads as "assume everything is visible".
+        /// </summary>
+        public byte[]? VisibleFrom(short cluster)
+            => pvs is null || cluster < 0 || cluster >= ClusterCount ? null : pvs[cluster];
 
         /// <summary>Whether a merged row sees any of the given clusters. A null row means "assume yes".</summary>
         public bool SeesAny(byte[]? mergedRow, short[] clusters)

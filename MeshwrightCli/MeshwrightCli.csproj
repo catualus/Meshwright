@@ -8,6 +8,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!--
+      Precompiled ahead of time when published. This is a one-shot tool - a compile step runs it once
+      and it exits - so every invocation pays the JIT cost of every method it touches, and none of that
+      work is ever reused. Measured on gm_construct, a cold run of build-spots spent roughly 670ms
+      jitting against 933ms of actual work; ReadyToRun took the whole run from 1,601ms to 1,345ms.
+
+      Only affects `dotnet publish` with a RuntimeIdentifier, so ordinary `dotnet build` during
+      development is unchanged.
+    -->
+    <PublishReadyToRun>true</PublishReadyToRun>
   </PropertyGroup>
 
   <ItemGroup>

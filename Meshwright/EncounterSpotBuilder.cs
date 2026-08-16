@@ -51,6 +51,9 @@ namespace Meshwright
             public int AreasWithEncounters;
             public long SpotOrders;
             public long Rays;
+
+            /// <summary>Traces the PVS answered before they were cast.</summary>
+            public long RaysCulledByPvs;
         }
 
         public static Result Build(NavFile nav, BspVisibility vis, NavProgress? progress = null)
@@ -76,6 +79,15 @@ namespace Meshwright
             var spots = coverSpots.ToArray();
             if (spots.Length == 0)
                 return result;
+
+            // Which leaf clusters each spot sits in, resolved once for the mesh. Used to skip traces
+            // the PVS has already ruled out - see the note in the step loop.
+            var spotClusters = new short[spots.Length][];
+            for (int s = 0; s < spots.Length; s++)
+            {
+                spotClusters[s] = vis.GetClusters(
+                    [new BspFile.Vector3(spots[s].X, spots[s].Y, spots[s].Z)]);
+            }
 
             int done = 0;
             object gate = new();
@@ -131,7 +143,7 @@ namespace Meshwright
                                     continue;
 
                                 var encounter = BuildEncounter(vis, area, from, fromDir, to, toDir,
-                                    spots, active, local);
+                                    spots, spotClusters, active, local);
 
                                 area.Encounters.Add(encounter);
                                 local.Encounters++;
@@ -155,6 +167,7 @@ namespace Meshwright
                     result.AreasWithEncounters += local.AreasWithEncounters;
                     result.SpotOrders += local.SpotOrders;
                     result.Rays += local.Rays;
+                    result.RaysCulledByPvs += local.RaysCulledByPvs;
                 }
             });
 
@@ -167,7 +180,8 @@ namespace Meshwright
         /// </summary>
         private static SpotEncounter BuildEncounter(BspVisibility vis, NavArea area,
             NavArea from, int fromDir, NavArea to, int toDir,
-            (uint Id, float X, float Y, float Z)[] spots, int[] active, Result local)
+            (uint Id, float X, float Y, float Z)[] spots, short[][] spotClusters, int[] active,
+            Result local)
         {
             var encounter = new SpotEncounter
             {
@@ -221,6 +235,11 @@ namespace Meshwright
 
             bool done = false;
 
+            // The eye's cluster from the previous step, so consecutive steps inside one cluster - which
+            // is most of them, at 25 units apart - reuse its row instead of walking the tree again.
+            short lastCluster = short.MinValue;
+            byte[]? visibleFromEye = null;
+
             for (float along = 0f; !done; along += StepSize)
             {
                 if (along >= length)
@@ -237,6 +256,21 @@ namespace Meshwright
                 float eyeX = fromX + along * dirX;
                 float eyeY = fromY + along * dirY;
                 float eyeZ = fromZ + along * dirZ;
+
+                // What the eye could possibly see from here, according to vbsp.
+                //
+                // Exact, and worth being careful about why. The PVS is a conservative superset: when it
+                // says a cluster pair cannot see each other, nothing in one can see anything in the
+                // other, so skipping the trace cannot hide a sightline that existed. What it must not
+                // do is *retire* the spot - the eye moves, and a spot invisible from this step may be
+                // plainly visible two steps later - so a rejected spot stays a candidate exactly as a
+                // spot that failed the range test does.
+                short cluster = vis.GetCluster(new BspFile.Vector3(eyeX, eyeY, eyeZ));
+                if (cluster != lastCluster)
+                {
+                    lastCluster = cluster;
+                    visibleFromEye = vis.VisibleFrom(cluster);
+                }
 
                 // Walked and compacted in one pass. A spot is recorded at most once per encounter, at
                 // the first point along the path where it is both in range and visible - so once seen
@@ -269,6 +303,16 @@ namespace Meshwright
                     float distanceSquared = sx * sx + sy * sy + sz * sz;
                     if (distanceSquared > SeeSpotRange * SeeSpotRange)
                     {
+                        active[keep++] = s;
+                        continue;
+                    }
+
+                    // In range, but vbsp already knows the eye's cluster cannot see the spot's - so the
+                    // trace would be a blocked one. Kept as a candidate, since a later step may be
+                    // somewhere that can.
+                    if (!vis.SeesAny(visibleFromEye, spotClusters[s]))
+                    {
+                        local.RaysCulledByPvs++;
                         active[keep++] = s;
                         continue;
                     }

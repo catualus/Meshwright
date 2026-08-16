@@ -32,6 +32,43 @@ namespace Meshwright
         private long raysCast;
         private long visibleLinks;
 
+        /// <summary>
+        /// Where the rays go, split by which of the three stages of <see cref="Sees"/> cast them, and
+        /// what each stage bought.
+        ///
+        /// Worth counting because the stages are wildly different bets. The centre-to-centre ray is one
+        /// trace that settles both directions at once; the corner sweep is sixteen traces that only run
+        /// when everything cheaper has failed, which is exactly the case where they are least likely to
+        /// find anything. Whether that last stage earns its place is not answerable by reasoning about
+        /// it - only by counting how many links it actually contributes for the rays it spends.
+        ///
+        /// What the counting says, on rp_downtown_tits_v25 at 19,577 areas: the centre ray settles
+        /// 10.7 million links for 37.5 million rays, and the sweep buys 1.5 million more for 498
+        /// million - 63% of all the tracing in the pass. Nearly 32 million pairs reach it and about
+        /// 97.6% of them find nothing, because the work is no longer finding visibility but *proving
+        /// invisibility*, and there is no early exit from that.
+        ///
+        /// Valve's own fast accept was tried against this and made it markedly worse: sweeping a box
+        /// the size of the source area to the nearest point of the target, ahead of everything else,
+        /// cost 200 seconds against 126 and removed 0.5% of rays. It resolves pairs the centre ray was
+        /// already resolving in a single cheap trace, at several times the price, and leaves the
+        /// invisible pairs that dominate the cost entirely untouched. A fast *accept* cannot help a
+        /// workload whose cost is failures; what this pass would need is a fast reject, and the PVS is
+        /// already the only cheap one available.
+        /// </summary>
+        private long raysCentre, raysCross, raysSweep;
+        private long pairsToCross, pairsToSweep;
+        private long linksCentre, linksCross, linksSweep;
+
+        public long RaysCentre => raysCentre;
+        public long RaysCross => raysCross;
+        public long RaysSweep => raysSweep;
+        public long PairsToCross => pairsToCross;
+        public long PairsToSweep => pairsToSweep;
+        public long LinksCentre => linksCentre;
+        public long LinksCross => linksCross;
+        public long LinksSweep => linksSweep;
+
         public long RaysCast => raysCast;
 
         /// <summary>Directed links found - a mutually visible pair counts twice.</summary>
@@ -59,11 +96,12 @@ namespace Meshwright
 
             long rays = 0;
             long links = 0;
+            var phase = default(PhaseCounts);
 
             foreach (int other in others)
             {
                 var to = filter.SightPoints(other);
-                Sees(from, to, out bool fromSeesTo, out bool toSeesFrom, ref rays);
+                Sees(from, to, out bool fromSeesTo, out bool toSeesFrom, ref rays, ref phase);
 
                 if (fromSeesTo) { seen.Add(other); links++; }
                 if (toSeesFrom) { seenBy.Add(other); links++; }
@@ -71,6 +109,15 @@ namespace Meshwright
 
             Interlocked.Add(ref raysCast, rays);
             Interlocked.Add(ref visibleLinks, links);
+
+            Interlocked.Add(ref raysCentre, phase.RaysCentre);
+            Interlocked.Add(ref raysCross, phase.RaysCross);
+            Interlocked.Add(ref raysSweep, phase.RaysSweep);
+            Interlocked.Add(ref pairsToCross, phase.PairsToCross);
+            Interlocked.Add(ref pairsToSweep, phase.PairsToSweep);
+            Interlocked.Add(ref linksCentre, phase.LinksCentre);
+            Interlocked.Add(ref linksCross, phase.LinksCross);
+            Interlocked.Add(ref linksSweep, phase.LinksSweep);
         }
 
         /// <summary>
@@ -104,28 +151,44 @@ namespace Meshwright
         ///
         /// Sight points are laid out corners first, centre last.
         /// </summary>
+
+        /// <summary>Per-worker tallies of where the rays went, folded in once per row.</summary>
+        private struct PhaseCounts
+        {
+            public long RaysCentre, RaysCross, RaysSweep;
+            public long PairsToCross, PairsToSweep;
+            public long LinksCentre, LinksCross, LinksSweep;
+        }
+
         private void Sees(ReadOnlySpan<BspFile.Vector3> from, ReadOnlySpan<BspFile.Vector3> to,
-            out bool fromSeesTo, out bool toSeesFrom, ref long rays)
+            out bool fromSeesTo, out bool toSeesFrom, ref long rays, ref PhaseCounts phase)
         {
             const int Corners = VisibilityFilter.SightPointsPerArea - 1;
 
             rays++;
+            phase.RaysCentre++;
+
             if (vis.IsLineClear(from[Corners], to[Corners]))
             {
                 fromSeesTo = true;
                 toSeesFrom = true;
+                phase.LinksCentre += 2;
                 return;
             }
 
             fromSeesTo = false;
             toSeesFrom = false;
+            phase.PairsToCross++;
 
             for (int c = 0; c < Corners; c++)
             {
                 rays++;
+                phase.RaysCross++;
+
                 if (vis.IsLineClear(from[Corners], to[c]))
                 {
                     fromSeesTo = true;
+                    phase.LinksCross++;
                     break;
                 }
             }
@@ -133,9 +196,12 @@ namespace Meshwright
             for (int c = 0; c < Corners; c++)
             {
                 rays++;
+                phase.RaysCross++;
+
                 if (vis.IsLineClear(to[Corners], from[c]))
                 {
                     toSeesFrom = true;
+                    phase.LinksCross++;
                     break;
                 }
             }
@@ -143,13 +209,33 @@ namespace Meshwright
             if (fromSeesTo && toSeesFrom)
                 return;
 
+            phase.PairsToSweep++;
+
+            // Valve's collinearity skip belongs here in principle and was tried: past 1000 units,
+            // `nav_potentially_visible_dot_tolerance` (0.98) lets the engine drop a sample point whose
+            // bearing from its area's centre is close enough to the centre-to-centre line to be tracing
+            // the same one. Measured on rp_downtown_tits_v25 it removed 1.9% of rays and moved 3,798
+            // links out of 13.7 million - not worth the divergence.
+            //
+            // The reason it pays for Valve and not here is structural. They walk a grid across the
+            // *source* area at 25-unit steps, so plenty of their sample points genuinely sit behind the
+            // centre on the line to the target. Four corners spread sideways instead, nearly
+            // perpendicular to the view axis, and almost none of them are ever collinear with anything.
+            // The skip is only worth having alongside the grid walk it was written for.
             for (int s = 0; s < Corners; s++)
             {
                 for (int c = 0; c < Corners; c++)
                 {
                     rays++;
+                    phase.RaysSweep++;
+
                     if (vis.IsLineClear(from[s], to[c]))
                     {
+                        // Counted as what the sweep actually added, not as two links: whichever
+                        // direction an earlier stage had already established was not bought here.
+                        if (!fromSeesTo) phase.LinksSweep++;
+                        if (!toSeesFrom) phase.LinksSweep++;
+
                         fromSeesTo = true;
                         toSeesFrom = true;
                         return;

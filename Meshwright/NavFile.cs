@@ -42,18 +42,38 @@ namespace Meshwright
         /// </summary>
         public byte[] TrailingData { get; set; } = [];
 
+        /// <summary>
+        /// Reads a mesh from disk.
+        ///
+        /// The file is pulled into memory in one go and parsed from there, rather than read field by
+        /// field off a <see cref="FileStream"/>. That sounds like a wash and is not: an analysed mesh is
+        /// millions of four- and one-byte fields - gm_construct's carries 1.37 million visible-area
+        /// records alone - and every one of those was a call through the stream's buffering machinery.
+        /// Measured on that mesh, loading took 425ms against 51ms for the entire BSP beside it, which
+        /// made reading the previous result the most expensive thing most commands did.
+        ///
+        /// A nav file is a few megabytes, so holding it whole costs nothing worth counting.
+        /// </summary>
         public static NavFile Load(string path)
         {
-            using var stream = File.OpenRead(path);
+            using var stream = new MemoryStream(File.ReadAllBytes(path), writable: false);
             using var r = new BinaryReader(stream, Encoding.ASCII);
             return Read(r);
         }
 
+        /// <summary>
+        /// Writes a mesh to disk, buffered whole for the same reason <see cref="Load"/> reads it whole.
+        /// </summary>
         public void Save(string path)
         {
-            using var stream = File.Create(path);
-            using var w = new BinaryWriter(stream, Encoding.ASCII);
-            Write(w);
+            using var buffer = new MemoryStream();
+
+            using (var w = new BinaryWriter(buffer, Encoding.ASCII, leaveOpen: true))
+                Write(w);
+
+            using var file = File.Create(path);
+            buffer.Position = 0;
+            buffer.CopyTo(file);
         }
 
         public static NavFile Read(BinaryReader r)
@@ -230,6 +250,15 @@ namespace Meshwright
             if (version >= 16)
             {
                 uint visibleCount = r.ReadUInt32();
+
+                // These five-byte records are the overwhelming bulk of an analysed mesh - 1.37 million
+                // of them on gm_construct, 96% of the file - so reading them as one block and decoding
+                // in place looks like the obvious win. It was tried and measured slightly *worse*:
+                // BinaryReader over the MemoryStream Load already hands it is about as quick per field,
+                // and blocking it up only adds a seven-megabyte allocation and copy. The win here was
+                // buffering the file at all, not the shape of the loop over it.
+                area.VisibleAreas.Capacity = (int)visibleCount;
+
                 for (uint i = 0; i < visibleCount; i++)
                     area.VisibleAreas.Add(new VisibleArea { AreaId = r.ReadUInt32(), Attributes = r.ReadByte() });
 
