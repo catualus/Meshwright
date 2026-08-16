@@ -101,8 +101,10 @@ namespace Meshwright
                 area.Encounters.Clear();
 
                 // Scratch reused across every encounter this area produces, rather than reallocated:
-                // an area with eight connections generates fifty-six of them.
-                var marked = new bool[spots.Length];
+                // an area with eight connections generates fifty-six of them. Holds the indices of the
+                // spots still worth testing, so it never needs clearing between encounters - each one
+                // refills it from scratch.
+                var active = new int[spots.Length];
 
                 for (int fromDir = 0; fromDir < NavGeometry.DirectionCount; fromDir++)
                 {
@@ -129,7 +131,7 @@ namespace Meshwright
                                     continue;
 
                                 var encounter = BuildEncounter(vis, area, from, fromDir, to, toDir,
-                                    spots, marked, local);
+                                    spots, active, local);
 
                                 area.Encounters.Add(encounter);
                                 local.Encounters++;
@@ -165,7 +167,7 @@ namespace Meshwright
         /// </summary>
         private static SpotEncounter BuildEncounter(BspVisibility vis, NavArea area,
             NavArea from, int fromDir, NavArea to, int toDir,
-            (uint Id, float X, float Y, float Z)[] spots, bool[] marked, Result local)
+            (uint Id, float X, float Y, float Z)[] spots, int[] active, Result local)
         {
             var encounter = new SpotEncounter
             {
@@ -191,10 +193,31 @@ namespace Meshwright
 
             float dirX = dx / length, dirY = dy / length, dirZ = dz / length;
 
-            // Fresh for every encounter - Valve bumps a global marker for the same effect. A spot is
-            // recorded at most once per encounter, at the first point along the path where it is both
-            // in range and visible.
-            Array.Clear(marked);
+            // Spots that could possibly come into range at some point on this path, gathered once.
+            //
+            // A spot outside the path's bounding box grown by SeeSpotRange is further than that from
+            // every point on the path, so it can never be in range at any step: Euclidean distance
+            // within R implies each axis is within R, and the contrapositive is what makes this an
+            // exact filter rather than a heuristic. Doing it once here replaces a distance test per
+            // spot per step.
+            float loX = MathF.Min(fromX, toX) - SeeSpotRange, hiX = MathF.Max(fromX, toX) + SeeSpotRange;
+            float loY = MathF.Min(fromY, toY) - SeeSpotRange, hiY = MathF.Max(fromY, toY) + SeeSpotRange;
+            float loZ = MathF.Min(fromZ, toZ) - SeeSpotRange, hiZ = MathF.Max(fromZ, toZ) + SeeSpotRange;
+
+            int activeCount = 0;
+            for (int s = 0; s < spots.Length; s++)
+            {
+                var spot = spots[s];
+                float eyeZOfSpot = spot.Z + NavConstants.HumanEyeHeight;
+
+                if (spot.X < loX || spot.X > hiX || spot.Y < loY || spot.Y > hiY ||
+                    eyeZOfSpot < loZ || eyeZOfSpot > hiZ)
+                {
+                    continue;
+                }
+
+                active[activeCount++] = s;
+            }
 
             bool done = false;
 
@@ -206,15 +229,37 @@ namespace Meshwright
                     done = true;
                 }
 
+                // Everything reachable from this path has already been accounted for; the remaining
+                // steps can only re-confirm it.
+                if (activeCount == 0)
+                    break;
+
                 float eyeX = fromX + along * dirX;
                 float eyeY = fromY + along * dirY;
                 float eyeZ = fromZ + along * dirZ;
 
-                for (int s = 0; s < spots.Length; s++)
-                {
-                    if (marked[s])
-                        continue;
+                // Walked and compacted in one pass. A spot is recorded at most once per encounter, at
+                // the first point along the path where it is both in range and visible - so once seen
+                // it is dropped from the working set instead of being re-tested at every later step,
+                // which is what the flag array this replaced was doing. Survivors are written back in
+                // ascending order, so spots recorded at the same step keep the order they had before
+                // and the mesh is unchanged byte for byte.
+                //
+                // Worth being straight about the payoff: on gm_construct this measured 1.03x, near
+                // enough nothing. The scan it removes looked expensive - 159 million flag checks
+                // against 8.2 million rays - but a predictable byte load and branch costs about a
+                // cycle, so the whole scan was a low single-digit percentage and the rays were always
+                // the real cost.
+                //
+                // It is kept for how it scales rather than for that number. The old form was O(every
+                // cover spot on the map) per step; this is O(spots the path could reach), and
+                // gm_construct has only 125 cover spots to begin with. On a mesh with thousands the
+                // gap is the whole point - though that is reasoning, not something measured here.
+                int keep = 0;
 
+                for (int k = 0; k < activeCount; k++)
+                {
+                    int s = active[k];
                     var spot = spots[s];
 
                     float sx = spot.X - eyeX;
@@ -223,7 +268,10 @@ namespace Meshwright
 
                     float distanceSquared = sx * sx + sy * sy + sz * sz;
                     if (distanceSquared > SeeSpotRange * SeeSpotRange)
+                    {
+                        active[keep++] = s;
                         continue;
+                    }
 
                     local.Rays++;
 
@@ -234,6 +282,8 @@ namespace Meshwright
                             new BspFile.Vector3(spot.X, spot.Y, spot.Z + NavConstants.HalfHumanHeight),
                             BspVisibility.GenerationMask))
                     {
+                        // In range but not visible yet, so it stays a candidate for later steps.
+                        active[keep++] = s;
                         continue;
                     }
 
@@ -251,10 +301,11 @@ namespace Meshwright
                         }
                     }
 
-                    // Marked once seen, whether or not it was recorded, so a spot that stays in view
-                    // for the length of the path is considered once and not at every step.
-                    marked[s] = true;
+                    // Seen, whether or not it was recorded - so it is not written back, and drops out
+                    // of the working set for every remaining step.
                 }
+
+                activeCount = keep;
             }
 
             return encounter;
