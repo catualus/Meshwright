@@ -454,8 +454,13 @@ namespace NavPal
         /// what makes them affordable: the overwhelming majority of traced rays are stopped by world
         /// geometry and never reach the second stage at all.
         ///
-        /// Displacements are still traced as the brush they were built from, so terrain that bulges
-        /// above its base reads as clear. Static props are not modelled.
+        /// Displacements are traced last and against their real triangulated surface, so terrain that
+        /// bulges above the brush face it was built from stops a ray properly. They come last for the
+        /// same affordability reason as brush entities - by that point the ray has already survived
+        /// every piece of world and entity geometry in its path.
+        ///
+        /// Static props are not modelled: nothing here reads the static prop lump, so a prop that
+        /// blocks a doorway in game is invisible to this.
         /// </summary>
         public bool IsLineClear(BspFile.Vector3 a, BspFile.Vector3 b) => IsLineClear(a, b, MaskBlockLos);
 
@@ -496,9 +501,17 @@ namespace NavPal
             if (entityModels is null || entityModels.BlockingModelCount == 0)
                 return true;
 
-            Span<int> heads = stackalloc int[64];
-            Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[64];
-            int count = entityModels.Gather(a, b, heads, origins);
+            Span<int> heads = stackalloc int[GatherBuffer];
+            Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[GatherBuffer];
+            int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+
+            if (overflowed)
+            {
+                var all = GatherAll(a, b);
+                heads = all.Heads;
+                origins = all.Origins;
+                count = all.Count;
+            }
 
             for (int i = 0; i < count; i++)
             {
@@ -508,12 +521,36 @@ namespace NavPal
                     return false;
             }
 
-            return displacements is null || !displacements.Blocks(a, b);
+            return displacements is null || !displacements.Blocks(a, b, mask);
         }
 
         /// <summary>Moves a world point into a model's local space.</summary>
         private static BspFile.Vector3 Shift(BspFile.Vector3 p, BspFile.Vector3 origin)
             => new(p.X - origin.X, p.Y - origin.Y, p.Z - origin.Z);
+
+        /// <summary>
+        /// Stack-allocated capacity every trace gathers brush entities into before it has to fall back
+        /// to the heap. Comfortably above what an ordinary ray meets, so the slow path stays rare.
+        /// </summary>
+        private const int GatherBuffer = 128;
+
+        /// <summary>
+        /// Re-gathers into heap arrays sized to the whole model set, for the rays that overflow
+        /// <see cref="GatherBuffer"/>.
+        ///
+        /// Sized to <c>BlockingModelCount</c> rather than doubled-and-retried because that is the hard
+        /// ceiling - a segment cannot touch more models than exist - so this is guaranteed to be the
+        /// last attempt rather than the first of several.
+        /// </summary>
+        private (int[] Heads, BspFile.Vector3[] Origins, int Count) GatherAll(
+            BspFile.Vector3 a, BspFile.Vector3 b)
+        {
+            int capacity = entityModels!.BlockingModelCount;
+            var heads = new int[capacity];
+            var origins = new BspFile.Vector3[capacity];
+
+            return (heads, origins, entityModels.Gather(a, b, heads, origins, out _));
+        }
 
         /// <summary>
         /// The first surface a segment meets, with its outward normal.
@@ -562,9 +599,17 @@ namespace NavPal
 
             if (entityModels is not null)
             {
-                Span<int> heads = stackalloc int[64];
-                Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[64];
-                int count = entityModels.Gather(a, b, heads, origins);
+                Span<int> heads = stackalloc int[GatherBuffer];
+                Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[GatherBuffer];
+                int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+
+                if (overflowed)
+                {
+                    var all = GatherAll(a, b);
+                    heads = all.Heads;
+                    origins = all.Origins;
+                    count = all.Count;
+                }
 
                 for (int i = 0; i < count; i++)
                 {
@@ -585,7 +630,7 @@ namespace NavPal
             }
 
             if (displacements is not null &&
-                displacements.TryTraceSurface(a, b, out float dispFraction, out var dispNormal) &&
+                displacements.TryTraceSurface(a, b, mask, out float dispFraction, out var dispNormal) &&
                 (!found || dispFraction < best))
             {
                 best = dispFraction;
@@ -663,9 +708,17 @@ namespace NavPal
 
             if (entityModels is not null && entityModels.BlockingModelCount > 0)
             {
-                Span<int> heads = stackalloc int[64];
-                Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[64];
-                int count = entityModels.Gather(a, b, heads, origins);
+                Span<int> heads = stackalloc int[GatherBuffer];
+                Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[GatherBuffer];
+                int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+
+                if (overflowed)
+                {
+                    var all = GatherAll(a, b);
+                    heads = all.Heads;
+                    origins = all.Origins;
+                    count = all.Count;
+                }
 
                 for (int i = 0; i < count; i++)
                 {
@@ -692,7 +745,7 @@ namespace NavPal
             // as a general clearance test - which is exactly why every caller that needed one had to
             // fall back to an infinitely thin line and live with what a line misses.
             if (displacements is not null &&
-                displacements.TryTraceHull(a, b, mins, maxs,
+                displacements.TryTraceHull(a, b, mins, maxs, mask,
                     out float dispFraction, out var dispNormal, out bool dispSolid))
             {
                 solid |= dispSolid;
@@ -1196,9 +1249,17 @@ namespace NavPal
             if (entityModels is null)
                 return true;
 
-            Span<int> heads = stackalloc int[64];
-            Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[64];
-            int count = entityModels.Gather(a, b, heads, origins);
+            Span<int> heads = stackalloc int[GatherBuffer];
+            Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[GatherBuffer];
+            int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+
+            if (overflowed)
+            {
+                var all = GatherAll(a, b);
+                heads = all.Heads;
+                origins = all.Origins;
+                count = all.Count;
+            }
 
             for (int i = 0; i < count; i++)
             {
@@ -1211,7 +1272,9 @@ namespace NavPal
                 return false;
             }
 
-            if (displacements is not null && displacements.Blocks(a, b))
+            // MaskBlockLos explicitly: this diagnostic reports what stops a sight line, and the world
+            // walk above (BlockedExplain) is hardcoded to that mask too.
+            if (displacements is not null && displacements.Blocks(a, b, MaskBlockLos))
             {
                 blockingHeadNode = -2; // displacement
                 return false;

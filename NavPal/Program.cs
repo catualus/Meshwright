@@ -1074,9 +1074,12 @@ namespace NavPal
 
             Console.WriteLine($"      stairs: marked {stairs.Marked:N0}, cleared {stairs.Cleared:N0}");
 
-            var elevators = ElevatorConnector.Build(nav, bsp);
+            var elevators = ElevatorConnector.Build(nav, bsp, vis);
             Console.WriteLine($"      elevators: {elevators.Platforms:N0} platforms, " +
-                              $"{elevators.Connections:N0} connections at {elevators.Stops:N0} stops");
+                              $"{elevators.Connections:N0} connections at {elevators.Stops:N0} stops" +
+                              (elevators.Refused > 0
+                                  ? $"  ({elevators.Refused:N0} landings refused as blocked)"
+                                  : ""));
             foreach (string note in elevators.Notes.Take(6))
                 Console.WriteLine($"        note: {note}");
 

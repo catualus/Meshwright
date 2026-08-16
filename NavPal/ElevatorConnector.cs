@@ -16,6 +16,16 @@ namespace NavPal
     /// set of heights its top surface rests at, and at each of those the areas standing on the platform
     /// are linked to the areas on solid ground beside it. That covers vertical lifts, which is what
     /// people mean by an elevator, and declines to guess about anything else.
+    ///
+    /// Every link is confirmed against the world before it is made, which this pass used not to do at
+    /// all - it was the one place in the pipeline that added a connection on the strength of a spatial
+    /// lookup alone. A landing was accepted purely because <see cref="FindLandings"/> probed a point
+    /// <see cref="LandingReach"/> out from a platform edge and the index reported an area there at
+    /// roughly the right height. Nothing asked what was in between. A lift running up the outside of a
+    /// shaft has rooms on the far side of the shaft wall well within 40 units of its edge, and every one
+    /// of them satisfied that test, so the platform was wired straight through the brickwork - the same
+    /// failure <see cref="LadderBuilder.IsReachable"/> exists to prevent, and which was observed in game
+    /// for ladders before it did.
     /// </summary>
     public static class ElevatorConnector
     {
@@ -33,12 +43,27 @@ namespace NavPal
             public int Platforms;
             public int Stops;
             public int Connections;
+
+            /// <summary>
+            /// Rider/landing pairs that sat at the right height beside each other and still had
+            /// something solid between them. Counted rather than silently dropped because a platform
+            /// refusing every landing it found is the signature of a lift whose stops are being resolved
+            /// at the wrong heights, and a bare "0 connections" cannot tell that apart from a lift with
+            /// no mesh beside it at all.
+            /// </summary>
+            public int Refused;
+
             public readonly List<string> Notes = [];
         }
 
         private readonly record struct Platform(BspFile.Vector3 Mins, BspFile.Vector3 Maxs, float[] Stops, string Class);
 
-        public static Result Build(NavFile nav, BspFile bsp)
+        /// <summary>
+        /// Connects every platform's riders to its landings. <paramref name="vis"/> is optional only so
+        /// callers with no traced geometry to hand still compile; without it no link can be checked and
+        /// every one is taken on trust, which is what this pass did unconditionally before.
+        /// </summary>
+        public static Result Build(NavFile nav, BspFile bsp, BspVisibility? vis = null)
         {
             var result = new Result();
             var platforms = FindPlatforms(bsp);
@@ -87,6 +112,12 @@ namespace NavPal
                             if (rider == landing)
                                 continue;
 
+                            if (!CanCross(vis, nav.Areas[rider], nav.Areas[landing]))
+                            {
+                                result.Refused++;
+                                continue;
+                            }
+
                             result.Connections += LinkBothWays(nav, rider, landing);
                         }
                     }
@@ -120,6 +151,41 @@ namespace NavPal
             }
 
             return found;
+        }
+
+        /// <summary>
+        /// Whether a rider could actually step between the platform and a landing beside it.
+        ///
+        /// <see cref="Traversability.CanStep"/> rather than a pair of lines, because it is already this
+        /// codebase's settled answer to "can a body get from here to there": it sweeps Valve's own
+        /// <c>NavTraceMins</c>/<c>NavTraceMaxs</c> box flat at half a step above the higher surface, so
+        /// the whole 0..55 span is proven clear along the crossing instead of the two heights a pair of
+        /// lines would happen to sample. <see cref="CornerPatcher"/> validates its synthetic connections
+        /// the same way, for the same reason.
+        ///
+        /// The two endpoints are each footprint's nearest point to the other's centre, which for a lift
+        /// is the platform edge and the facing edge of the landing - where a rider crosses, rather than
+        /// the area centres, which on a large landing can sit most of a room away from the shaft.
+        /// </summary>
+        private static bool CanCross(BspVisibility? vis, NavArea rider, NavArea landing)
+        {
+            if (vis is null)
+                return true;
+
+            var a = NavGeometry.GetBounds(rider);
+            var b = NavGeometry.GetBounds(landing);
+
+            float acx = (a.MinX + a.MaxX) / 2f, acy = (a.MinY + a.MaxY) / 2f;
+            float bcx = (b.MinX + b.MaxX) / 2f, bcy = (b.MinY + b.MaxY) / 2f;
+
+            float ax = Math.Clamp(bcx, a.MinX, a.MaxX);
+            float ay = Math.Clamp(bcy, a.MinY, a.MaxY);
+            float bx = Math.Clamp(acx, b.MinX, b.MaxX);
+            float by = Math.Clamp(acy, b.MinY, b.MaxY);
+
+            return Traversability.CanStep(vis,
+                new BspFile.Vector3(ax, ay, NavGeometry.SurfaceZ(rider, ax, ay)),
+                new BspFile.Vector3(bx, by, NavGeometry.SurfaceZ(landing, bx, by)));
         }
 
         /// <summary>

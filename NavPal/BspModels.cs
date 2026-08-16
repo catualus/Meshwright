@@ -293,14 +293,33 @@ namespace NavPal
             new(MathF.Max(a.X, b.X), MathF.Max(a.Y, b.Y), MathF.Max(a.Z, b.Z));
 
         /// <summary>
-        /// Head nodes of every model whose bounds the segment could touch, appended to
-        /// <paramref name="into"/>. Returns how many were added.
+        /// Head nodes of every model whose bounds the segment could touch, written to
+        /// <paramref name="heads"/> and <paramref name="origins"/>. Returns how many were written.
+        ///
+        /// <paramref name="truncated"/> is the half of this that was missing, and it mattered. The
+        /// output buffer is fixed size, and on overflow this simply stopped gathering and returned what
+        /// it had. A ray crossing more brush entities than the caller's buffer held therefore never saw
+        /// the rest of them, and every trace built on this - line, surface, hull - went on to report the
+        /// ray clear of geometry it had never been tested against. That is a fail-open in a tracer whose
+        /// every other guard deliberately fails closed, and it is reachable: a long sight ray across a
+        /// map with hundreds of doors and breakables can overlap a great many of their bounding boxes.
+        ///
+        /// Reporting it rather than silently sizing the buffer up lets the caller keep a small
+        /// stack-allocated fast path and pay for a full-sized one only on the rays that need it.
         /// </summary>
-        public int Gather(BspFile.Vector3 a, BspFile.Vector3 b, Span<int> heads, Span<BspFile.Vector3> origins)
+        public int Gather(BspFile.Vector3 a, BspFile.Vector3 b, Span<int> heads,
+            Span<BspFile.Vector3> origins, out bool truncated)
         {
+            truncated = false;
+
             if (bvh.Length == 0)
                 return 0;
 
+            // Depth-first over a median-split tree, so the stack only ever holds one pending sibling per
+            // level: 64 slots covers a tree of 2^63 models and cannot overflow for any real map. The
+            // guard below is kept anyway, and now reports rather than dropping in silence, because a
+            // bound that holds by construction is exactly the kind that stops holding unnoticed if the
+            // build strategy ever changes.
             Span<int> stack = stackalloc int[64];
             int top = 0;
             stack[top++] = 0;
@@ -321,14 +340,28 @@ namespace NavPal
                         stack[top++] = index + 1;   // left
                         stack[top++] = node.Left;   // right
                     }
+                    else
+                    {
+                        truncated = true;
+                    }
+
                     continue;
                 }
 
-                for (int i = node.First; i < node.First + node.Count && found < heads.Length; i++)
+                for (int i = node.First; i < node.First + node.Count; i++)
                 {
                     var model = models[i];
                     if (!SegmentHitsBox(a, b, model.Mins, model.Maxs))
                         continue;
+
+                    // Flagged only once a model has actually been dropped, not merely because the
+                    // buffer happens to be full - a ray whose last overlapping model exactly fills it
+                    // has lost nothing and must not send the caller down the slow path.
+                    if (found >= heads.Length || found >= origins.Length)
+                    {
+                        truncated = true;
+                        break;
+                    }
 
                     heads[found] = model.HeadNode;
                     origins[found] = model.Origin;

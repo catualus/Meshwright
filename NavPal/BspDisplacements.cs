@@ -31,6 +31,24 @@ namespace NavPal
         private BvhNode[] bvh = [];
         private int[] order = [];
 
+        /// <summary>Contents of the displacement each triangle came from, one entry per triangle.</summary>
+        private int[] contents = [];
+
+        /// <summary>
+        /// Contents worth triangulating at all: the union of every mask a caller might later trace
+        /// against, exactly as <c>BspVisibility.ReadLeafBrushes</c> keeps every brush either trace
+        /// purpose could care about and filters at the point of use.
+        ///
+        /// Storing the union and filtering per query is the whole point. This used to filter by
+        /// <see cref="BspVisibility.MaskBlockLos"/> once, here, and then answer every later query
+        /// regardless of the mask it was asked about - so a displacement was either solid to everything
+        /// or invisible to everything. The brush path has always re-checked the caller's mask at trace
+        /// time; terrain silently did not, which meant the two geometry classes disagreed about what a
+        /// mask means. In practice displacements carry CONTENTS_SOLID and every mask here includes it,
+        /// so this corrects a real inconsistency rather than a symptom anyone has reported.
+        /// </summary>
+        private const int TracedContents = BspVisibility.MaskBlockLos | BspVisibility.GenerationMask;
+
         public int TriangleCount => vertices.Length / 3;
         public int DisplacementCount { get; private set; }
 
@@ -182,10 +200,11 @@ namespace NavPal
             int[] surfEdges, BspFile.Vector3[] worldVerts, DispVert[] dispVerts)
         {
             var tris = new List<BspFile.Vector3>();
+            var triContents = new List<int>();
 
             foreach (var info in infos)
             {
-                if ((info.Contents & BspVisibility.MaskBlockLos) == 0)
+                if ((info.Contents & TracedContents) == 0)
                     continue;
 
                 if ((uint)info.MapFace >= (uint)faces.Length)
@@ -237,11 +256,16 @@ namespace NavPal
 
                         tris.Add(a); tris.Add(b); tris.Add(c);
                         tris.Add(a); tris.Add(c); tris.Add(d);
+
+                        // One entry per triangle, not per vertex - the traces index by triangle.
+                        triContents.Add(info.Contents);
+                        triContents.Add(info.Contents);
                     }
                 }
             }
 
             vertices = tris.ToArray();
+            contents = triContents.ToArray();
             BuildBvh();
         }
 
@@ -383,8 +407,10 @@ namespace NavPal
             return sum / 3f;
         }
 
-        /// <summary>Whether the segment crosses any displacement surface.</summary>
-        public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b)
+        /// <summary>
+        /// Whether the segment crosses any displacement surface matching <paramref name="mask"/>.
+        /// </summary>
+        public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b, int mask)
         {
             if (bvh.Length == 0)
                 return false;
@@ -413,6 +439,9 @@ namespace NavPal
 
                 for (int i = node.First; i < node.First + node.Count; i++)
                 {
+                    if ((contents[order[i]] & mask) == 0)
+                        continue;
+
                     int t = order[i] * 3;
                     if (SegmentHitsTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2]))
                         return true;
@@ -429,7 +458,7 @@ namespace NavPal
         /// normal is the face normal of whichever triangle was hit first. That is the true surface
         /// orientation, which is what the walkability and stair tests need.
         /// </summary>
-        public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b,
+        public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
             out float fraction, out BspFile.Vector3 normal)
         {
             fraction = 1f;
@@ -464,6 +493,9 @@ namespace NavPal
 
                 for (int i = node.First; i < node.First + node.Count; i++)
                 {
+                    if ((contents[order[i]] & mask) == 0)
+                        continue;
+
                     int t = order[i] * 3;
                     if (!TryHitTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2], out float hit))
                         continue;
@@ -513,7 +545,7 @@ namespace NavPal
         /// by.
         /// </summary>
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
-            BspFile.Vector3 mins, BspFile.Vector3 maxs,
+            BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
             out float fraction, out BspFile.Vector3 normal, out bool startSolid)
         {
             fraction = 1f;
@@ -563,6 +595,9 @@ namespace NavPal
 
                 for (int i = node.First; i < node.First + node.Count; i++)
                 {
+                    if ((contents[order[i]] & mask) == 0)
+                        continue;
+
                     int t = order[i] * 3;
 
                     if (!SweepBoxAgainstTriangle(from, to, extent,
