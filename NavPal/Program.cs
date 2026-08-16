@@ -1843,17 +1843,52 @@ namespace NavPal
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            using var bar = new ConsoleProgress(new NavProgress.Step("Finding hiding spots", 1.0));
+            bool snipers = !args.Contains("-nosnipers", StringComparer.OrdinalIgnoreCase);
+
+            using var bar = new ConsoleProgress(
+                new NavProgress.Step("Finding hiding spots", snipers ? 0.25 : 1.0),
+                new NavProgress.Step("Grading sniper spots", snipers ? 0.75 : 0.0));
+
             bar.Progress.Enter("Finding hiding spots");
             var result = HidingSpotFinder.Find(nav, vis, bar.Progress);
+
+            // Grading needs the spots to exist, so it cannot be folded into the pass above. It is also
+            // much the more expensive of the two - every spot is traced against the whole mesh - which
+            // is why it carries the bulk of the progress weight and can be turned off.
+            SniperSpotClassifier.Result? graded = null;
+            if (snipers)
+            {
+                bar.Progress.Enter("Grading sniper spots");
+                graded = SniperSpotClassifier.Classify(nav, vis, bar.Progress);
+            }
+
             bar.Progress.Finish();
             bar.Dispose();
 
             sw.Stop();
 
             Console.WriteLine($"      {result.Spots:N0} hiding spots across {result.AreasWithSpots:N0} areas " +
-                              $"({result.InCover:N0} in cover, {result.Exposed:N0} exposed) " +
-                              $"in {sw.ElapsedMilliseconds:N0} ms");
+                              $"({result.InCover:N0} in cover, {result.Exposed:N0} exposed)" +
+                              (result.Collisions > 0
+                                  ? $", {result.Collisions:N0} corners dropped as duplicates"
+                                  : ""));
+
+            if (graded is not null)
+            {
+                Console.WriteLine($"      snipers: {graded.Ideal:N0} ideal, {graded.Good:N0} good " +
+                                  $"({graded.Rays:N0} rays; areas skipped: " +
+                                  $"{graded.AreasCulledByRange:N0} out of range, " +
+                                  $"{graded.AreasCulledByPvs:N0} not in PVS, " +
+                                  $"{graded.AreasTraced:N0} traced)");
+
+                if (graded.EyeInSolid > 0)
+                {
+                    Console.WriteLine($"      note: {graded.EyeInSolid:N0} spots had their eye inside " +
+                                      "geometry and were left ungraded");
+                }
+            }
+
+            Console.WriteLine($"      done in {sw.ElapsedMilliseconds:N0} ms");
 
             nav.Save(outPath);
             Console.WriteLine($"out   {outPath}  ({new FileInfo(outPath).Length:N0} bytes)");

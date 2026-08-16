@@ -74,6 +74,36 @@ namespace NavPal
         public const float HumanHeight = 71f;
 
         /// <summary>
+        /// Half <see cref="HumanHeight"/>, and a constant in its own right in nav.h rather than a
+        /// derived one - 35.5, which is what <c>GetGroundHeight</c> and the hiding-spot cover test both
+        /// measure from.
+        /// </summary>
+        public const float HalfHumanHeight = 35.5f;
+
+        /// <summary>Eye height standing. Where a bot's sight actually starts from.</summary>
+        public const float HumanEyeHeight = 62f;
+
+        /// <summary>
+        /// Eye height crouched. Not interchangeable with <see cref="HumanCrouchHeight"/>, which is the
+        /// body's height rather than the eye's - the two sit next to each other in nav.h and this
+        /// codebase has already confused that pair once.
+        /// </summary>
+        public const float HumanCrouchEyeHeight = 37f;
+
+        /// <summary>
+        /// How far up a climbable surface may be scaled. Another of nav.h's per-game pairs: 58 under
+        /// <c>CSTRIKE_DLL</c> and 200 elsewhere, and unlike the others the two are wildly different
+        /// rather than merely a few units apart.
+        /// </summary>
+        public const float ClimbUpHeight = 200f;
+
+        /// <summary>
+        /// Drop past which ground is a cliff rather than a step down. Unconditional in nav.h. Nothing
+        /// here sets <see cref="NavAttributes.Cliff"/> yet, so this is currently unused.
+        /// </summary>
+        public const float CliffHeight = 300f;
+
+        /// <summary>
         /// Valve's <c>HumanCrouchHeight</c>. Was 37, which is their <c>HumanCrouchEyeHeight</c> - a
         /// different constant that happens to sit next to it in nav.h.
         /// </summary>
