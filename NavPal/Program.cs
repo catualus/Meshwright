@@ -1844,10 +1844,12 @@ namespace NavPal
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
             bool snipers = !args.Contains("-nosnipers", StringComparer.OrdinalIgnoreCase);
+            bool encounters = !args.Contains("-noencounters", StringComparer.OrdinalIgnoreCase);
 
             using var bar = new ConsoleProgress(
-                new NavProgress.Step("Finding hiding spots", snipers ? 0.25 : 1.0),
-                new NavProgress.Step("Grading sniper spots", snipers ? 0.75 : 0.0));
+                new NavProgress.Step("Finding hiding spots", 0.1),
+                new NavProgress.Step("Grading sniper spots", snipers ? 0.5 : 0.0),
+                new NavProgress.Step("Finding encounter spots", encounters ? 0.4 : 0.0));
 
             bar.Progress.Enter("Finding hiding spots");
             var result = HidingSpotFinder.Find(nav, vis, bar.Progress);
@@ -1860,6 +1862,15 @@ namespace NavPal
             {
                 bar.Progress.Enter("Grading sniper spots");
                 graded = SniperSpotClassifier.Classify(nav, vis, bar.Progress);
+            }
+
+            // Last of the three: an encounter is a list of the *covered* spots seen along a path, so it
+            // needs both the spots and their cover flags to exist already.
+            EncounterSpotBuilder.Result? met = null;
+            if (encounters)
+            {
+                bar.Progress.Enter("Finding encounter spots");
+                met = EncounterSpotBuilder.Build(nav, vis, bar.Progress);
             }
 
             bar.Progress.Finish();
@@ -1886,6 +1897,13 @@ namespace NavPal
                     Console.WriteLine($"      note: {graded.EyeInSolid:N0} spots had their eye inside " +
                                       "geometry and were left ungraded");
                 }
+            }
+
+            if (met is not null)
+            {
+                Console.WriteLine($"      encounters: {met.Encounters:N0} across " +
+                                  $"{met.AreasWithEncounters:N0} areas, " +
+                                  $"{met.SpotOrders:N0} spot sightings ({met.Rays:N0} rays)");
             }
 
             Console.WriteLine($"      done in {sw.ElapsedMilliseconds:N0} ms");
@@ -1989,9 +2007,19 @@ namespace NavPal
                 Console.WriteLine($"  {s}");
 
             long encounters = nav.Areas.Sum(a => (long)a.Encounters.Count);
+
+            // The sightings matter more than the encounter count for judging whether this pass is
+            // right. The count of encounters is pure graph arithmetic - ordered pairs of an area's
+            // connections - so two implementations agree on it while disagreeing completely about what
+            // is visible along each path. The sightings are the part that took a trace to decide.
+            long sightings = nav.Areas.Sum(a => a.Encounters.Sum(e => (long)e.Spots.Count));
+            int withSpots = nav.Areas.Sum(a => a.Encounters.Count(e => e.Spots.Count > 0));
+
             Console.WriteLine();
             Console.WriteLine($"encounters       {encounters:N0} across " +
                               $"{nav.Areas.Count(a => a.Encounters.Count > 0):N0} areas");
+            Console.WriteLine($"  spot sightings {sightings:N0} over {withSpots:N0} encounters " +
+                              $"({(encounters == 0 ? 0 : 100.0 * withSpots / encounters):F1}% carry any)");
 
             return 0;
 
