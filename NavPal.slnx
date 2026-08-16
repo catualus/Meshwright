@@ -1,5 +1,0 @@
-<Solution>
-  <Project Path="NavPal.Tests/NavPal.Tests.csproj" />
-  <Project Path="NavPal/NavPal.csproj" />
-  <Project Path="NavPalCli/NavPalCli.csproj" />
-</Solution>
