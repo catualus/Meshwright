@@ -270,9 +270,15 @@ namespace Meshwright
                 return verdict;
             }
 
-            if (!TryProbe(vis, start.X, start.Y, start.Z, out float priorHeight, out _))
+            if (!TryProbe(vis, start.X, start.Y, start.Z, out float priorHeight, out _, out bool startOnTerrain))
             {
                 reason = "start probe found no floor";
+                return StairTest.No;
+            }
+
+            if (startOnTerrain)
+            {
+                reason = "start probe landed on displacement terrain";
                 return StairTest.No;
             }
 
@@ -284,9 +290,27 @@ namespace Meshwright
                 float y = start.Y + t * dy;
                 float z = start.Z + t * (end.Z - start.Z);
 
-                if (!TryProbe(vis, x, y, z, out float height, out var normal))
+                if (!TryProbe(vis, x, y, z, out float height, out var normal, out bool onTerrain))
                 {
                     reason = $"no floor at t={t:F2}";
+                    return StairTest.No;
+                }
+
+                // Terrain is never a staircase, whatever its profile. Valve rejects on
+                // trace.IsDispSurface() for the same reason: a displacement sculpted into ledges
+                // produces exactly the run of flat treads and short risers this test looks for, and no
+                // amount of measuring the profile can tell it from masonry - only knowing what was hit
+                // can.
+                //
+                // Measured neutral on both maps there is an engine mesh to check against: gm_construct
+                // and rp_downtown_meowy give identical verdicts with and without it, because ordinary
+                // rolling terrain is already rejected by the flatness gate above - a displacement is
+                // rarely level to within 0.97. It is kept because the case it guards is the one that
+                // gate cannot catch, terrain deliberately sculpted into level terraces, and because the
+                // answer costs nothing: the trace already knows what it hit.
+                if (onTerrain)
+                {
+                    reason = $"displacement terrain at t={t:F2}, not stairs";
                     return StairTest.No;
                 }
 
@@ -331,10 +355,11 @@ namespace Meshwright
         /// grating or a gap a hair narrower than itself where a line drops through it.
         /// </summary>
         private static bool TryProbe(BspVisibility vis, float x, float y, float z,
-            out float height, out BspFile.Vector3 normal)
+            out float height, out BspFile.Vector3 normal, out bool onDisplacement)
         {
             height = 0f;
             normal = new BspFile.Vector3(0, 0, 1);
+            onDisplacement = false;
 
             var from = new BspFile.Vector3(x, y, z + ProbeReach);
             var to = new BspFile.Vector3(x, y, z - ProbeReach);
@@ -343,7 +368,8 @@ namespace Meshwright
             if (vis.IsPointSolid(x, y, z + ProbeReach, BspVisibility.GenerationMask))
                 return false;
 
-            if (!vis.TryTraceSurface(from, to, BspVisibility.GenerationMask, out var point, out var hitNormal))
+            if (!vis.TryTraceSurface(from, to, BspVisibility.GenerationMask, out var point, out var hitNormal,
+                    out onDisplacement))
                 return false;
 
             height = point.Z;

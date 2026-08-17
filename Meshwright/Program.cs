@@ -57,6 +57,8 @@ namespace Meshwright
                     "spots" => Spots(args),
                     "build-spots" => BuildSpots(args),
                     "bench" => Bench(args),
+                    "disp" => Displacements(args),
+                    "props" => StaticPropReport(args),
                     "hull-check" => HullCheck(args),
                     "area" => AreaInfo(args),
                     "why-not-connected" => WhyNotConnected(args),
@@ -770,6 +772,12 @@ namespace Meshwright
             // Depends only on the file itself, so it need not wait for the lump parse at all.
             var displacements = System.Threading.Tasks.Task.Run(() => BspDisplacements.Load(path));
 
+            // Likewise, and much the slower of the two: props read the prop lump, then hunt each model
+            // down through the map's pakfile, the loose game directories and the VPKs, and parse a
+            // collision hull out of every one. That is file system work rather than CPU work, so it
+            // overlaps the rest better than it would if it were competing for cores.
+            var props = System.Threading.Tasks.Task.Run(() => StaticProps.Load(path));
+
             var bsp = BspFile.Load(path);
 
             // Both need `bsp` and neither needs the other. Visibility is much the heavier of the two -
@@ -779,6 +787,7 @@ namespace Meshwright
 
             vis.AttachModels(models.Result);
             vis.AttachDisplacements(displacements.Result);
+            vis.AttachStaticProps(props.Result);
 
             return (bsp, vis);
         }
@@ -1850,6 +1859,502 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// Reports what each displacement reconstructed to, so a wrong one can be identified.
+        ///
+        /// Terrain that comes out wrong does not announce itself - it produces a surface in roughly the
+        /// right place with the wrong shape, and every consumer downstream treats it as ground. Chasing
+        /// that by reasoning about lump semantics has a poor record; listing the surfaces and checking
+        /// their numbers does not.
+        ///
+        /// With a point, only the displacements covering it are listed, which is how a specific
+        /// complaint about a specific spot gets turned into a specific surface to examine.
+        /// </summary>
+        /// <summary>
+        /// Reports the map's static props: how many there are, which models they use, and how much of
+        /// the collision Meshwright could actually find. The last part is the one that matters - a prop
+        /// whose model cannot be located is a prop that is still invisible to every trace.
+        /// </summary>
+        private static int StaticPropReport(string[] args)
+        {
+            if (args.Length < 2)
+                throw new ArgumentException("expected: props <file.bsp> [-models]");
+
+            string bspPath = args[1];
+            if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such file: {bspPath}");
+
+            var lump = StaticPropLump.Load(bspPath);
+
+            Console.WriteLine($"bsp   {Path.GetFileName(bspPath)}");
+            Console.WriteLine($"      static prop lump version {lump.Version}, {lump.RecordCount:N0} records of {lump.RecordStride} bytes");
+            Console.WriteLine($"      {lump.Props.Count:N0} solid props over {lump.ModelNames.Length:N0} models" +
+                              $"; {lump.NonSolid:N0} skipped as SOLID_NONE");
+            var tilted = lump.Props.Where(p => MathF.Abs(p.Pitch) > 1f || MathF.Abs(p.Roll) > 1f).ToList();
+            Console.WriteLine($"      {tilted.Count:N0} props tilted (non-zero pitch or roll)");
+            foreach (var t in tilted.Take(6))
+                Console.WriteLine($"        pitch {t.Pitch,6:F0} yaw {t.Yaw,6:F0} roll {t.Roll,6:F0}  " +
+                                  $"at ({t.Origin.X:F0} {t.Origin.Y:F0} {t.Origin.Z:F0})  {lump.ModelNames[t.ModelIndex]}");
+
+            Console.WriteLine("      solidity: " + string.Join("  ",
+                lump.SolidHistogram.OrderBy(e => e.Key).Select(e => $"{e.Key}={e.Value:N0}")));
+            var built = StaticProps.Load(bspPath);
+
+            Console.WriteLine($"      {built.ModelsWithHull:N0} of {built.ModelsNamed:N0} models yielded a hull; " +
+                              $"{built.PropsBuilt:N0} props built, {built.PropsFromBoundingBox:N0} from a bounding box, " +
+                              $"{built.PropsMissingModel:N0} with nothing");
+            Console.WriteLine($"      {built.TriangleCount:N0} collision triangles");
+            if (built.ModelsWithoutHull.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"no collision hull ({built.ModelsWithoutHull.Count}), skipped rather than boxed:");
+                foreach (var m in built.ModelsWithoutHull.Take(14)) Console.WriteLine($"  {m}");
+            }
+
+            if (built.MissingModels.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("could not be found:");
+                foreach (var m in built.MissingModels.Take(10)) Console.WriteLine($"  {m}");
+            }
+
+            var byModel = new Dictionary<int, int>();
+            foreach (var p in lump.Props)
+                byModel[p.ModelIndex] = byModel.GetValueOrDefault(p.ModelIndex) + 1;
+
+            Console.WriteLine();
+            Console.WriteLine("most placed:");
+
+            foreach (var (index, n) in byModel.OrderByDescending(e => e.Value).Take(12))
+                Console.WriteLine($"  {n,5}x  {lump.ModelNames[index]}");
+
+            // One model's hull against the bounds its own .mdl declares. The two describe the same shape
+            // by different routes, so agreement is a check on the .phy parse that needs no game running:
+            // a hull that does not fit its model's stated box is being read wrong.
+            for (int i = 2; i + 1 < args.Length; i++)
+            {
+                if (args[i] != "-model") continue;
+
+                using var content = GameFiles.Open(bspPath);
+                string model = args[i + 1].Replace('\\', '/');
+
+                Console.WriteLine();
+
+                if (content.TryRead(Path.ChangeExtension(model, ".phy"), out var phyBytes))
+                {
+                    var phy = PhyFile.Parse(phyBytes);
+
+                    Console.WriteLine($"  phy   {phyBytes.Length:N0} bytes, {phy.SolidsParsed} of " +
+                                      $"{phy.SolidsDeclared} solids, {phy.LedgeCount:N0} hulls, " +
+                                      $"{phy.TriangleCount:N0} triangles");
+
+                    if (phy.Triangles.Length > 0) Console.WriteLine("  phy bounds " + Bounds(phy.Triangles));
+                }
+                else Console.WriteLine("  phy   not found");
+
+                if (content.TryRead(model, out var mdlBytes))
+                {
+                    var studio = StudioModel.Parse(mdlBytes);
+                    Console.WriteLine($"  mdl   version {studio.Version}, valid {studio.Valid}, static {studio.StaticProp}");
+                    Console.WriteLine($"  mdl bounds min {Fmt(studio.HullMin)}  max {Fmt(studio.HullMax)}");
+                }
+                else Console.WriteLine("  mdl   not found");
+
+                return 0;
+            }
+
+            // Triangle centroids with their normals, spread over the whole soup, as a Lua table. Feeding
+            // these to a running game and probing along each normal is the only way to know the hulls
+            // are where the engine puts them - the .phy parse, the axis conversion and the per-prop
+            // rotation are three chances to be plausibly wrong, and all three produce prop-shaped
+            // geometry in the wrong place rather than an error.
+            for (int i = 2; i + 1 < args.Length; i++)
+            {
+                if (args[i] != "-sample") continue;
+
+                int want = int.Parse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture);
+                var tri = built.Triangles;
+                int step = Math.Max(3, tri.Length / Math.Max(1, want) / 3 * 3);
+
+                var picked = new List<string>();
+
+                for (int t = 0; t + 2 < tri.Length; t += step)
+                {
+                    float cx = (tri[t].X + tri[t + 1].X + tri[t + 2].X) / 3f;
+                    float cy = (tri[t].Y + tri[t + 1].Y + tri[t + 2].Y) / 3f;
+                    float cz = (tri[t].Z + tri[t + 1].Z + tri[t + 2].Z) / 3f;
+
+                    float ux = tri[t + 1].X - tri[t].X, uy = tri[t + 1].Y - tri[t].Y, uz = tri[t + 1].Z - tri[t].Z;
+                    float vx = tri[t + 2].X - tri[t].X, vy = tri[t + 2].Y - tri[t].Y, vz = tri[t + 2].Z - tri[t].Z;
+
+                    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                    float len = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+
+                    if (len < 1e-4f) continue;
+
+                    picked.Add($"{{{cx:F1},{cy:F1},{cz:F1},{nx / len:F3},{ny / len:F3},{nz / len:F3}}}");
+                }
+
+                Console.WriteLine("local pts={" + string.Join(",", picked) + "}");
+                return 0;
+            }
+
+            // Every prop surface in one vertical column, brute-forced over the triangle soup. Slow and
+            // deliberately independent of the tracer, so it answers "is the geometry in the right place"
+            // without depending on the thing being tested.
+            for (int i = 2; i + 2 < args.Length; i++)
+            {
+                if (args[i] != "-column") continue;
+
+                var c = System.Globalization.CultureInfo.InvariantCulture;
+                float qx = float.Parse(args[i + 1], c), qy = float.Parse(args[i + 2], c);
+
+                var hits = new List<(float Z, float NormalZ)>();
+                var tri = built.Triangles;
+
+                for (int t = 0; t + 2 < tri.Length; t += 3)
+                {
+                    if (!DropOnto(tri[t], tri[t + 1], tri[t + 2], qx, qy, out float z, out float nz)) continue;
+                    hits.Add((z, nz));
+                }
+
+                hits.Sort((a, b) => b.Z.CompareTo(a.Z));
+
+                Console.WriteLine();
+                Console.WriteLine($"prop surfaces in column ({qx:F0} {qy:F0}): {hits.Count}");
+
+                foreach (var (z, nz) in hits.Take(12))
+                    Console.WriteLine($"  z {z,10:F1}   normal z {nz,6:F2}   {(nz > 0.7f ? "walkable" : "")}");
+
+                return 0;
+            }
+
+            // Which prop is standing at a spot. The point of the command: a floating area is a position,
+            // and turning that into "this model, this far away" is what says whether the prop lump was
+            // read correctly and whether that prop is why.
+            for (int i = 2; i + 3 < args.Length; i++)
+            {
+                if (args[i] != "-near") continue;
+
+                var c = System.Globalization.CultureInfo.InvariantCulture;
+                float qx = float.Parse(args[i + 1], c), qy = float.Parse(args[i + 2], c), qz = float.Parse(args[i + 3], c);
+
+                var ranked = lump.Props
+                    .Select(p => (Prop: p, D: MathF.Sqrt(
+                        (p.Origin.X - qx) * (p.Origin.X - qx) +
+                        (p.Origin.Y - qy) * (p.Origin.Y - qy) +
+                        (p.Origin.Z - qz) * (p.Origin.Z - qz))))
+                    .OrderBy(e => e.D)
+                    .Take(5);
+
+                Console.WriteLine();
+                Console.WriteLine($"nearest solid props to ({qx:F0} {qy:F0} {qz:F0}):");
+
+                foreach (var (p, d) in ranked)
+                    Console.WriteLine($"  {d,7:F0}u  solid {p.Solid}  yaw {p.Yaw,6:F0}  " +
+                                      $"at ({p.Origin.X:F0} {p.Origin.Y:F0} {p.Origin.Z:F0})  {lump.ModelNames[p.ModelIndex]}");
+
+                return 0;
+            }
+
+            if (Array.IndexOf(args, "-models") >= 0)
+            {
+                Console.WriteLine();
+                foreach (var name in lump.ModelNames.OrderBy(n => n))
+                    Console.WriteLine($"  {name}");
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Where a vertical line through (x, y) crosses a triangle, if it does. Barycentric rather than
+        /// a ray cast, because the direction is fixed and the plan-view test is the whole question.
+        /// </summary>
+        private static bool DropOnto(BspFile.Vector3 a, BspFile.Vector3 b, BspFile.Vector3 c,
+            float x, float y, out float z, out float normalZ)
+        {
+            z = 0; normalZ = 0;
+
+            float d = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+            if (MathF.Abs(d) < 1e-6f) return false;
+
+            float u = ((b.Y - c.Y) * (x - c.X) + (c.X - b.X) * (y - c.Y)) / d;
+            float v = ((c.Y - a.Y) * (x - c.X) + (a.X - c.X) * (y - c.Y)) / d;
+            float w = 1f - u - v;
+
+            if (u < 0 || v < 0 || w < 0) return false;
+
+            z = u * a.Z + v * b.Z + w * c.Z;
+
+            float nx = (b.Y - a.Y) * (c.Z - a.Z) - (b.Z - a.Z) * (c.Y - a.Y);
+            float ny = (b.Z - a.Z) * (c.X - a.X) - (b.X - a.X) * (c.Z - a.Z);
+            float nz = (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+
+            float len = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+            normalZ = len > 1e-6f ? MathF.Abs(nz / len) : 0f;
+
+            return true;
+        }
+
+        private static string Bounds(BspFile.Vector3[] v)
+        {
+            float x0 = float.MaxValue, y0 = float.MaxValue, z0 = float.MaxValue;
+            float x1 = float.MinValue, y1 = float.MinValue, z1 = float.MinValue;
+
+            foreach (var p in v)
+            {
+                x0 = MathF.Min(x0, p.X); y0 = MathF.Min(y0, p.Y); z0 = MathF.Min(z0, p.Z);
+                x1 = MathF.Max(x1, p.X); y1 = MathF.Max(y1, p.Y); z1 = MathF.Max(z1, p.Z);
+            }
+
+            return $"min ({x0:F1},{y0:F1},{z0:F1})  max ({x1:F1},{y1:F1},{z1:F1})";
+        }
+
+        private static float Mix(float a, float b, float t) => a + (b - a) * t;
+
+        private static string Fmt(BspFile.Vector3 v) => $"({v.X:F1},{v.Y:F1},{v.Z:F1})";
+
+        private static int Displacements(string[] args)
+        {
+            if (args.Length < 2)
+                throw new ArgumentException("expected: disp <file.bsp> [x y]");
+
+            string bspPath = args[1];
+            if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such file: {bspPath}");
+
+            var displacements = BspDisplacements.Load(bspPath);
+            var all = displacements.Surfaces;
+
+            Console.WriteLine($"bsp   {Path.GetFileName(bspPath)}");
+            Console.WriteLine($"      {displacements.DisplacementCount:N0} displacements, " +
+                              $"{all.Count:N0} built, {displacements.TriangleCount:N0} triangles");
+
+            // -verts prints one displacement's reconstructed grid, in grid order, so the positions can
+            // be checked against the engine's own surface point by point rather than compared in
+            // aggregate. Aggregate agreement hides a transposed or rotated grid; a vertex list does not.
+            int vertsOf = -1;
+
+            for (int i = 2; i < args.Length - 1; i++)
+                if (args[i] == "-verts") vertsOf = int.Parse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture);
+
+            if (vertsOf >= 0)
+            {
+                int at = -1;
+
+                for (int i = 0; i < all.Count; i++)
+                    if (all[i].Index == vertsOf) { at = i; break; }
+
+                if (at < 0) { Console.WriteLine($"  (no displacement #{vertsOf} was built)"); return 1; }
+
+                var grid = displacements.Grids[at];
+                int side = (1 << all[at].Power) + 1;
+
+                Console.WriteLine($"  displacement #{vertsOf}  power {all[at].Power}  {side}x{side}");
+                Console.WriteLine($"  corners {Fmt(all[at].C0)} {Fmt(all[at].C1)} {Fmt(all[at].C2)} {Fmt(all[at].C3)}");
+
+                var s0 = all[at];
+
+                for (int i = 0; i < side; i++)
+                {
+                    float tx = i / (float)(side - 1);
+
+                    for (int j = 0; j < side; j++)
+                    {
+                        float ty = j / (float)(side - 1);
+
+                        // The point the base quad puts this grid vertex at, before the lump's offset
+                        // moves it. Printing the pair is the whole point: a position alone cannot say
+                        // whether the quad or the offset is the one that is wrong.
+                        float bx = Mix(Mix(s0.C0.X, s0.C1.X, tx), Mix(s0.C3.X, s0.C2.X, tx), ty);
+                        float by = Mix(Mix(s0.C0.Y, s0.C1.Y, tx), Mix(s0.C3.Y, s0.C2.Y, tx), ty);
+                        float bz = Mix(Mix(s0.C0.Z, s0.C1.Z, tx), Mix(s0.C3.Z, s0.C2.Z, tx), ty);
+
+                        var v = grid[i * side + j];
+
+                        var dv = displacements.RawGrids[at][i * side + j];
+
+                        Console.WriteLine($"  {i,2} {j,2}  base {bx,9:F1} {by,9:F1} {bz,9:F1}   " +
+                                          $"off {v.X - bx,9:F1} {v.Y - by,9:F1} {v.Z - bz,9:F1}   " +
+                                          $"raw vec {dv.Vector.X,7:F3} {dv.Vector.Y,7:F3} {dv.Vector.Z,7:F3} dist {dv.Distance,9:F2} alpha {dv.Alpha,7:F1}");
+                    }
+                }
+
+                return 0;
+            }
+
+            // -sample writes a Lua table of grid vertices spread over every displacement, for checking
+            // the reconstruction against the running engine. Nothing offline can settle whether a
+            // surface is in the right place - only the game knows where its own terrain is - and one
+            // displacement checked by hand is not a map.
+            int sample = 0;
+
+            for (int i = 2; i < args.Length - 1; i++)
+                if (args[i] == "-sample") sample = int.Parse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture);
+
+            if (sample > 0)
+            {
+                var picked = new List<string>();
+                int perDisp = Math.Max(1, sample / Math.Max(1, all.Count));
+
+                for (int k = 0; k < all.Count; k++)
+                {
+                    var grid = displacements.Grids[k];
+                    int step = Math.Max(1, grid.Length / perDisp);
+
+                    for (int v = 0; v < grid.Length; v += step)
+                        picked.Add($"{{{grid[v].X:F2},{grid[v].Y:F2},{grid[v].Z:F2},{all[k].Index}}}");
+                }
+
+                Console.WriteLine("local pts={" + string.Join(",", picked) + "}");
+                return 0;
+            }
+
+            // -runs summarises every displacement's offsets in one line each. A displacement sculpted
+            // out of its own face has offsets pointing mostly along the face normal and short compared
+            // with the face; anything else is reading somebody else's records, and seeing all 183 at
+            // once shows whether the bad ones are scattered or start at a particular index.
+            if (Array.IndexOf(args, "-runs") >= 0)
+            {
+                for (int k = 0; k < all.Count; k++)
+                {
+                    var raw = displacements.RawGrids[k];
+                    float sum = 0, worst = 0, alongMin = 1f;
+
+                    foreach (var dv in raw)
+                    {
+                        sum += dv.Distance;
+                        worst = MathF.Max(worst, dv.Distance);
+                        alongMin = MathF.Min(alongMin, MathF.Abs(dv.Vector.Z));
+                    }
+
+                    var s = all[k];
+
+                    float qx = MathF.Max(MathF.Max(s.C0.X, s.C1.X), MathF.Max(s.C2.X, s.C3.X))
+                             - MathF.Min(MathF.Min(s.C0.X, s.C1.X), MathF.Min(s.C2.X, s.C3.X));
+                    float qy = MathF.Max(MathF.Max(s.C0.Y, s.C1.Y), MathF.Max(s.C2.Y, s.C3.Y))
+                             - MathF.Min(MathF.Min(s.C0.Y, s.C1.Y), MathF.Min(s.C2.Y, s.C3.Y));
+
+                    Console.WriteLine($"  #{s.Index,4}  power {s.Power}  vertStart {s.VertStart,6}  " +
+                                      $"dist mean {sum / raw.Length,8:F1} max {worst,8:F1}  " +
+                                      $"min|vec.z| {alongMin,4:F2}  base {qx,7:F0} x {qy,7:F0} z {s.BaseMinZ,8:F0}..{s.BaseMaxZ,8:F0}  " +
+                                      $"lat {s.MaxLateralOffset,8:F0}");
+                }
+
+                return 0;
+            }
+
+            bool atPoint = args.Length >= 4;
+            float px = 0, py = 0;
+
+            if (atPoint)
+            {
+                var c = System.Globalization.CultureInfo.InvariantCulture;
+                px = float.Parse(args[2], c);
+                py = float.Parse(args[3], c);
+            }
+
+            // The orientation check, over the whole map rather than the filtered set - a single bad
+            // match is easy to miss and the summary is the point.
+            int ambiguous = 0;
+            float worstGap = 0;
+
+            foreach (var s in all)
+            {
+                if (s.StartGap > 1f) ambiguous++;
+                worstGap = MathF.Max(worstGap, s.StartGap);
+            }
+
+            Console.WriteLine($"      bsp version {displacements.BspVersion}, vertex lump holds {displacements.DispVertRecords:N0} records");
+
+            Console.WriteLine($"      faces carrying a displacement back-link: {displacements.FacesClaimingDisplacement:N0}");
+            Console.WriteLine($"      displacements named by a face: {displacements.DisplacementsWithBackLink:N0} of " +
+                              $"{displacements.DisplacementCount:N0}; links disagree on {displacements.BackLinkDisagreesWithMapFace:N0}" + (displacements.HasOriginalFaces ? " (not comparable - original faces in use)" : ""));
+
+            Console.WriteLine($"      startPosition matched a corner within 1 unit on " +
+                              $"{all.Count - ambiguous:N0} of {all.Count:N0}; worst gap {worstGap:F1}");
+
+            // Do the vertex grids account for the vertex lump exactly?
+            //
+            // Each displacement owns a run of (2^power + 1)^2 entries, and the runs are laid end to end,
+            // so their total should be the lump's whole contents. A total that falls short means some
+            // displacement's power was read too small and it is reading a truncated grid; a total that
+            // overruns means the runs overlap and at least one is reading another's offsets - which puts
+            // its vertices wherever that other surface's offsets happen to point.
+            long consumed = 0;
+            foreach (var s in all)
+            {
+                long side = (1L << s.Power) + 1;
+                consumed += side * side;
+            }
+
+            Console.WriteLine($"      vertex grids account for {consumed:N0} displacement vertices");
+            // Do the runs actually tile, in order? A matching total says only that the sizes add up.
+            long expect = 0;
+            int misplaced = 0;
+            foreach (var s in all.OrderBy(s => s.Index))
+            {
+                if (s.VertStart != expect) misplaced++;
+                long side = (1L << s.Power) + 1;
+                expect += side * side;
+            }
+            Console.WriteLine($"      vertex runs starting where the previous ended: {all.Count - misplaced:N0} of {all.Count:N0}");
+
+            Console.WriteLine($"      direction field length {displacements.ShortestDirection:F3}..{displacements.LongestDirection:F3} (nominally 1.000; zero where a vertex has no offset)");
+
+            // Reported as shape, not as a fault. Every one of these that has been checked against the
+            // running engine reconstructs correctly - it is what a flared, floor-sealed terrain edge
+            // looks like. See the note on BspDisplacements.Surface.SpillsBase before acting on it.
+            Console.WriteLine($"      footprint larger than base quad: {all.Count(s => s.SpillsBase):N0} of {all.Count:N0} " +
+                              "(normal for sealed terrain, not a fault)");
+            Console.WriteLine();
+
+            if (atPoint)
+                Console.WriteLine($"covering ({px:F0} {py:F0}):");
+
+            int shown = 0;
+
+            foreach (var s in all)
+            {
+                if (atPoint && !s.Covers(px, py))
+                    continue;
+
+                if (++shown > 24)
+                {
+                    Console.WriteLine($"  ... and {all.Count - 24:N0} more");
+                    break;
+                }
+
+                Console.WriteLine($"  #{s.Index,-4} pow {s.Power} con 0x{s.Contents:X}  {s.Triangles,5:N0} tris  " +
+                                  $"x {s.MinX,8:F0}..{s.MaxX,-8:F0} y {s.MinY,8:F0}..{s.MaxY,-8:F0}  " +
+                                  $"z {s.MinZ,8:F1}..{s.MaxZ,-8:F1}  " +
+                                  $"base z {s.BaseMinZ,8:F1}..{s.BaseMaxZ,-8:F1}  " +
+                                  $"lift {s.Lift,7:F1}  offset lat {s.MaxLateralOffset,7:F1} vert {s.MaxVerticalOffset,7:F1}  startGap {s.StartGap,5:F1}" +
+                                  (s.StartGap > 1f ? "  <- orientation guessed" : ""));
+
+                if (atPoint)
+                {
+                    // The base quad itself. A displacement is laid out across this, so a quad that is
+                    // not the one the mapper drew puts the terrain somewhere it never was - and the
+                    // edge lengths are the tell, since a quad whose sides differ wildly is not a
+                    // displacement base.
+                    Console.WriteLine($"        quad {s.C0} {s.C1} {s.C2} {s.C3}");
+                    Console.WriteLine($"        edges {Length(s.C0, s.C1):F0} {Length(s.C1, s.C2):F0} " +
+                                      $"{Length(s.C2, s.C3):F0} {Length(s.C3, s.C0):F0}");
+                }
+            }
+
+            if (atPoint && shown == 0)
+                Console.WriteLine("  (none - no displacement covers that point)");
+
+            return 0;
+        }
+
+        private static float Length(BspFile.Vector3 a, BspFile.Vector3 b)
+        {
+            float dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
+            return MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        /// <summary>
         /// Times the individual passes repeatedly, so a performance change can be judged against the
         /// machine's own noise rather than against a single stopwatch reading.
         ///
@@ -1891,6 +2396,10 @@ namespace Meshwright
                     () => BspModels.Load(bspPath, parsed)));
                 Benchmark.Report(Benchmark.Measure("BspDisplacements", repeats,
                     () => BspDisplacements.Load(bspPath)));
+
+
+                Benchmark.Report(Benchmark.Measure("StaticProps", repeats,
+                    () => StaticProps.Load(bspPath)));
                 Benchmark.Report(Benchmark.Measure("LoadBsp (overlapped)", repeats,
                     () => LoadBsp(bspPath)));
 
@@ -2187,6 +2696,7 @@ namespace Meshwright
             var errors = new List<float>();
             var worstFloating = new List<(float Error, string Where)>();
             var worstAir = new List<(float Fraction, string Where)>();
+            var floatingAt = new List<(float X, float Y, float Z)>();
 
             foreach (var area in nav.Areas)
             {
@@ -2194,6 +2704,7 @@ namespace Meshwright
                 int floating = 0, air = 0, taken = 0;
                 float worst = 0;
                 string worstAt = "";
+                float worstX = 0, worstY = 0, worstZ = 0;
 
                 for (int i = 0; i < Lattice; i++)
                 {
@@ -2230,6 +2741,7 @@ namespace Meshwright
                             {
                                 worst = error;
                                 worstAt = $"({x:F0} {y:F0}) claims {claimed:F0}, floor {actual:F0}";
+                                worstX = x; worstY = y; worstZ = claimed;
                             }
                         }
                     }
@@ -2247,6 +2759,16 @@ namespace Meshwright
                 {
                     floatingAreas++;
                     worstFloating.Add((worst, $"{where}  worst {worstAt}"));
+
+                    // The sample that actually floats, not the area's centre. Knowing 10% of areas float
+                    // says nothing about why; a list of positions can be checked against the game one
+                    // point at a time, and that only works if the positions are the offending ones.
+                    //
+                    // The centre was listed here first, and it lies: an area is flagged if any of its 25
+                    // samples floats, and on a large area the centre routinely sits on ground that
+                    // matches the engine exactly. Classifying that list in game blamed static props for
+                    // half the floating areas while sampling points that were not floating at all.
+                    floatingAt.Add((worstX, worstY, worstZ));
                 }
 
                 if (air > 0)
@@ -2283,6 +2805,20 @@ namespace Meshwright
             Console.WriteLine("worst over air:");
             foreach (var (fraction, where) in worstAir.Take(10))
                 Console.WriteLine($"  {100 * fraction,5:F0}% no floor     {where}");
+
+            // Spread evenly through the list rather than taken from the front, so the sample describes
+            // floating areas generally instead of one bad neighbourhood - the worst offenders cluster,
+            // and a sample of them says only what is wrong with that cluster.
+            if (FlagValue(args, "-list") is { } count && int.TryParse(count, out int wanted) && wanted > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"floating sample ({Math.Min(wanted, floatingAt.Count)} of {floatingAt.Count:N0}):");
+
+                int stride = Math.Max(1, floatingAt.Count / wanted);
+
+                for (int i = 0; i < floatingAt.Count && i / stride < wanted; i += stride)
+                    Console.WriteLine($"{floatingAt[i].X:F0} {floatingAt[i].Y:F0} {floatingAt[i].Z:F0}");
+            }
 
             return 0;
         }

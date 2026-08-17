@@ -454,12 +454,18 @@ namespace Meshwright
         /// <summary>Displacement surfaces. Null until <see cref="AttachDisplacements"/> is called.</summary>
         private BspDisplacements? displacements;
 
+        /// <summary>Static prop collision. Null until <see cref="AttachStaticProps"/> is called.</summary>
+        private StaticProps? staticProps;
+
         public void AttachModels(BspModels models) => entityModels = models;
 
         public void AttachDisplacements(BspDisplacements disp) => displacements = disp;
 
+        public void AttachStaticProps(StaticProps props) => staticProps = props;
+
         public int BlockingModelCount => entityModels?.BlockingModelCount ?? 0;
         public int DisplacementTriangleCount => displacements?.TriangleCount ?? 0;
+        public int StaticPropTriangleCount => staticProps?.TriangleCount ?? 0;
 
         /// <summary>
         /// Whether a line between two points is unobstructed.
@@ -543,7 +549,9 @@ namespace Meshwright
                     return false;
             }
 
-            return displacements is null || !displacements.Blocks(a, b, mask);
+            if (displacements is not null && displacements.Blocks(a, b, mask)) return false;
+
+            return staticProps is null || !staticProps.Blocks(a, b, mask);
         }
 
         /// <summary>Moves a world point into a model's local space.</summary>
@@ -611,9 +619,23 @@ namespace Meshwright
         /// </summary>
         public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
             out BspFile.Vector3 point, out BspFile.Vector3 normal)
+            => TryTraceSurface(a, b, mask, out point, out normal, out _);
+
+        /// <summary>
+        /// Same trace, also reporting whether the surface found was displacement terrain.
+        ///
+        /// Which geometry class stopped a trace is normally none of the caller's business - ground is
+        /// ground. Stairs are the exception, and Valve's <c>IsStairs</c> treats them as one: it
+        /// abandons a candidate the moment a probe lands on a displacement, because terrain is never a
+        /// staircase however step-like its profile happens to be. Terrain sculpted into ledges is
+        /// common, and without this the profile alone cannot tell it from masonry.
+        /// </summary>
+        public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
+            out BspFile.Vector3 point, out BspFile.Vector3 normal, out bool onDisplacement)
         {
             point = b;
             normal = new BspFile.Vector3(0, 0, 1);
+            onDisplacement = false;
 
             float best = float.MaxValue;
             bool found = false;
@@ -659,6 +681,7 @@ namespace Meshwright
                     best = entity.Fraction;
                     normal = entity.Normal;
                     found = true;
+                    onDisplacement = false;
                 }
             }
 
@@ -669,6 +692,20 @@ namespace Meshwright
                 best = dispFraction;
                 normal = dispNormal;
                 found = true;
+                onDisplacement = true;
+            }
+
+            // Props come last so that a prop standing on terrain wins the tie only when it is genuinely
+            // nearer. `onDisplacement` is cleared when one does, because the callers that ask - stair
+            // rejection above all - are asking about terrain specifically, and a prop is not terrain.
+            if (staticProps is not null &&
+                staticProps.TryTraceSurface(a, b, mask, out float propFraction, out var propNormal) &&
+                (!found || propFraction < best))
+            {
+                best = propFraction;
+                normal = propNormal;
+                found = true;
+                onDisplacement = false;
             }
 
             if (!found)
@@ -787,6 +824,19 @@ namespace Meshwright
                 if (!found || dispFraction < hit.Fraction)
                 {
                     hit = new SurfaceHit { Fraction = dispFraction, Normal = dispNormal };
+                    found = true;
+                }
+            }
+
+            if (staticProps is not null &&
+                staticProps.TryTraceHull(a, b, mins, maxs, mask,
+                    out float propFraction, out var propNormal, out bool propSolid))
+            {
+                solid |= propSolid;
+
+                if (!found || propFraction < hit.Fraction)
+                {
+                    hit = new SurfaceHit { Fraction = propFraction, Normal = propNormal };
                     found = true;
                 }
             }
@@ -1311,9 +1361,33 @@ namespace Meshwright
 
             // MaskBlockLos explicitly: this diagnostic reports what stops a sight line, and the world
             // walk above (BlockedExplain) is hardcoded to that mask too.
-            if (displacements is not null && displacements.Blocks(a, b, MaskBlockLos))
+            //
+            // Traced for the surface rather than merely asked whether it blocks, so the reported
+            // position is where the terrain actually is. Reporting the ray's endpoint here - which is
+            // what `hit` still held - reads as "blocked exactly where it was aiming", and that is a
+            // convincing description of a self-intersection that is not happening. It cost a wrong
+            // diagnosis before anyone checked it against the floor finder.
+            if (displacements is not null &&
+                displacements.TryTraceSurface(a, b, MaskBlockLos, out float dispFraction, out _))
             {
+                hit = new BspFile.Vector3(
+                    a.X + (b.X - a.X) * dispFraction,
+                    a.Y + (b.Y - a.Y) * dispFraction,
+                    a.Z + (b.Z - a.Z) * dispFraction);
+
                 blockingHeadNode = -2; // displacement
+                return false;
+            }
+
+            if (staticProps is not null &&
+                staticProps.TryTraceSurface(a, b, MaskBlockLos, out float propFraction, out _))
+            {
+                hit = new BspFile.Vector3(
+                    a.X + (b.X - a.X) * propFraction,
+                    a.Y + (b.Y - a.Y) * propFraction,
+                    a.Z + (b.Z - a.Z) * propFraction);
+
+                blockingHeadNode = -3; // static prop
                 return false;
             }
 

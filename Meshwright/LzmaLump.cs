@@ -73,7 +73,22 @@ namespace Meshwright
             decoder.SetDecoderProperties(properties);
             decoder.Code(source, destination, compressedSize, decompressedSize, null);
 
-            return destination.ToArray();
+            var expanded = destination.ToArray();
+
+            // A short expansion is silent corruption, and the worst kind: every lump reader here sizes
+            // its own array off the byte count it is handed, so a truncated lump does not throw - it
+            // yields fewer brushes, fewer faces, fewer planes, and a world with holes in it. What that
+            // looks like downstream is a floor trace falling through geometry that should have stopped
+            // it, which reads as a mesh problem rather than a read problem and sends you looking in
+            // entirely the wrong place.
+            if (expanded.Length != decompressedSize)
+            {
+                throw new InvalidDataException(
+                    $"lump at offset {offset} decompressed to {expanded.Length:N0} bytes, " +
+                    $"its header declares {decompressedSize:N0}");
+            }
+
+            return expanded;
         }
 
         private static byte[] ReadRaw(BinaryReader r, int offset, int length)
