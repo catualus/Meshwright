@@ -13,6 +13,41 @@ namespace Meshwright
     /// only knows about brushes. Measured against the engine on gm_construct, once world brushes, detail
     /// brushes and brush entities were all handled, displacements were the *only* remaining cause of
     /// disagreement - 25 of 250 sampled rays.
+    ///
+    /// **Base quads come from the original faces where the map still has them.** A displacement is
+    /// drawn on one quad and laid out across it, and LUMP_ORIGINALFACES is where that quad lives -
+    /// the ordinary face lump holds what vbsp left after cutting it up for the tree, and a piece of a
+    /// quad is the wrong footprint to stretch a grid over.
+    ///
+    /// Worth knowing that this is correctness rather than a measured win. On both maps there is an
+    /// engine mesh to check against it changes nothing: gm_construct's displacement faces were never
+    /// split, so the two lumps describe the same quads, and rp_downtown_meowy has no original faces at
+    /// all. It is right for the case neither of them happens to be.
+    ///
+    /// **Checked against the running engine, vertex by vertex, and it agrees.** This was suspected of
+    /// being wrong for a long time on the strength of one offline measure - <see cref="Surface.SpillsBase"/>
+    /// flags 45 of rp_downtown_meowy's 183 displacements as carrying offsets that lie *in* the plane of
+    /// their base quad, by up to two thousand units, against none of gm_construct's 110. That looked
+    /// like the offsets and the quad failing to describe each other.
+    ///
+    /// It is not. Reconstructing the grid for the three worst of them and tracing to the engine's own
+    /// terrain at each of the 81 vertices puts the median gap at **0.0 units**, with 73% to 86% of
+    /// vertices inside 8 units and the rest explained by neighbouring geometry sitting over the probe.
+    /// Large in-plane offsets are ordinary mapping: the outer ring of a big terrain displacement gets
+    /// flared outwards and dropped to the world floor so the terrain seals against it, which moves
+    /// border vertices a long way sideways while the interior stays on the quad. <c>disp -verts</c>
+    /// shows the shape plainly - a constant ~855-unit drop right around the border of #32, and interior
+    /// offsets of about +90 that match the engine to a tenth of a unit.
+    ///
+    /// So the measure is real but it is not a fault, and nothing here should be changed to make it
+    /// smaller. Also verified along the way, and worth not re-deriving: the vertex runs tile the lump
+    /// exactly and in order, the powers sum to the vertex count, <c>startPosition</c> identifies a base
+    /// corner to within a unit on every displacement in both maps, and the face back-links are a
+    /// bijection - 183 faces naming 183 distinct displacements, no fallback to <c>m_iMapFace</c> used.
+    ///
+    /// rp_downtown_meowy's mesh does fit its ground worse than gm_construct's, but terrain is not why.
+    /// Static props are: they carry CONTENTS_SOLID, the engine builds areas on top of them, and nothing
+    /// here reads them.
     /// </summary>
     public sealed class BspDisplacements
     {
@@ -23,16 +58,18 @@ namespace Meshwright
         private const int LumpDispInfo = 26;
         private const int LumpDispVerts = 33;
 
+        /// <summary>
+        /// Faces as they stood before vbsp cut them up for the tree - where a displacement's base quad
+        /// lives. Absent on maps that have been through a repacker, which discards it.
+        /// </summary>
+        private const int LumpOriginalFaces = 27;
+
         private const int DispInfoSize = 176;
         private const int DispVertSize = 20;
         private const int FaceSize = 56;
 
-        private BspFile.Vector3[] vertices = [];   // triangle vertices, three per triangle
-        private BvhNode[] bvh = [];
-        private int[] order = [];
-
-        /// <summary>Contents of the displacement each triangle came from, one entry per triangle.</summary>
-        private int[] contents = [];
+        /// <summary>The triangles and their index. Shared with static props, which pose the same problem.</summary>
+        private readonly TriangleMesh mesh = new();
 
         /// <summary>
         /// Contents worth triangulating at all: the union of every mask a caller might later trace
@@ -49,15 +86,104 @@ namespace Meshwright
         /// </summary>
         private const int TracedContents = BspVisibility.MaskBlockLos | BspVisibility.GenerationMask;
 
-        public int TriangleCount => vertices.Length / 3;
+        public int TriangleCount => mesh.TriangleCount;
         public int DisplacementCount { get; private set; }
 
-        private struct BvhNode
+        /// <summary>How many records the vertex lump actually holds, against how many the grids consume.</summary>
+        public int DispVertRecords { get; private set; }
+
+        /// <summary>The map's BSP version, since lump layouts are version-specific.</summary>
+        public int BspVersion { get; private set; }
+
+        /// <summary>Whether the map still carries the unsplit faces displacements are drawn on.</summary>
+        public bool HasOriginalFaces { get; private set; }
+
+        /// <summary>How many faces carry a back-link naming a displacement.</summary>
+        public int FacesClaimingDisplacement { get; private set; }
+
+        /// <summary>How many displacements are named by at least one face - the number that matters.</summary>
+        public int DisplacementsWithBackLink { get; private set; }
+
+        /// <summary>
+        /// How many displacements have their two links naming different faces. Zero on a map whose
+        /// original faces are in use, because there the two index different lumps and cannot be compared.
+        /// </summary>
+        public int BackLinkDisagreesWithMapFace { get; private set; }
+
+        /// <summary>
+        /// Range of the direction field's length across every displacement vertex. Nominally one, but
+        /// zero where a vertex has no offset, and gm_construct stores lengths up to 7.75 while
+        /// reconstructing correctly - so this locates a misread stride, not a fault on its own.
+        /// </summary>
+        public float ShortestDirection { get; private set; } = float.MaxValue;
+        public float LongestDirection { get; private set; }
+
+        /// <summary>
+        /// What one displacement reconstructed to, kept so the result can be inspected rather than
+        /// inferred.
+        ///
+        /// A wrong displacement does not fail - it produces a surface, in about the right place, with
+        /// the wrong shape. Nothing downstream can tell that from correct terrain, so the only way to
+        /// find one is to look at the individual surfaces and check them against what the base quad and
+        /// the vertex offsets say they should be.
+        ///
+        /// <see cref="StartGap"/> is the most diagnostic field. The grid's orientation is recovered by
+        /// matching <c>startPosition</c> to whichever base corner it is nearest, so that distance ought
+        /// to be about zero. A large gap means the match was a guess, and a guess that lands on the
+        /// wrong corner rotates the whole surface.
+        /// </summary>
+        public readonly record struct Surface(
+            int Index, int Power, int VertStart, int Contents, int Triangles,
+            BspFile.Vector3 Start,
+            float StartGap, float StartGapRunnerUp,
+            float MinX, float MaxX, float MinY, float MaxY, float MinZ, float MaxZ,
+            float BaseMinZ, float BaseMaxZ,
+            float MaxLateralOffset, float MaxVerticalOffset,
+            BspFile.Vector3 C0, BspFile.Vector3 C1, BspFile.Vector3 C2, BspFile.Vector3 C3)
         {
-            public BspFile.Vector3 Mins, Maxs;
-            public int Right;        // right child index; left is always this node + 1
-            public int First, Count; // triangle range when a leaf, Count 0 when interior
+            /// <summary>Whether the point lies inside this displacement's footprint in plan view.</summary>
+            public bool Covers(float x, float y) => x >= MinX && x <= MaxX && y >= MinY && y <= MaxY;
+
+            /// <summary>How far the displaced surface sits from the quad it was built on.</summary>
+            public float Lift => MaxZ - BaseMaxZ;
+
+            /// <summary>
+            /// Whether the offsets carry vertices a long way across the base quad rather than only in
+            /// and out of it. Judged in the quad's own frame, so a wall sculpted horizontally does not
+            /// count - comparing world-space XY looks equivalent and condemns every cliff on the map.
+            ///
+            /// **This is not a fault indicator, and it reads like one.** It was treated as one here for
+            /// a long time. Every displacement it flags on rp_downtown_meowy that has since been checked
+            /// against the running engine reconstructs correctly, to a median of zero units; see the
+            /// note on the class. What it actually detects is a mapper flaring a big terrain
+            /// displacement's outer ring outwards and dropping it to the world floor to seal the
+            /// terrain, which is ordinary and correct.
+            ///
+            /// It is kept because it says something true about the shape - a surface that spills is one
+            /// whose footprint is much larger than its quad, which matters to anything reasoning about
+            /// coverage from the quad alone. It is not evidence that the reconstruction is wrong.
+            /// </summary>
+            public bool SpillsBase => MaxLateralOffset > 64f;
         }
+
+        private readonly List<Surface> surfaces = [];
+
+        /// <summary>The reconstructed vertex grid of each built displacement, for point-by-point comparison.</summary>
+        private readonly List<BspFile.Vector3[]> grids = [];
+
+        /// <summary>The raw lump records behind each built grid, so a misread field can be seen rather than inferred.</summary>
+        private readonly List<DispVert[]> rawGrids = [];
+
+        public IReadOnlyList<BspFile.Vector3[]> Grids => grids;
+
+
+        
+
+        public IReadOnlyList<DispVert[]> RawGrids => rawGrids;
+
+        /// <summary>Every displacement that produced geometry, in the order they were built.</summary>
+        public IReadOnlyList<Surface> Surfaces => surfaces;
+
 
         public static BspDisplacements Load(string path)
         {
@@ -85,18 +211,33 @@ namespace Meshwright
             var worldVerts = ReadVectors(r, lumps[LumpVertexes]);
             var edges = ReadEdges(r, lumps[LumpEdges]);
             var surfEdges = ReadInts(r, lumps[LumpSurfEdges]);
-            var faces = ReadFaces(r, lumps[LumpFaces]);
             var dispVerts = ReadDispVerts(r, lumps[LumpDispVerts]);
             var infos = ReadDispInfos(r, lumps[LumpDispInfo]);
 
+            // Original faces in preference to split ones. A displacement is drawn on a single quad and
+            // laid out across it; the ordinary face lump holds what vbsp left after cutting that quad
+            // up for the tree, and a piece of a quad is the wrong footprint to stretch a grid over.
+            //
+            // Not every map still has them. Repackers discard the lump, and a map that has been through
+            // one leaves nothing to fall back on but the split faces - see the note on the class.
+            var original = ReadFaces(r, lumps[LumpOriginalFaces]);
+            var faces = ReadFaces(r, lumps[LumpFaces]);
+
             result.DisplacementCount = infos.Length;
-            result.Build(infos, faces, edges, surfEdges, worldVerts, dispVerts);
+            result.DispVertRecords = dispVerts.Length;
+            result.HasOriginalFaces = original.Length > 0;
+
+            r.BaseStream.Seek(4, SeekOrigin.Begin);
+            result.BspVersion = r.ReadInt32();
+
+            result.Build(infos, result.HasOriginalFaces ? original : faces, edges, surfEdges,
+                worldVerts, dispVerts, !result.HasOriginalFaces);
 
             return result;
         }
 
         private readonly record struct DispInfo(BspFile.Vector3 StartPosition, int VertStart, int Power, int Contents, int MapFace);
-        private readonly record struct DispVert(BspFile.Vector3 Vector, float Distance);
+        public readonly record struct DispVert(BspFile.Vector3 Vector, float Distance, float Alpha);
         private readonly record struct Face(int FirstEdge, int NumEdges, int DispInfo);
 
         private static BspFile.Vector3[] ReadVectors(BinaryReader r, (int Offset, int Length) lump)
@@ -165,8 +306,8 @@ namespace Meshwright
             {
                 var v = new BspFile.Vector3(lr.ReadSingle(), lr.ReadSingle(), lr.ReadSingle());
                 float dist = lr.ReadSingle();
-                lr.ReadSingle(); // alpha
-                result[i] = new DispVert(v, dist);
+                float alpha = lr.ReadSingle();
+                result[i] = new DispVert(v, dist, alpha);
             }
             return result;
         }
@@ -197,28 +338,125 @@ namespace Meshwright
         }
 
         private void Build(DispInfo[] infos, Face[] faces, (ushort A, ushort B)[] edges,
-            int[] surfEdges, BspFile.Vector3[] worldVerts, DispVert[] dispVerts)
+            int[] surfEdges, BspFile.Vector3[] worldVerts, DispVert[] dispVerts, bool comparableLinks)
         {
+            float shortestDirection = float.MaxValue, longestDirection = 0f;
             var tris = new List<BspFile.Vector3>();
             var triContents = new List<int>();
 
-            foreach (var info in infos)
+            // A displacement is paired with its face by whichever of the two links resolves inside the
+            // set of faces being used. They name each other - the displacement records `m_iMapFace`,
+            // the face records `dispinfo` - and following it from the face is the sturdier direction,
+            // because then the quad and the claim to it come from the same record and cannot disagree.
+            // The displacement's own index is the fallback for maps where the faces carry no back-link.
+            int claimCount = 0;
+            var faceFor = new int[infos.Length];
+            Array.Fill(faceFor, -1);
+
+            for (int f = 0; f < faces.Length; f++)
             {
+                int claimed = faces[f].DispInfo;
+                if ((uint)claimed < (uint)infos.Length)
+                {
+                    claimCount++;
+                    if (faceFor[claimed] < 0) faceFor[claimed] = f;
+                }
+            }
+
+            FacesClaimingDisplacement = claimCount;
+
+            // Whether those claims are a bijection, which is the part that actually matters and which
+            // the count alone does not show. 183 claims over 183 displacements looks conclusive and is
+            // not: two faces claiming one displacement and none claiming another produces the same
+            // total, and the unclaimed one then falls back to `m_iMapFace` without saying so.
+            for (int d = 0; d < faceFor.Length; d++)
+            {
+                if (faceFor[d] >= 0) DisplacementsWithBackLink++;
+
+                // The two links naming different faces is worth knowing when both index the same lump:
+                // it means one of them is stale, and which one is followed decides the base quad.
+                //
+                // Only then, though. `m_iMapFace` always indexes the ordinary face lump, so on a map
+                // where the original faces are being used the two are not comparable and every
+                // displacement "disagrees" - which is how this read on gm_construct before the guard,
+                // 110 of 110, and meant nothing at all.
+                if (!comparableLinks) continue;
+
+                if (faceFor[d] >= 0 && faceFor[d] != infos[d].MapFace) BackLinkDisagreesWithMapFace++;
+            }
+
+
+
+            for (int dispIndex = 0; dispIndex < infos.Length; dispIndex++)
+            {
+                var info = infos[dispIndex];
+
                 if ((info.Contents & TracedContents) == 0)
                     continue;
 
-                if ((uint)info.MapFace >= (uint)faces.Length)
+                int faceIndex = faceFor[dispIndex] >= 0 ? faceFor[dispIndex] : info.MapFace;
+
+                if ((uint)faceIndex >= (uint)faces.Length)
                     continue;
 
-                var corners = FaceCorners(faces[info.MapFace], edges, surfEdges, worldVerts);
+                var corners = FaceCorners(faces[faceIndex], edges, surfEdges, worldVerts);
                 if (corners is null)
                     continue;
 
+                // Measured before the rotation consumes it: how convincingly startPosition identifies
+                // one corner, and by how much the next-nearest was beaten. A small gap and a clear
+                // runner-up means the orientation is known; anything else means it was picked.
+                float nearest = float.MaxValue, runnerUp = float.MaxValue;
+                float baseMinZ = float.MaxValue, baseMaxZ = float.MinValue;
+
+                foreach (var corner in corners)
+                {
+                    float dx = corner.X - info.StartPosition.X;
+                    float dy = corner.Y - info.StartPosition.Y;
+                    float dz = corner.Z - info.StartPosition.Z;
+                    float gap = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+
+                    if (gap < nearest) { runnerUp = nearest; nearest = gap; }
+                    else if (gap < runnerUp) { runnerUp = gap; }
+
+                    baseMinZ = MathF.Min(baseMinZ, corner.Z);
+                    baseMaxZ = MathF.Max(baseMaxZ, corner.Z);
+                }
+
+                int firstTriangle = tris.Count / 3;
+
+                float maxLateral = 0f, maxVertical = 0f;
+
                 Rotate(corners, info.StartPosition);
+
+                // The quad's own normal, so the offsets below can be judged against the face they
+                // belong to rather than against the world.
+                float e1x = corners[1].X - corners[0].X;
+                float e1y = corners[1].Y - corners[0].Y;
+                float e1z = corners[1].Z - corners[0].Z;
+                float e2x = corners[3].X - corners[0].X;
+                float e2y = corners[3].Y - corners[0].Y;
+                float e2z = corners[3].Z - corners[0].Z;
+
+                float planeX = e1y * e2z - e1z * e2y;
+                float planeY = e1z * e2x - e1x * e2z;
+                float planeZ = e1x * e2y - e1y * e2x;
+
+                float planeLength = MathF.Sqrt(planeX * planeX + planeY * planeY + planeZ * planeZ);
+
+                if (planeLength > 1e-6f)
+                {
+                    planeX /= planeLength; planeY /= planeLength; planeZ /= planeLength;
+                }
+                else
+                {
+                    planeX = 0f; planeY = 0f; planeZ = 1f;
+                }
 
                 int size = 1 << info.Power;      // cells per side
                 int stride = size + 1;           // vertices per side
                 var grid = new BspFile.Vector3[stride * stride];
+                var raw = new DispVert[stride * stride];
 
                 for (int i = 0; i < stride; i++)
                 {
@@ -235,10 +473,39 @@ namespace Meshwright
                         if ((uint)index < (uint)dispVerts.Length)
                         {
                             var dv = dispVerts[index];
-                            p = new BspFile.Vector3(
-                                p.X + dv.Vector.X * dv.Distance,
-                                p.Y + dv.Vector.Y * dv.Distance,
-                                p.Z + dv.Vector.Z * dv.Distance);
+                            raw[i * stride + j] = dv;
+
+                            float ox = dv.Vector.X * dv.Distance;
+                            float oy = dv.Vector.Y * dv.Distance;
+                            float oz = dv.Vector.Z * dv.Distance;
+
+                            // How far the offsets push across the base quad versus through it.
+                            //
+                            // Measured in the quad's own frame, not the world's. A displacement is
+                            // sculpted along its face's normal - out of the surface - so the component
+                            // lying *in* the plane should stay small whatever way the face happens to
+                            // point. Judging this by world Z instead reads every wall displacement as
+                            // broken, because a wall is sculpted horizontally by definition; that
+                            // mistake was made here first and flagged 55 of this map's 183 as
+                            // suspect when most were ordinary cliffs.
+                            float along = ox * planeX + oy * planeY + oz * planeZ;
+                            float inPlaneX = ox - along * planeX;
+                            float inPlaneY = oy - along * planeY;
+                            float inPlaneZ = oz - along * planeZ;
+
+                            maxLateral = MathF.Max(maxLateral, MathF.Sqrt(
+                                inPlaneX * inPlaneX + inPlaneY * inPlaneY + inPlaneZ * inPlaneZ));
+                            maxVertical = MathF.Max(maxVertical, MathF.Abs(along));
+
+                            // Unit length is the contract on the direction field. Anything else means
+                            // the record is being read at the wrong stride or offset.
+                            float unit = MathF.Sqrt(dv.Vector.X * dv.Vector.X +
+                                                    dv.Vector.Y * dv.Vector.Y +
+                                                    dv.Vector.Z * dv.Vector.Z);
+                            shortestDirection = MathF.Min(shortestDirection, unit);
+                            longestDirection = MathF.Max(longestDirection, unit);
+
+                            p = new BspFile.Vector3(p.X + ox, p.Y + oy, p.Z + oz);
                         }
 
                         grid[i * stride + j] = p;
@@ -254,19 +521,63 @@ namespace Meshwright
                         var c = grid[(i + 1) * stride + j + 1];
                         var d = grid[(i + 1) * stride + j];
 
-                        tris.Add(a); tris.Add(b); tris.Add(c);
-                        tris.Add(a); tris.Add(c); tris.Add(d);
+                        // The diagonal alternates in a checkerboard, which is how Source splits a
+                        // displacement cell - not a fixed corner-to-corner cut.
+                        //
+                        // A quad's four corners rarely lie in a plane, so the two ways of splitting it
+                        // describe two different surfaces, and they part company most in the middle of
+                        // the cell. Cutting always the same way is invisible on fine terrain: cells a
+                        // few units across with gentle relief differ by a fraction of a unit, which is
+                        // why gm_construct agreed with the engine to a median of half a unit. It is not
+                        // invisible on coarse terrain. This map has displacements whose cells run
+                        // hundreds of units across a thousand units of relief, and there the wrong
+                        // diagonal moves the surface by tens of units - enough to lift ground above a
+                        // nav area, and enough to tilt it past the walkable slope limit so the floor
+                        // finder rejects it and falls through to whatever lies beneath.
+                        if (((i + j) & 1) == 0)
+                        {
+                            tris.Add(a); tris.Add(b); tris.Add(c);
+                            tris.Add(a); tris.Add(c); tris.Add(d);
+                        }
+                        else
+                        {
+                            tris.Add(a); tris.Add(b); tris.Add(d);
+                            tris.Add(b); tris.Add(c); tris.Add(d);
+                        }
 
                         // One entry per triangle, not per vertex - the traces index by triangle.
                         triContents.Add(info.Contents);
                         triContents.Add(info.Contents);
                     }
                 }
+
+                float loX = float.MaxValue, loY = float.MaxValue, loZ = float.MaxValue;
+                float hiX = float.MinValue, hiY = float.MinValue, hiZ = float.MinValue;
+
+                foreach (var p in grid)
+                {
+                    loX = MathF.Min(loX, p.X); hiX = MathF.Max(hiX, p.X);
+                    loY = MathF.Min(loY, p.Y); hiY = MathF.Max(hiY, p.Y);
+                    loZ = MathF.Min(loZ, p.Z); hiZ = MathF.Max(hiZ, p.Z);
+                }
+
+                grids.Add(grid);
+
+                rawGrids.Add(raw);
+
+                surfaces.Add(new Surface(
+                    dispIndex, info.Power, info.VertStart, info.Contents, tris.Count / 3 - firstTriangle,
+                    info.StartPosition, nearest, runnerUp,
+                    loX, hiX, loY, hiY, loZ, hiZ, baseMinZ, baseMaxZ,
+                    maxLateral, maxVertical,
+                    corners[0], corners[1], corners[2], corners[3]));
             }
 
-            vertices = tris.ToArray();
-            contents = triContents.ToArray();
-            BuildBvh();
+            ShortestDirection = shortestDirection;
+
+            LongestDirection = longestDirection;
+
+            mesh.Build(tris.ToArray(), triContents.ToArray());
         }
 
         /// <summary>
@@ -335,121 +646,8 @@ namespace Meshwright
         private static BspFile.Vector3 Lerp(BspFile.Vector3 a, BspFile.Vector3 b, float t) =>
             new(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t);
 
-        private void BuildBvh()
-        {
-            int count = TriangleCount;
-            if (count == 0) return;
-
-            order = new int[count];
-            for (int i = 0; i < count; i++) order[i] = i;
-
-            var nodes = new List<BvhNode>(count);
-            Build(nodes, 0, count);
-            bvh = nodes.ToArray();
-        }
-
-        private int Build(List<BvhNode> nodes, int first, int count)
-        {
-            const int LeafSize = 8;
-
-            var node = new BvhNode
-            {
-                Mins = new BspFile.Vector3(float.MaxValue, float.MaxValue, float.MaxValue),
-                Maxs = new BspFile.Vector3(float.MinValue, float.MinValue, float.MinValue),
-                First = first,
-                Count = count,
-            };
-
-            for (int i = first; i < first + count; i++)
-            {
-                for (int k = 0; k < 3; k++)
-                {
-                    var v = vertices[order[i] * 3 + k];
-                    node.Mins = new BspFile.Vector3(MathF.Min(node.Mins.X, v.X), MathF.Min(node.Mins.Y, v.Y), MathF.Min(node.Mins.Z, v.Z));
-                    node.Maxs = new BspFile.Vector3(MathF.Max(node.Maxs.X, v.X), MathF.Max(node.Maxs.Y, v.Y), MathF.Max(node.Maxs.Z, v.Z));
-                }
-            }
-
-            int self = nodes.Count;
-            nodes.Add(node);
-
-            if (count <= LeafSize)
-                return self;
-
-            float dx = node.Maxs.X - node.Mins.X;
-            float dy = node.Maxs.Y - node.Mins.Y;
-            float dz = node.Maxs.Z - node.Mins.Z;
-            int axis = dx >= dy && dx >= dz ? 0 : dy >= dz ? 1 : 2;
-
-            Array.Sort(order, first, count, Comparer<int>.Create((a, b) =>
-                Centre(a, axis).CompareTo(Centre(b, axis))));
-
-            int half = count / 2;
-            Build(nodes, first, half);
-            int right = Build(nodes, first + half, count - half);
-
-            node = nodes[self];
-            node.Right = right;
-            node.Count = 0;
-            nodes[self] = node;
-
-            return self;
-        }
-
-        private float Centre(int triangle, int axis)
-        {
-            float sum = 0;
-            for (int k = 0; k < 3; k++)
-            {
-                var v = vertices[triangle * 3 + k];
-                sum += axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
-            }
-            return sum / 3f;
-        }
-
-        /// <summary>
-        /// Whether the segment crosses any displacement surface matching <paramref name="mask"/>.
-        /// </summary>
-        public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b, int mask)
-        {
-            if (bvh.Length == 0)
-                return false;
-
-            Span<int> stack = stackalloc int[64];
-            int top = 0;
-            stack[top++] = 0;
-
-            while (top > 0)
-            {
-                int index = stack[--top];
-                var node = bvh[index];
-
-                if (!SegmentHitsBox(a, b, node.Mins, node.Maxs))
-                    continue;
-
-                if (node.Count == 0)
-                {
-                    if (top + 2 <= stack.Length)
-                    {
-                        stack[top++] = index + 1;
-                        stack[top++] = node.Right;
-                    }
-                    continue;
-                }
-
-                for (int i = node.First; i < node.First + node.Count; i++)
-                {
-                    if ((contents[order[i]] & mask) == 0)
-                        continue;
-
-                    int t = order[i] * 3;
-                    if (SegmentHitsTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2]))
-                        return true;
-                }
-            }
-
-            return false;
-        }
+        /// <summary>Whether the segment crosses any displacement surface matching <paramref name="mask"/>.</summary>
+        public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b, int mask) => mesh.Blocks(a, b, mask);
 
         /// <summary>
         /// The nearest displacement surface the segment crosses, with the triangle's normal.
@@ -460,382 +658,12 @@ namespace Meshwright
         /// </summary>
         public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
             out float fraction, out BspFile.Vector3 normal)
-        {
-            fraction = 1f;
-            normal = default;
+            => mesh.TryTraceSurface(a, b, mask, out fraction, out normal);
 
-            if (bvh.Length == 0)
-                return false;
-
-            bool found = false;
-
-            Span<int> stack = stackalloc int[64];
-            int top = 0;
-            stack[top++] = 0;
-
-            while (top > 0)
-            {
-                int index = stack[--top];
-                var node = bvh[index];
-
-                if (!SegmentHitsBox(a, b, node.Mins, node.Maxs))
-                    continue;
-
-                if (node.Count == 0)
-                {
-                    if (top + 2 <= stack.Length)
-                    {
-                        stack[top++] = index + 1;
-                        stack[top++] = node.Right;
-                    }
-                    continue;
-                }
-
-                for (int i = node.First; i < node.First + node.Count; i++)
-                {
-                    if ((contents[order[i]] & mask) == 0)
-                        continue;
-
-                    int t = order[i] * 3;
-                    if (!TryHitTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2], out float hit))
-                        continue;
-
-                    if (found && hit >= fraction)
-                        continue;
-
-                    fraction = hit;
-                    normal = TriangleNormal(vertices[t], vertices[t + 1], vertices[t + 2]);
-                    found = true;
-                }
-            }
-
-            return found;
-        }
-
-        private static BspFile.Vector3 TriangleNormal(BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2)
-        {
-            float e1x = v1.X - v0.X, e1y = v1.Y - v0.Y, e1z = v1.Z - v0.Z;
-            float e2x = v2.X - v0.X, e2y = v2.Y - v0.Y, e2z = v2.Z - v0.Z;
-
-            float nx = e1y * e2z - e1z * e2y;
-            float ny = e1z * e2x - e1x * e2z;
-            float nz = e1x * e2y - e1y * e2x;
-
-            float length = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
-            if (length < 1e-6f)
-                return new BspFile.Vector3(0, 0, 1);
-
-            // Face upward: a ground normal is wanted, and triangle winding is not relied on here.
-            float sign = nz < 0 ? -1f : 1f;
-            return new BspFile.Vector3(sign * nx / length, sign * ny / length, sign * nz / length);
-        }
-
-        /// <summary>
-        /// Sweeps an axis-aligned box along a segment against the displacement surface.
-        ///
-        /// This is the half of collision that was missing. Everything that asks whether a *body* fits
-        /// somewhere - as opposed to whether a sight line is clear - wants a swept box, and the box
-        /// sweep in <see cref="BspVisibility"/> only ever consulted brushes. On terrain it therefore
-        /// reported open air, which is why every clearance test in the generator had to fall back to an
-        /// infinitely thin line and accept what that misses.
-        ///
-        /// The box does not have to be centred on the traced point - Valve's <c>NavTraceMins/Maxs</c>
-        /// sits *on* it, 0.9 units square and 55 tall - so the sweep is re-expressed as a centred box by
-        /// moving the ray to the box's centre, and the half-extents are what the triangles get inflated
-        /// by.
-        /// </summary>
+        /// <summary>Sweeps a box against the terrain. See <see cref="TriangleMesh.TryTraceHull"/>.</summary>
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
             out float fraction, out BspFile.Vector3 normal, out bool startSolid)
-        {
-            fraction = 1f;
-            normal = new BspFile.Vector3(0, 0, 1);
-            startSolid = false;
-
-            if (bvh.Length == 0)
-                return false;
-
-            // Centre the box and carry the offset on the ray instead.
-            var centre = new BspFile.Vector3((mins.X + maxs.X) / 2f, (mins.Y + maxs.Y) / 2f,
-                (mins.Z + maxs.Z) / 2f);
-            var extent = new BspFile.Vector3((maxs.X - mins.X) / 2f, (maxs.Y - mins.Y) / 2f,
-                (maxs.Z - mins.Z) / 2f);
-
-            var from = new BspFile.Vector3(a.X + centre.X, a.Y + centre.Y, a.Z + centre.Z);
-            var to = new BspFile.Vector3(b.X + centre.X, b.Y + centre.Y, b.Z + centre.Z);
-
-            bool found = false;
-
-            Span<int> stack = stackalloc int[64];
-            int top = 0;
-            stack[top++] = 0;
-
-            while (top > 0)
-            {
-                int index = stack[--top];
-                var node = bvh[index];
-
-                // The node's box grown by the moving box's half-extents: a swept box clips a node the
-                // traced centre line can miss entirely.
-                var grown = (new BspFile.Vector3(node.Mins.X - extent.X, node.Mins.Y - extent.Y, node.Mins.Z - extent.Z),
-                             new BspFile.Vector3(node.Maxs.X + extent.X, node.Maxs.Y + extent.Y, node.Maxs.Z + extent.Z));
-
-                if (!SegmentHitsBox(from, to, grown.Item1, grown.Item2))
-                    continue;
-
-                if (node.Count == 0)
-                {
-                    if (top + 2 <= stack.Length)
-                    {
-                        stack[top++] = index + 1;
-                        stack[top++] = node.Right;
-                    }
-                    continue;
-                }
-
-                for (int i = node.First; i < node.First + node.Count; i++)
-                {
-                    if ((contents[order[i]] & mask) == 0)
-                        continue;
-
-                    int t = order[i] * 3;
-
-                    if (!SweepBoxAgainstTriangle(from, to, extent,
-                            vertices[t], vertices[t + 1], vertices[t + 2],
-                            out float hit, out var hitNormal, out bool solid))
-                    {
-                        continue;
-                    }
-
-                    if (solid)
-                        startSolid = true;
-
-                    if (found && hit >= fraction)
-                        continue;
-
-                    fraction = hit;
-                    normal = hitNormal;
-                    found = true;
-                }
-            }
-
-            return found;
-        }
-
-        /// <summary>
-        /// Sweeps a centred box along a segment against one triangle, by the separating axis theorem.
-        ///
-        /// The set of positions where a box overlaps a triangle is their Minkowski sum, which is convex,
-        /// so a moving point against it is an ordinary ray-versus-convex-volume clip: for each candidate
-        /// axis, project the triangle onto it, widen that interval by how far the box reaches along the
-        /// same axis, and intersect the resulting slabs. Whichever slab the ray enters last is the face
-        /// it hits, and that slab's axis is the surface normal.
-        ///
-        /// The axes are the full SAT set rather than just the triangle's plane - the plane alone, which
-        /// is the tempting shortcut, treats the triangle as infinite and reports hits out past its
-        /// edges. Face normals of the box catch the box's own sides, and the nine edge-cross-edge axes
-        /// catch the case where an edge of the box slides past an edge of the triangle without either
-        /// face being the separating one.
-        /// </summary>
-        private static bool SweepBoxAgainstTriangle(BspFile.Vector3 from, BspFile.Vector3 to,
-            BspFile.Vector3 extent, BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2,
-            out float fraction, out BspFile.Vector3 normal, out bool startSolid)
-        {
-            fraction = 1f;
-            normal = new BspFile.Vector3(0, 0, 1);
-            startSolid = false;
-
-            var delta = new BspFile.Vector3(to.X - from.X, to.Y - from.Y, to.Z - from.Z);
-
-            Span<BspFile.Vector3> axes = stackalloc BspFile.Vector3[13];
-            int count = 0;
-
-            axes[count++] = TriangleNormal(v0, v1, v2);
-            axes[count++] = new BspFile.Vector3(1, 0, 0);
-            axes[count++] = new BspFile.Vector3(0, 1, 0);
-            axes[count++] = new BspFile.Vector3(0, 0, 1);
-
-            Span<BspFile.Vector3> edges =
-            [
-                new(v1.X - v0.X, v1.Y - v0.Y, v1.Z - v0.Z),
-                new(v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z),
-                new(v0.X - v2.X, v0.Y - v2.Y, v0.Z - v2.Z),
-            ];
-
-            for (int e = 0; e < 3; e++)
-            {
-                for (int axis = 0; axis < 3; axis++)
-                {
-                    var unit = axis == 0 ? new BspFile.Vector3(1, 0, 0)
-                             : axis == 1 ? new BspFile.Vector3(0, 1, 0)
-                                         : new BspFile.Vector3(0, 0, 1);
-
-                    axes[count++] = new BspFile.Vector3(
-                        edges[e].Y * unit.Z - edges[e].Z * unit.Y,
-                        edges[e].Z * unit.X - edges[e].X * unit.Z,
-                        edges[e].X * unit.Y - edges[e].Y * unit.X);
-                }
-            }
-
-            float enter = 0f, exit = 1f;
-            var enterNormal = new BspFile.Vector3(0, 0, 1);
-            bool haveEnter = false;
-
-            for (int i = 0; i < count; i++)
-            {
-                var n = axes[i];
-
-                float lengthSquared = n.X * n.X + n.Y * n.Y + n.Z * n.Z;
-                if (lengthSquared < 1e-12f)
-                    continue;   // degenerate axis: parallel edges, or a sliver triangle
-
-                float d0 = Dot(n, v0), d1 = Dot(n, v1), d2 = Dot(n, v2);
-                float low = MathF.Min(d0, MathF.Min(d1, d2));
-                float high = MathF.Max(d0, MathF.Max(d1, d2));
-
-                // How far the box reaches along this axis - its support, which is what inflating the
-                // triangle by the box amounts to on this axis.
-                float reach = MathF.Abs(n.X) * extent.X + MathF.Abs(n.Y) * extent.Y + MathF.Abs(n.Z) * extent.Z;
-                low -= reach;
-                high += reach;
-
-                float start = Dot(n, from);
-                float travel = Dot(n, delta);
-
-                if (MathF.Abs(travel) < 1e-9f)
-                {
-                    // No movement along this axis: either it separates for the whole sweep or never.
-                    if (start < low || start > high)
-                        return false;
-
-                    continue;
-                }
-
-                float toLow = (low - start) / travel;
-                float toHigh = (high - start) / travel;
-
-                BspFile.Vector3 face;
-                if (toLow > toHigh)
-                {
-                    (toLow, toHigh) = (toHigh, toLow);
-                    face = n;               // entering through the high side
-                }
-                else
-                {
-                    face = new BspFile.Vector3(-n.X, -n.Y, -n.Z);   // entering through the low side
-                }
-
-                if (toLow > enter)
-                {
-                    enter = toLow;
-                    enterNormal = face;
-                    haveEnter = true;
-                }
-
-                if (toHigh < exit)
-                    exit = toHigh;
-
-                if (enter > exit)
-                    return false;
-            }
-
-            if (enter > exit || enter >= 1f)
-                return false;
-
-            // Overlapping before it has moved anywhere is the caller's "start solid", not a hit at
-            // fraction zero: there is no surface in front to stop against.
-            if (!haveEnter || enter <= 0f)
-            {
-                startSolid = true;
-                fraction = 0f;
-                normal = new BspFile.Vector3(0, 0, 1);
-                return true;
-            }
-
-            fraction = enter;
-
-            float length = MathF.Sqrt(enterNormal.X * enterNormal.X + enterNormal.Y * enterNormal.Y +
-                                      enterNormal.Z * enterNormal.Z);
-            normal = length < 1e-9f
-                ? new BspFile.Vector3(0, 0, 1)
-                : new BspFile.Vector3(enterNormal.X / length, enterNormal.Y / length, enterNormal.Z / length);
-
-            return true;
-        }
-
-        private static float Dot(BspFile.Vector3 a, BspFile.Vector3 b)
-            => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
-
-        private static bool SegmentHitsTriangle(BspFile.Vector3 a, BspFile.Vector3 b,
-            BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2)
-            => TryHitTriangle(a, b, v0, v1, v2, out _);
-
-        /// <summary>Moller-Trumbore, bounded to the segment rather than an infinite ray.</summary>
-        private static bool TryHitTriangle(BspFile.Vector3 a, BspFile.Vector3 b,
-            BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2, out float fraction)
-        {
-            fraction = 1f;
-            const float Epsilon = 1e-6f;
-
-            float dx = b.X - a.X, dy = b.Y - a.Y, dz = b.Z - a.Z;
-
-            float e1x = v1.X - v0.X, e1y = v1.Y - v0.Y, e1z = v1.Z - v0.Z;
-            float e2x = v2.X - v0.X, e2y = v2.Y - v0.Y, e2z = v2.Z - v0.Z;
-
-            float px = dy * e2z - dz * e2y;
-            float py = dz * e2x - dx * e2z;
-            float pz = dx * e2y - dy * e2x;
-
-            float det = e1x * px + e1y * py + e1z * pz;
-            if (MathF.Abs(det) < Epsilon)
-                return false; // parallel; a grazing hit is not worth chasing
-
-            float inverse = 1f / det;
-
-            float tx = a.X - v0.X, ty = a.Y - v0.Y, tz = a.Z - v0.Z;
-            float u = (tx * px + ty * py + tz * pz) * inverse;
-            if (u < 0f || u > 1f) return false;
-
-            float qx = ty * e1z - tz * e1y;
-            float qy = tz * e1x - tx * e1z;
-            float qz = tx * e1y - ty * e1x;
-
-            float v = (dx * qx + dy * qy + dz * qz) * inverse;
-            if (v < 0f || u + v > 1f) return false;
-
-            float t = (e2x * qx + e2y * qy + e2z * qz) * inverse;
-            if (t is <= Epsilon or >= 1f)
-                return false;
-
-            fraction = t;
-            return true;
-        }
-
-        private static bool SegmentHitsBox(BspFile.Vector3 a, BspFile.Vector3 b,
-            BspFile.Vector3 mins, BspFile.Vector3 maxs)
-        {
-            float tMin = 0f, tMax = 1f;
-
-            return Slab(a.X, b.X - a.X, mins.X, maxs.X, ref tMin, ref tMax)
-                && Slab(a.Y, b.Y - a.Y, mins.Y, maxs.Y, ref tMin, ref tMax)
-                && Slab(a.Z, b.Z - a.Z, mins.Z, maxs.Z, ref tMin, ref tMax);
-        }
-
-        private static bool Slab(float origin, float delta, float min, float max, ref float tMin, ref float tMax)
-        {
-            if (MathF.Abs(delta) < 1e-6f)
-                return origin >= min && origin <= max;
-
-            float inverse = 1f / delta;
-            float t0 = (min - origin) * inverse;
-            float t1 = (max - origin) * inverse;
-
-            if (t0 > t1) (t0, t1) = (t1, t0);
-
-            tMin = MathF.Max(tMin, t0);
-            tMax = MathF.Min(tMax, t1);
-
-            return tMin <= tMax;
-        }
+            => mesh.TryTraceHull(a, b, mins, maxs, mask, out fraction, out normal, out startSolid);
     }
 }
