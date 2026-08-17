@@ -48,6 +48,7 @@ treat a working lift as a dead end.
 | Brush ladders | Not outside L4D | Yes |
 | Lift and elevator stops | No | Yes |
 | Explains its own output | No | Yes, several diagnostic commands |
+| Static prop collision | Yes | Yes — prop lump, VPKs and `.phy` hulls, read offline |
 | Visibility (`nav_analyze`) | Yes, in game | Yes, offline and parallel |
 | Hiding spots | Yes | Yes — 267/267 against the engine's own gm_construct mesh |
 | Sniper spot grading | Only with `nav_quicksave 0` | Yes, always — 98.5% flag agreement |
@@ -88,7 +89,22 @@ both your result and the map's shipped `.nav`.
 
 ### What has been measured
 
-One part is settled, because it can be scored against the engine directly rather than judged by eye.
+Static props were the largest single source of error and are now read, which moves the ground-fit
+numbers a long way. Generating `rp_downtown_meowy` from the same seed mesh, before and after:
+
+| `meshwright fit` | without props | with props |
+|---|---|---|
+| Mean height error | 10.9 | **1.2** |
+| Median | 0.4 | **0.0** |
+| p90 | 9.8 | **3.7** |
+| Areas above their floor | 1,979 (10.5%) | **150 (0.4%)** |
+| Areas over open air | 26 (0.1%) | **14 (0.0%)** |
+
+For scale: scored by the same tracer, the mesh Garry's Mod generates for that map has 5.1% of its areas
+above their floor. The cost is a bigger, more fragmented mesh — see [Limitations](#limitations) — and
+about 300 ms of extra load time, which overlaps the rest of the load.
+
+Another part is settled, because it can be scored against the engine directly rather than judged by eye.
 Running `build-spots` over the mesh Garry's Mod itself produced for `gm_construct` — so both are
 describing the same 2,150 areas, and any difference is the rule rather than the mesh:
 
@@ -103,8 +119,12 @@ describing the same 2,150 areas, and any difference is the rule rather than the 
 
 The encounter *structure* matches exactly, which is the part decided by the connection graph. The
 sightings inside them are decided by line-of-sight traces instead, and land 16% short — that gap is
-tracer fidelity rather than the encounter rule, and it is the same effect recorded elsewhere in this
-codebase as roughly 25 of 250 sampled rays disagreeing with the engine over displacement terrain.
+tracer fidelity rather than the encounter rule, and what causes it is not known.
+
+Two explanations have been offered here before and both are wrong, so they are worth ruling out in
+writing. It is not displacement terrain: that has since been checked against the running engine vertex
+by vertex and agrees to a median of zero. It is not static props either, and that one was never
+arithmetically possible — `gm_construct` has four solid props in the whole map.
 
 The engine reference for the sniper grades needs `nav_quicksave 0` before `nav_analyze`; the default
 skips that phase entirely. Beware any comparison against a `.nav` you did not watch being generated —
@@ -151,6 +171,13 @@ about a mesh you are unhappy with:
 | `meshwright probe <bsp> x1 y1 z1 x2 y2 z2` | What blocks one straight line |
 | `meshwright compare-areas <ref.nav> <candidate.nav>` | How much of a known-good mesh a generated one covers |
 | `meshwright vis-compare <bsp> <analysed.nav>` | How computed visibility scores against an analysed mesh |
+| `meshwright props <bsp>` | Every static prop, which models resolved, and how much collision was found |
+| `meshwright props <bsp> -near x y z` | Which prop is standing at a spot |
+| `meshwright props <bsp> -model <path>` | One model's `.phy` hull against the bounds its `.mdl` declares |
+| `meshwright props <bsp> -column x y` | Every prop surface in one vertical column |
+| `meshwright disp <bsp>` | What every displacement reconstructed to, and whether the lump parsed cleanly |
+| `meshwright disp <bsp> -verts N` | One displacement's grid, as base point, offset and raw lump record |
+| `meshwright disp <bsp> -sample N` | Sampled terrain vertices as a Lua table, to check against a running game |
 
 Run `meshwright` with no arguments for the full list.
 
@@ -161,12 +188,36 @@ Worth knowing before you rely on it:
 - **Encounter sightings run about 16% short.** The encounters themselves match the engine exactly —
   63,628 over the same 2,149 areas — because which ones exist is decided by the connection graph. What
   lies *inside* them is decided by line-of-sight traces, and there Meshwright finds 10,730 sightings
-  against the engine's 12,721. The encounter rule is not the suspect; the tracer is, and the shortfall
-  is the same order as the displacement disagreement noted below.
-- **Stair marking is incomplete.** 11 of 19 on gm_construct. Areas that span a staircase are found
-  correctly; some still pick up a neighbouring ramp or run off the end of a flight, which makes the
-  stair test correctly reject them.
-- **Some areas still overhang.** 3–5% depending on the map, against the engine's 0.1% on gm_construct.
+  against the engine's 12,721. The encounter rule is not the suspect; the tracer is, and neither
+  displacements nor static props explain it — both have been checked against the running engine, and
+  `gm_construct`, where this is measured, has four solid props in total.
+- **Stair marking is limited by area shape, not by the test.** These are worth separating, because
+  they need opposite fixes and the counts alone conflate them. Run over the engine's *own* areas, the
+  stair test now reproduces the engine's verdicts exactly on gm_construct — all 2,150 areas agree,
+  18 marked either way — and on rp_downtown_meowy it finds 3 against the engine's 2. So the
+  classifier is sound. Run over a mesh generated here it still finds fewer, because an area that runs
+  off the end of a flight or picks up a neighbouring ramp is correctly rejected: the shape is wrong,
+  not the verdict.
+- **Areas are more fragmented than the engine's, and that is the cost of seeing props.** Now that a
+  lamppost is solid, an area containing one gets clipped around it and split, and slivers too narrow to
+  walk are discarded. On `rp_downtown_meowy` that takes the mesh from 18,909 areas to 33,402, and drops
+  coverage of the engine's own ground from 100% to 93.4% — the missing 6.6% is mesh that used to run
+  straight through props. Whether that is a fix or a regression depends on what you want: the mesh is
+  more truthful and a bot will not walk into scenery, but it is bigger and more broken up. It also adds
+  14,934 areas standing on prop tops that the engine's mesh does not have.
+- **Displacement terrain is not a limitation — this entry used to say it was.** It was listed here as
+  wrong-on-some-maps on the strength of an offline measure: `meshwright disp` flags 45 of
+  `rp_downtown_meowy`'s 183 displacements as carrying offsets that lie *in* the plane of their base
+  quad, by up to two thousand units, against none of `gm_construct`'s 110. Reconstructing the grid for
+  the worst of them and tracing to the engine's own terrain at each of the 81 vertices settles it: the
+  median gap is **0.0 units**, with 73% to 86% of vertices inside 8. Large in-plane offsets are ordinary
+  mapping — the outer ring of a big terrain displacement is flared out and dropped to the world floor
+  so the terrain seals against it. The measure is kept, reworded, because a footprint larger than its
+  quad is worth knowing; it is not a defect.
+- **The stair probe is a line where Valve sweeps a hull.** Terrain rejection is now in place, matching
+  Valve's `trace.IsDispSurface()` check, but the probe itself is still an infinitely thin line against
+  Valve's 5-unit box. A line drops through a grating or a gap fractionally narrower than itself where
+  the box would bridge it.
 - **Some collision questions are still answered with a thin line rather than a swept box.** The box
   sweep itself now covers all three geometry classes — world brushes, brush entities and displacement
   terrain — so the structural gap that used to be here is closed, and movement between samples is
@@ -174,8 +225,19 @@ Worth knowing before you rely on it:
   standing right here" is a *point* question, and a zero-length sweep is degenerate for a brush
   clipper, so headroom is still a line trace. Substituting a sweep there measured clearly worse (it
   fails open), and handling the degenerate case properly is the outstanding work.
-- **Static props are not modelled at all.** Nothing here reads the static prop lump, so a prop that
-  blocks a doorway in game is invisible to every trace and the mesh will run straight through it.
+- **Static props are modelled, but a prop whose model you do not have is still invisible.** Collision
+  comes from each model's `.phy`, found through the map's embedded pakfile, the loose game and addon
+  directories, and the VPKs, in that order. What is not found contributes nothing — see the note on the
+  bounding box below. `meshwright props <bsp>` reports the split; on `rp_downtown_meowy` it is 169 of
+  194 models, 1,469 of 1,523 solid props, 146,386 collision triangles.
+
+  If you are running this on a build machine with no game installed, expect that number to be low and
+  the mesh to float wherever the missing props are.
+
+  **A missing hull is left missing, never boxed.** Substituting the model's bounding box was tried and
+  is measurably worse: the ten models on `rp_downtown_meowy` that lack a `.phy` are bushes,
+  hedgerows, tree cards and skybox props, and a box round those deletes the ground beside them rather
+  than adding any. Skybox props should not be collided against at all.
 - **Movement constants are not switched per game.** They use the non-Counter-Strike branch of
   `nav.h` — a 64-unit crouch jump and a 400-unit survivable drop, which is right for Garry's Mod and
   TF2 and wrong for CS:S/CS:GO (58 and 200).
