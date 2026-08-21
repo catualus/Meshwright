@@ -29,6 +29,8 @@ namespace Meshwright
                 if (TryGetThreadCount(args, out int threads))
                     NavConcurrency.MaxThreads = threads;
 
+                ApplyGame(args);
+
                 return args[0].ToLowerInvariant() switch
                 {
                     "verify" => Verify(args),
@@ -97,12 +99,61 @@ namespace Meshwright
             return true;
         }
 
+        /// <summary>
+        /// Reads a global "-game NAME" flag and switches the movement limits to match.
+        ///
+        /// Three of nav.h's constants differ between Counter-Strike and everything else, and generating
+        /// a CS map with the wrong branch produces routes a player cannot take. Applied before the
+        /// command runs, because the sampling flood consults them from its first step.
+        /// </summary>
+        private static void ApplyGame(string[] args)
+        {
+            // Two spellings, deliberately with different tolerance for a name they do not know.
+            //
+            // -game is typed by a person who meant something specific, so an unrecognised value is a
+            // typo and throwing is right - silently generating with the wrong movement limits produces
+            // a mesh full of routes a player cannot take, and nothing downstream would say so.
+            //
+            // -gamename is substituted by a host from whatever its game configuration happens to be
+            // called, which is a display name nobody constrained: "Garry's Mod", "Team Fortress 2",
+            // someone's renamed mod. Aborting a whole compile because a configuration has an unusual
+            // name would be absurd, so that one falls back to the default and says it did.
+            int i = Array.FindIndex(args, a => a.Equals("-game", StringComparison.OrdinalIgnoreCase));
+            bool strict = i >= 0;
+
+            if (i < 0)
+                i = Array.FindIndex(args, a => a.Equals("-gamename", StringComparison.OrdinalIgnoreCase));
+
+            if (i < 0 || i + 1 >= args.Length) return;
+
+            string game = args[i + 1].ToLowerInvariant();
+
+            bool counterStrike = strict
+                ? game is "cs" or "css" or "csgo" or "cstrike" or "counterstrike"
+                : game.Contains("counter-strike") || game.Contains("counter strike") ||
+                  game is "cs" or "css" or "csgo" or "cstrike" or "counterstrike";
+
+            if (strict && !counterStrike && game is not ("gmod" or "garrysmod" or "hl2" or "tf2" or "source"))
+                throw new ArgumentException($"-game does not know '{args[i + 1]}'; use cs, css, csgo, gmod, hl2, tf2 or source");
+
+            NavConstants.UseCounterStrikeLimits = counterStrike;
+
+            if (counterStrike)
+            {
+                Console.WriteLine($"      Counter-Strike movement limits: crouch jump " +
+                                  $"{NavConstants.JumpCrouchHeight:F0}, survivable drop {NavConstants.DeathDrop:F0}, " +
+                                  $"climb {NavConstants.ClimbUpHeight:F0}");
+            }
+        }
+
         private static void Usage()
         {
             Console.WriteLine("meshwright - Source engine navigation mesh tool");
             Console.WriteLine();
             Console.WriteLine("  global flags (any command):");
             Console.WriteLine("  -threads N              Cap parallel work at N threads (default: every core)");
+
+            Console.WriteLine("  -game NAME              Movement limits: cs/css/csgo, or gmod/hl2/tf2/source (default)");
             Console.WriteLine();
             Console.WriteLine("  build passes (each writes a new .nav; chain them in this order):");
             Console.WriteLine("  meshwright build-ladders    <file.bsp> <file.nav> [-o out.nav]");

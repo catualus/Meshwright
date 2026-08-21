@@ -66,9 +66,37 @@ namespace Meshwright
         /// games Compile Pal is pointed at here - Garry's Mod and TF2 both take the 64 branch. A wall
         /// between 58 and 64 units high is one a player can crouch-jump onto and the flood was refusing
         /// to climb it, so no area was generated on top of it and no jump connection to it existed.
-        /// A Counter-Strike build would want 58; this is not currently switched per game.
+        /// Switched by <see cref="UseCounterStrikeLimits"/>.
         /// </summary>
-        public const float JumpCrouchHeight = 64f;
+        public static float JumpCrouchHeight { get; private set; } = 64f;
+
+        /// <summary>
+        /// Whether the movement limits are Counter-Strike's rather than everything else's.
+        ///
+        /// Three of nav.h's constants sit behind <c>#if defined(CSTRIKE_DLL)</c>, and they are not
+        /// cosmetic differences: a crouch jump is 58 units instead of 64, a survivable drop is 200
+        /// instead of 400, and a climbable surface is 58 instead of 200. Generating a CS map with the
+        /// other branch invents routes a player cannot take - a ledge 62 units up that a bot will try to
+        /// crouch-jump onto, a 300-unit drop it will step off and die.
+        ///
+        /// Read as properties rather than constants because of this. They were <c>const</c>, which
+        /// meant a caller in another assembly baked the Garry's Mod figure in at compile time and could
+        /// not be switched at all.
+        /// </summary>
+        public static bool UseCounterStrikeLimits
+        {
+            get => counterStrike;
+            set
+            {
+                counterStrike = value;
+
+                JumpCrouchHeight = value ? 58f : 64f;
+                ClimbUpHeight = value ? 58f : 200f;
+                DeathDrop = value ? 200f : 400f;
+            }
+        }
+
+        private static bool counterStrike;
 
         /// <summary>Standing height; the headroom a sampled position needs to be walkable.</summary>
         public const float HumanHeight = 71f;
@@ -93,9 +121,9 @@ namespace Meshwright
         /// <summary>
         /// How far up a climbable surface may be scaled. Another of nav.h's per-game pairs: 58 under
         /// <c>CSTRIKE_DLL</c> and 200 elsewhere, and unlike the others the two are wildly different
-        /// rather than merely a few units apart.
+        /// rather than merely a few units apart. Switched by <see cref="UseCounterStrikeLimits"/>.
         /// </summary>
-        public const float ClimbUpHeight = 200f;
+        public static float ClimbUpHeight { get; private set; } = 200f;
 
         /// <summary>
         /// Drop past which ground is a cliff rather than a step down. Unconditional in nav.h. Nothing
@@ -119,8 +147,9 @@ namespace Meshwright
         /// the larger figure on the non-CS branch as being raised deliberately, on the grounds that the
         /// NPCs those games care about do not take falling damage. With 200 here, every survivable drop between 200 and 400 units was
         /// refused as fatal and the areas below it left unreachable from above.
+        /// Switched by <see cref="UseCounterStrikeLimits"/>.
         /// </summary>
-        public const float DeathDrop = 400f;
+        public static float DeathDrop { get; private set; } = 400f;
 
         /// <summary>Half the human width; the clearance a connection needs on each side.</summary>
         public const float HalfHumanWidth = HumanWidth / 2f;
