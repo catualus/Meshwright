@@ -52,11 +52,33 @@ namespace Meshwright
             out float fraction, out BspFile.Vector3 normal, out bool startSolid)
             => mesh.TryTraceHull(a, b, mins, maxs, mask, out fraction, out normal, out startSolid);
 
+        /// <summary>How much content had to be searched, which is most of what loading props costs.</summary>
+        public int SearchRoots { get; private set; }
+        public int SearchVpks { get; private set; }
+        public int SearchGmas { get; private set; }
+        public int GmasOpened { get; private set; }
+
+        /// <summary>How many VPK directories actually had to be parsed - they are opened only on a miss.</summary>
+        public int VpksOpened { get; private set; }
+        public int PakfileEntries { get; private set; }
+
+        /// <summary>Milliseconds spent loading hulls, placing them, and indexing the result, plus the
+        /// content-opening costs carried up from <see cref="GameFiles"/>.</summary>
+        public long LoadMs, PlaceMs, IndexMs, VpkMs, PakMs, GmaMs;
+
+        /// <summary>Where the model files came from - see <see cref="GameFiles"/>.</summary>
+        public int ReadsFromPakfile, ReadsFromDisk, ReadsFromVpk, ReadsFromGma;
+
         /// <summary>How many placed props contributed geometry.</summary>
         public int PropsBuilt { get; private set; }
 
-        /// <summary>Props whose model could not be found at all.</summary>
-        public int PropsMissingModel { get; private set; }
+        /// <summary>
+        /// Props that ended up with no collision, whether the model was missing entirely or was found
+        /// but shipped no hull. Deliberately one number: from the mesh's point of view the two are the
+        /// same hole, and which it was is answered by <see cref="MissingModels"/> against
+        /// <see cref="ModelsWithoutHull"/>.
+        /// </summary>
+        public int PropsWithoutCollision { get; private set; }
 
         /// <summary>Models that claim physics collision but ship no hull, so contribute nothing.</summary>
         public IReadOnlyList<string> ModelsWithoutHull => hullless;
@@ -66,8 +88,16 @@ namespace Meshwright
         /// <summary>Props that fell back to the model's bounding box because no hull was available.</summary>
         public int PropsFromBoundingBox { get; private set; }
 
-        /// <summary>Models named by the map, and how many of them yielded a collision hull.</summary>
+        /// <summary>
+        /// Models the map's dictionary names, how many of those any solid prop actually uses, and how
+        /// many of those yielded a hull.
+        ///
+        /// The middle number is the one to judge success against. A map's dictionary includes models
+        /// only non-solid props reference - gm_construct names seventeen and needs three - so scoring
+        /// against the total reports a failure that never happened.
+        /// </summary>
         public int ModelsNamed { get; private set; }
+        public int ModelsUsed { get; private set; }
         public int ModelsWithHull { get; private set; }
 
         /// <summary>Model paths that could not be resolved, for reporting rather than silent loss.</summary>
@@ -88,48 +118,142 @@ namespace Meshwright
             var result = new StaticProps
             {
                 ModelsNamed = lump.ModelNames.Length,
+                SearchRoots = files.RootCount,
+                SearchVpks = files.VpkCount,
+                PakfileEntries = files.PakfileEntries,
             };
 
-            var hulls = new BspFile.Vector3[lump.ModelNames.Length][];
-            var resolved = new bool[lump.ModelNames.Length];
-            var fromBox = new bool[lump.ModelNames.Length];
+            int models = lump.ModelNames.Length;
 
-            var tris = new List<BspFile.Vector3>();
+            var hulls = new BspFile.Vector3[models][];
+            var fromBox = new bool[models];
+
+            // Which models are actually used, and with what solidity. A model's shape depends on the
+            // solidity of the prop asking for it, so the value is taken from the first prop in lump
+            // order that names it - the same one the sequential version happened to use, which keeps
+            // the result identical rather than merely equivalent.
+            var solidFor = new byte[models];
+            var used = new bool[models];
+            var wanted = new List<int>();
+
+            foreach (var prop in lump.Props)
+            {
+                if (used[prop.ModelIndex]) continue;
+
+                used[prop.ModelIndex] = true;
+                solidFor[prop.ModelIndex] = prop.Solid;
+                wanted.Add(prop.ModelIndex);
+            }
+
+            // Loading is per model and independent, so it goes wide.
+            //
+            // Worth knowing how little this turned out to be worth on its own, because the obvious guess
+            // was wrong twice. Static props looked like they cost 710ms to load, and both the file
+            // reading and the hull parsing are here, so this is where the work went first. It bought
+            // 22%. The actual breakdown - which <see cref="LoadMs"/> and its siblings exist to report,
+            // having been added to settle it - is 51ms here, 11ms placing the hulls, and 218ms building
+            // the BVH over the result. Parallelising a twentieth of the runtime is not a speed-up.
+            //
+            // It is kept because it is free and correct, and because a map whose models live in VPKs
+            // rather than loose on disk pays a lot more here than this one does. But the cost of static
+            // props was never the props; see the note on TriangleMesh's build scratch.
+            //
+            // Diagnostics are collected into per-model slots rather than appended to shared lists, and
+            // flattened afterwards in model order. A concurrent collection would have been less code and
+            // would have made `props` report its missing models in a different order every run, which is
+            // a miserable thing to diff against.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
+            result.ModelsUsed = wanted.Count;
+
+
+            var missingAt = new string?[models];
+            var hulllessAt = new string?[models];
+
+            System.Threading.Tasks.Parallel.ForEach(wanted, NavConcurrency.Options, m =>
+            {
+                hulls[m] = LoadHull(files, lump.ModelNames[m], solidFor[m],
+                    out fromBox[m], out missingAt[m], out hulllessAt[m]);
+            });
+
+            result.LoadMs = clock.ElapsedMilliseconds; clock.Restart();
+
+
+
+            for (int m = 0; m < models; m++)
+            {
+                if (hulls[m] is { Length: > 0 }) result.ModelsWithHull++;
+                if (missingAt[m] is { } gone) result.missingModels.Add(gone);
+                if (hulllessAt[m] is { } bare) result.hullless.Add(bare);
+            }
+
+            // Sized up front. The total is known from the hulls and the placements, and letting a list
+            // grow to a hundred and fifty thousand vertices means copying the whole thing seventeen
+            // times on the way there.
+            int total = 0;
+            foreach (var prop in lump.Props) total += hulls[prop.ModelIndex]?.Length ?? 0;
+
+            var tris = new BspFile.Vector3[total];
+            int at = 0;
 
             foreach (var prop in lump.Props)
             {
                 int m = prop.ModelIndex;
+                var hull = hulls[m] ?? [];
 
-                if (!resolved[m])
-                {
-                    resolved[m] = true;
-                    hulls[m] = result.LoadHull(files, lump.ModelNames[m], prop.Solid, out bool box);
-                    fromBox[m] = box;
-
-                    if (hulls[m].Length > 0) result.ModelsWithHull++;
-                }
-
-                var hull = hulls[m];
-
-                if (hull.Length == 0) { result.PropsMissingModel++; continue; }
+                if (hull.Length == 0) { result.PropsWithoutCollision++; continue; }
 
                 if (fromBox[m]) result.PropsFromBoundingBox++;
 
                 result.PropsBuilt++;
 
+                // Once per prop, not once per vertex - see StaticPropLump.Basis.
+                var basis = StaticPropLump.Basis.For(prop.Pitch, prop.Yaw, prop.Roll);
+                float scale = prop.Scale;
+
                 foreach (var v in hull)
                 {
-                    var scaled = new BspFile.Vector3(v.X * prop.Scale, v.Y * prop.Scale, v.Z * prop.Scale);
-                    var turned = StaticPropLump.Rotate(scaled, prop.Pitch, prop.Yaw, prop.Roll);
+                    var turned = basis.Apply(new BspFile.Vector3(v.X * scale, v.Y * scale, v.Z * scale));
 
-                    tris.Add(new BspFile.Vector3(
+                    tris[at++] = new BspFile.Vector3(
                         turned.X + prop.Origin.X,
                         turned.Y + prop.Origin.Y,
-                        turned.Z + prop.Origin.Z));
+                        turned.Z + prop.Origin.Z);
                 }
             }
 
-            result.Triangles = tris.ToArray();
+            result.PlaceMs = clock.ElapsedMilliseconds; clock.Restart();
+
+
+
+            result.VpksOpened = files.VpkOpened;
+
+
+
+            result.VpkMs = files.VpkMs;
+
+
+
+            result.PakMs = files.PakMs;
+
+
+
+            result.ReadsFromPakfile = files.ReadsFromPakfile;
+
+            result.ReadsFromDisk = files.ReadsFromDisk;
+
+            result.ReadsFromVpk = files.ReadsFromVpk;
+
+            result.ReadsFromGma = files.ReadsFromGma;
+
+            result.SearchGmas = files.GmaCount;
+
+            result.GmasOpened = files.GmasOpened;
+
+            result.GmaMs = files.GmaMs;
+
+
+            result.Triangles = tris;
 
             // Every prop triangle carries CONTENTS_SOLID, uniformly. There is no per-triangle material
             // distinction here as there is for brushes - a prop's collision is solid or it does not
@@ -138,6 +262,8 @@ namespace Meshwright
             Array.Fill(perTriangle, PropContents);
 
             result.mesh.Build(result.Triangles, perTriangle);
+
+            result.IndexMs = clock.ElapsedMilliseconds;
             return result;
         }
 
@@ -162,9 +288,17 @@ namespace Meshwright
         /// So a prop whose hull cannot be found is counted and skipped. That leaves a known gap rather
         /// than an invented surface, and <see cref="PropsWithoutHull"/> says how big it is.
         /// </summary>
-        private BspFile.Vector3[] LoadHull(GameFiles files, string modelPath, byte solid, out bool box)
+        /// <remarks>
+        /// Static, and reports its two failure kinds through out parameters rather than appending to the
+        /// instance's lists, because it runs on many threads at once. The caller flattens them in model
+        /// order afterwards.
+        /// </remarks>
+        private static BspFile.Vector3[] LoadHull(GameFiles files, string modelPath, byte solid,
+            out bool box, out string? missing, out string? noHull)
         {
             box = false;
+            missing = null;
+            noHull = null;
 
             if (solid == StaticPropLump.SolidVPhysics)
             {
@@ -176,13 +310,13 @@ namespace Meshwright
                     if (phy.TriangleCount > 0) return phy.Triangles;
                 }
 
-                hullless.Add(modelPath);
+                noHull = modelPath;
                 return [];
             }
 
             if (!files.TryRead(modelPath, out var mdlBytes))
             {
-                missingModels.Add(modelPath);
+                missing = modelPath;
                 return [];
             }
 

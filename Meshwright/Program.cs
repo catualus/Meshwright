@@ -1896,12 +1896,47 @@ namespace Meshwright
 
             Console.WriteLine("      solidity: " + string.Join("  ",
                 lump.SolidHistogram.OrderBy(e => e.Key).Select(e => $"{e.Key}={e.Value:N0}")));
+
             var built = StaticProps.Load(bspPath);
 
-            Console.WriteLine($"      {built.ModelsWithHull:N0} of {built.ModelsNamed:N0} models yielded a hull; " +
-                              $"{built.PropsBuilt:N0} props built, {built.PropsFromBoundingBox:N0} from a bounding box, " +
-                              $"{built.PropsMissingModel:N0} with nothing");
-            Console.WriteLine($"      {built.TriangleCount:N0} collision triangles");
+            // Against models *used*, not models named. The dictionary lists every model the map mentions
+            // including ones only non-solid props use, and reporting against that reads as failure:
+            // gm_construct names 17 and needs 3, which said "3 of 17 models yielded a hull" when nothing
+            // had gone wrong at all.
+            Console.WriteLine($"      {built.ModelsWithHull:N0} of {built.ModelsUsed:N0} models used by solid props " +
+                              $"yielded a hull ({built.ModelsNamed:N0} named in total); {built.PropsBuilt:N0} props built, " +
+                              $"{built.PropsFromBoundingBox:N0} from a bounding box, {built.PropsWithoutCollision:N0} with nothing");
+
+            // Degenerate triangles are worth counting. A convex decomposition routinely emits slivers,
+            // and they are not harmless: they occupy BVH leaves, and the face normal read off one is
+            // numerical noise, which matters because that normal is what decides walkability and feeds
+            // the stair test.
+            int slivers = 0;
+            var soup = built.Triangles;
+
+            for (int t = 0; t + 2 < soup.Length; t += 3)
+            {
+                float ux = soup[t + 1].X - soup[t].X, uy = soup[t + 1].Y - soup[t].Y, uz = soup[t + 1].Z - soup[t].Z;
+                float vx = soup[t + 2].X - soup[t].X, vy = soup[t + 2].Y - soup[t].Y, vz = soup[t + 2].Z - soup[t].Z;
+
+                float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+
+                if (MathF.Sqrt(nx * nx + ny * ny + nz * nz) / 2f < 0.5f) slivers++;
+            }
+
+            Console.WriteLine($"      {built.TriangleCount:N0} collision triangles, " +
+                              $"{slivers:N0} smaller than half a square unit");
+
+            Console.WriteLine($"      content searched: {built.SearchRoots:N0} directories, " +
+                              $"{built.SearchVpks:N0} VPKs ({built.VpksOpened:N0} opened), " +
+                              $"{built.PakfileEntries:N0} pakfile entries, " + $"{built.SearchGmas:N0} workshop addons ({built.GmasOpened:N0} opened)");
+
+            Console.WriteLine($"      timing: {built.PakMs} ms pakfile, {built.VpkMs} ms VPK directories, " +
+                              $"{built.LoadMs} ms loading hulls, {built.PlaceMs} ms placing, {built.IndexMs} ms indexing");
+
+            Console.WriteLine($"      model reads: {built.ReadsFromPakfile:N0} from pakfile, " +
+                              $"{built.ReadsFromDisk:N0} from disk, {built.ReadsFromVpk:N0} from VPK, {built.ReadsFromGma:N0} from workshop");
+
             if (built.ModelsWithoutHull.Count > 0)
             {
                 Console.WriteLine();
@@ -1990,7 +2025,10 @@ namespace Meshwright
 
                     if (len < 1e-4f) continue;
 
-                    picked.Add($"{{{cx:F1},{cy:F1},{cz:F1},{nx / len:F3},{ny / len:F3},{nz / len:F3}}}");
+                    // Twice the triangle's area, which is what the cross product's length already is.
+                    // Carried into the sample so a probe that finds nothing can be told apart from a
+                    // sliver whose normal was never meaningful in the first place.
+                    picked.Add($"{{{cx:F1},{cy:F1},{cz:F1},{nx / len:F3},{ny / len:F3},{nz / len:F3},{len / 2f:F2}}}");
                 }
 
                 Console.WriteLine("local pts={" + string.Join(",", picked) + "}");
@@ -2396,6 +2434,18 @@ namespace Meshwright
                     () => BspModels.Load(bspPath, parsed)));
                 Benchmark.Report(Benchmark.Measure("BspDisplacements", repeats,
                     () => BspDisplacements.Load(bspPath)));
+
+
+                Benchmark.Report(Benchmark.Measure("StaticPropLump", repeats,
+                    () => StaticPropLump.Load(bspPath)));
+
+
+
+
+                Benchmark.Report(Benchmark.Measure("GameFiles.Open", repeats,
+                    () => GameFiles.Open(bspPath).Dispose()));
+
+
 
 
                 Benchmark.Report(Benchmark.Measure("StaticProps", repeats,
