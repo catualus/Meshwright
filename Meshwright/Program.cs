@@ -187,6 +187,8 @@ namespace Meshwright
 
             ReportLadderAttachment(nav);
 
+            NavIntegrity.PruneAndReport(nav);
+
             nav.Save(outPath);
             Console.WriteLine($"out   {outPath}  ({new FileInfo(outPath).Length:N0} bytes)");
 
@@ -711,6 +713,7 @@ namespace Meshwright
             }
 
             nav.IsAnalyzed = true;
+            NavIntegrity.PruneAndReport(nav);
             nav.Save(outPath);
 
             var written = new FileInfo(outPath);
@@ -1146,6 +1149,8 @@ namespace Meshwright
             Console.WriteLine($"      {before:N0} -> {after:N0} connections, " +
                               $"{isolatedBefore:N0} -> {isolatedAfter:N0} isolated, in {sw.ElapsedMilliseconds:N0} ms");
 
+            NavIntegrity.PruneAndReport(nav);
+
             nav.Save(outPath);
             Console.WriteLine($"out   {outPath}  ({new FileInfo(outPath).Length:N0} bytes)");
 
@@ -1321,6 +1326,8 @@ namespace Meshwright
                                           : ""));
                 }
             }
+
+            NavIntegrity.PruneAndReport(nav);
 
             nav.Save(outPath);
             Console.WriteLine($"out   {outPath}  ({new FileInfo(outPath).Length:N0} bytes)");
@@ -2595,6 +2602,8 @@ namespace Meshwright
 
             Console.WriteLine($"      done in {sw.ElapsedMilliseconds:N0} ms");
 
+            NavIntegrity.PruneAndReport(nav);
+
             nav.Save(outPath);
             Console.WriteLine($"out   {outPath}  ({new FileInfo(outPath).Length:N0} bytes)");
 
@@ -3082,6 +3091,7 @@ namespace Meshwright
 
             if (FlagValue(args, "-o") is { } outPath)
             {
+                NavIntegrity.PruneAndReport(nav);
                 nav.Save(outPath);
                 Console.WriteLine($"out   {outPath}");
             }
@@ -3283,6 +3293,47 @@ namespace Meshwright
             Console.WriteLine($"connections     {connections:N0}  (avg {(nav.Areas.Count > 0 ? connections / (double)nav.Areas.Count : 0):F2} per area)");
             Console.WriteLine($"isolated areas  {isolated:N0}");
             Console.WriteLine($"hiding spots    {hidingSpots:N0}");
+
+            // Does every reference resolve? Nothing else here checks it, and nothing had to until the
+            // engine was asked to load a generated mesh and answered with a wall of
+            // "CNavArea::PostLoad: Corrupt navigation data. Cannot connect Navigation Areas."
+            //
+            // A dangling reference is invisible from this side. The file round-trips byte for byte, this
+            // tool reloads it and counts the same areas and connections, and every number looks right -
+            // because a reader that resolves ids lazily never notices one that points nowhere. The
+            // engine resolves them all at load and complains about each.
+            var known = new HashSet<uint>(nav.Areas.Count);
+            int duplicateIds = 0;
+
+            foreach (var area in nav.Areas)
+                if (!known.Add(area.Id)) duplicateIds++;
+
+            long danglingConnections = 0, danglingLadders = 0, danglingVisible = 0;
+
+            foreach (var area in nav.Areas)
+            {
+                foreach (var direction in area.Connections)
+                    foreach (uint target in direction)
+                        if (target != 0 && !known.Contains(target)) danglingConnections++;
+
+                foreach (var visible in area.VisibleAreas)
+                    if (visible.AreaId != 0 && !known.Contains(visible.AreaId)) danglingVisible++;
+            }
+
+            var ladderIds = new HashSet<uint>(nav.Ladders.Select(l => l.Id));
+
+            foreach (var area in nav.Areas)
+                foreach (var side in area.Ladders)
+                    foreach (uint target in side)
+                        if (target != 0 && !ladderIds.Contains(target)) danglingLadders++;
+
+            bool sound = duplicateIds == 0 && danglingConnections == 0
+                      && danglingLadders == 0 && danglingVisible == 0;
+
+            Console.WriteLine($"references      {(sound ? "all resolve" : "BROKEN")}" +
+                              (sound ? "" : $"  - {danglingConnections:N0} connections, {danglingLadders:N0} ladder, " +
+                                            $"{danglingVisible:N0} visibility point at a missing id; " +
+                                            $"{duplicateIds:N0} duplicate area ids"));
 
             var attributeCounts = new SortedDictionary<NavAttributes, int>();
             foreach (var area in nav.Areas)

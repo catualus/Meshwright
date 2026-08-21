@@ -160,6 +160,12 @@ namespace Meshwright
 
             int merges = 0;
 
+
+
+            // Which area swallowed which, so references can be repointed before the losers are removed.
+
+            var absorbed = new Dictionary<uint, uint>();
+
             foreach (var area in nav.Areas)
             {
                 if (dead.Contains(area) || !CanMerge(area))
@@ -178,6 +184,7 @@ namespace Meshwright
                     if (MergeAlongX(area, east, result, vis))
                     {
                         dead.Add(east);
+                        absorbed[east.Id] = area.Id;
                         merges++;
                         continue;
                     }
@@ -191,6 +198,7 @@ namespace Meshwright
                     if (MergeAlongY(area, south, result, vis))
                     {
                         dead.Add(south);
+                        absorbed[south.Id] = area.Id;
                         merges++;
                     }
                 }
@@ -200,9 +208,85 @@ namespace Meshwright
             }
 
             if (merges > 0)
+            {
+                Rehome(nav, dead, absorbed);
                 nav.Areas.RemoveAll(dead.Contains);
+            }
 
             return merges;
+        }
+
+        /// <summary>
+        /// Moves every reference off an absorbed area and onto the one that absorbed it, and carries the
+        /// absorbed area's own connections across.
+        ///
+        /// **This is the step that was missing, and the engine is the only thing that noticed.** Merging
+        /// deleted the absorbed area and left every id pointing at it in place. Nothing on this side
+        /// complains: the file round-trips byte for byte, reloads with the same counts, and
+        /// <c>fit</c> and <c>shape</c> are perfectly happy, because a reader that resolves ids lazily
+        /// never asks whether they resolve at all. Garry's Mod asks at load, and answered with 9,631
+        /// copies of "CNavArea::PostLoad: Corrupt navigation data. Cannot connect Navigation Areas."
+        ///
+        /// The other half is quieter and arguably worse. An absorbed area's *outgoing* connections were
+        /// simply dropped, so the merged area inherited its neighbour's footprint without inheriting its
+        /// links - a mesh that looks complete and is missing routes. Both directions are fixed here.
+        ///
+        /// Chains have to be followed. Merging runs to a fixed point, so A can absorb B in one pass and
+        /// C absorb A in the next; a reference to B must end up at C, not at a name that is also gone.
+        /// </summary>
+        private static void Rehome(NavFile nav, HashSet<NavArea> dead, Dictionary<uint, uint> absorbed)
+        {
+            uint Survivor(uint id)
+            {
+                // Bounded rather than trusted. A cycle here would be a bug in the merge bookkeeping
+                // rather than in the data, but it would hang the build rather than fail it.
+                for (int hop = 0; hop < 64 && absorbed.TryGetValue(id, out uint next); hop++)
+                    id = next;
+
+                return id;
+            }
+
+            var survivors = new Dictionary<uint, NavArea>(nav.Areas.Count);
+
+            foreach (var area in nav.Areas)
+                if (!dead.Contains(area)) survivors[area.Id] = area;
+
+            // The absorbed areas' own links, moved onto whoever absorbed them.
+            foreach (var area in dead)
+            {
+                if (!survivors.TryGetValue(Survivor(area.Id), out var into)) continue;
+
+                for (int d = 0; d < area.Connections.Length; d++)
+                    into.Connections[d].AddRange(area.Connections[d]);
+
+                for (int d = 0; d < area.Ladders.Length; d++)
+                    into.Ladders[d].AddRange(area.Ladders[d]);
+            }
+
+            // Then every surviving reference repointed, with the area's own id and duplicates dropped -
+            // a merge routinely leaves both, and the engine treats a self-connection as corrupt too.
+            foreach (var area in survivors.Values)
+            {
+                foreach (var list in area.Connections)
+                {
+                    var seen = new HashSet<uint>();
+                    int keep = 0;
+                    int count = list.Count;
+
+                    // Compacted in place by index. A foreach here throws: List's indexer setter bumps
+                    // the version counter, so writing an element invalidates the enumerator reading it.
+                    for (int i = 0; i < count; i++)
+                    {
+                        uint to = Survivor(list[i]);
+
+                        if (to == area.Id || !survivors.ContainsKey(to) || !seen.Add(to)) continue;
+
+                        list[keep++] = to;
+                    }
+
+                    list.RemoveRange(keep, list.Count - keep);
+                }
+            }
         }
 
         private static bool CanMerge(NavArea area)
