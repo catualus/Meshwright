@@ -487,6 +487,8 @@ namespace Meshwright
         /// Where players enter the map. A spawn is guaranteed to be somewhere a person can stand, which
         /// makes it the one seed that needs nothing to already exist.
         /// </summary>
+        public static IEnumerable<BspFile.Vector3> SpawnPositions(BspFile bsp) => SpawnPoints(bsp);
+
         private static IEnumerable<BspFile.Vector3> SpawnPoints(BspFile bsp)
         {
             foreach (System.Text.RegularExpressions.Match block in

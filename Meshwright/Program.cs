@@ -65,6 +65,7 @@ namespace Meshwright
                     "compare-spots" => CompareSpots(args),
                     "fix-connections" => FixConnections(args),
                     "reach" => Reach(args),
+                    "reachable" => Reachable(args),
                     _ => UnknownCommand(args[0]),
                 };
             }
@@ -3153,6 +3154,113 @@ namespace Meshwright
                 throw new FileNotFoundException($"no such file: {args[1]}");
 
             return args[1];
+        }
+
+        /// <summary>
+        /// Floods the mesh's own connection graph from the map's player spawns and reports what cannot
+        /// be walked to, grouped so the shape of the problem is visible rather than just its size.
+        /// </summary>
+        private static int Reachable(string[] args)
+        {
+            if (args.Length < 3)
+                throw new ArgumentException("expected: reachable <file.bsp> <file.nav> [-list N]");
+
+            string bspPath = args[1];
+            if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such file: {bspPath}");
+
+            var bsp = BspFile.Load(bspPath);
+            var nav = NavFile.Load(args[2]);
+
+            var spawns = AreaGenerator.SpawnPositions(bsp).ToList();
+            var result = NavReachability.Analyse(nav, spawns);
+
+            Console.WriteLine($"nav   {Path.GetFileName(args[2])}: {result.Areas:N0} areas");
+            Console.WriteLine($"      seeded from {result.Seeds:N0} of {spawns.Count:N0} player spawns");
+            Console.WriteLine($"      reachable   {result.Reachable:N0}  ({100 * result.Coverage:F1}%)");
+            Console.WriteLine($"      stranded    {result.Unreachable:N0}  in {result.Islands.Count:N0} groups");
+
+            // Against a reference mesh, the only number that separates a regression from an addition.
+            // A generated mesh strands areas for two unrelated reasons - ground it invented on top of
+            // scenery it cannot climb, and routes it lost that the reference had - and the totals mix
+            // them. Adding a thousand stranded prop tops and breaking a staircase look identical until
+            // you ask which ids used to be reachable and no longer are.
+            if (FlagValue(args, "-against") is { } referencePath)
+            {
+                var reference = NavFile.Load(referencePath);
+                var referenceResult = NavReachability.Analyse(reference, spawns);
+
+                var hereReachable = NavReachability.Reached(nav, spawns);
+                var thereReachable = NavReachability.Reached(reference, spawns);
+
+                var shared = new HashSet<uint>(nav.Areas.Select(a => a.Id));
+                shared.IntersectWith(reference.Areas.Select(a => a.Id));
+
+                int regressed = 0, gained = 0;
+
+                foreach (uint id in shared)
+                {
+                    bool here = hereReachable.Contains(id);
+                    bool there = thereReachable.Contains(id);
+
+                    if (there && !here) regressed++;
+                    if (here && !there) gained++;
+                }
+
+                Console.WriteLine();
+                Console.WriteLine($"against {Path.GetFileName(referencePath)}: " +
+                                  $"{100 * referenceResult.Coverage:F1}% reachable, {shared.Count:N0} areas in common");
+                Console.WriteLine($"      of those, {regressed:N0} were reachable there and are not here" +
+                                  $"; {gained:N0} the other way round");
+
+                // The exact edges that went missing. Listing the stranded areas themselves is no use -
+                // an island's interior areas all have stranded neighbours, so every one of them reports
+                // "nothing still reachable". What names the break is the frontier: a connection the
+                // reference has whose near end this mesh can still reach and whose far end it cannot.
+                if (Array.IndexOf(args, "-regressed") >= 0)
+                {
+                    var lost = new List<(uint From, uint To)>();
+
+                    foreach (var area in reference.Areas)
+                    {
+                        if (!hereReachable.Contains(area.Id)) continue;
+
+                        foreach (var list in area.Connections)
+                            foreach (uint to in list)
+                                if (shared.Contains(to) && thereReachable.Contains(to) && !hereReachable.Contains(to))
+                                    lost.Add((area.Id, to));
+                    }
+
+                    Console.WriteLine();
+                    Console.WriteLine($"routes lost at the frontier: {lost.Count:N0}");
+
+                    foreach (var (from, to) in lost.Take(12))
+                        Console.WriteLine($"  the reference walks {from} -> {to}; here {to} cannot be reached");
+                }
+            }
+
+            if (result.Islands.Count == 0) return 0;
+
+            // Grouped by size, because the sizes mean different things. Single areas scattered about are
+            // scenery the generator built on and cannot climb; a large group is a part of the map whose
+            // only way in was missed, which is a route problem and much more serious.
+            int singles = result.Islands.Count(i => i.Size == 1);
+            int small = result.Islands.Count(i => i.Size is > 1 and <= 8);
+            int large = result.Islands.Count(i => i.Size > 8);
+
+            Console.WriteLine($"      of those groups: {singles:N0} single areas, {small:N0} of 2-8, {large:N0} larger");
+
+            int wanted = FlagValue(args, "-list") is { } n && int.TryParse(n, out int parsed) ? parsed : 10;
+
+            Console.WriteLine();
+            Console.WriteLine("largest stranded groups:");
+
+            foreach (var island in result.Islands.Take(wanted))
+                Console.WriteLine($"  {island.Size,6:N0} areas   at ({island.Where.X,7:F0} {island.Where.Y,7:F0} {island.Where.Z,7:F0})   area {island.SampleId,-7}" +
+                    (island.NearestReachableId != 0
+                        ? $"  nearest reachable {island.NearestReachableId,-7} {island.Gap,6:F0}u away, {island.Drop,6:F0}u below"
+                        : ""));
+
+            return 0;
         }
 
         private static int Info(string[] args)
