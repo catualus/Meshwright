@@ -134,7 +134,6 @@ namespace Meshwright
             return sb.ToString();
         }
 
-        public bool Contains(string relativePath) => entries.ContainsKey(Normalise(relativePath));
 
         public bool TryRead(string relativePath, out byte[] bytes)
         {

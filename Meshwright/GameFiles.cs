@@ -31,18 +31,72 @@ namespace Meshwright
         private const int LumpPakfile = 40;
 
         private readonly List<string> roots = [];
-        private readonly List<VpkArchive> vpks = [];
+
+        /// <summary>
+        /// Paths to the VPKs that exist, and the archives themselves once anything has needed one.
+        ///
+        /// Opening a VPK means parsing its whole directory - three nested runs of null-terminated
+        /// strings covering every file in the archive - and a Garry's Mod install has nine of them.
+        /// That measured 133ms, which was the single largest part of loading a map's props, and on any
+        /// install where the content is unpacked not one of those directories is ever consulted: all
+        /// 169 of rp_downtown_meowy's models resolved from loose files.
+        ///
+        /// So the paths are collected eagerly, which is a directory listing, and the directories are
+        /// parsed only when a lookup has already missed the map's pakfile and every loose root. A
+        /// machine that really does need them pays exactly what it paid before, on first use.
+        /// </summary>
+        private readonly List<string> vpkPaths = [];
+
+        /// <summary>Workshop addon archives, discovered eagerly and indexed on demand.</summary>
+        private readonly List<string> gmaPaths = [];
+
+        private List<GmaArchive>? gmas;
+
+        private List<VpkArchive>? vpks;
         private ZipArchive? pak;
         private readonly Dictionary<string, ZipArchiveEntry> pakEntries = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Paths asked for and not found anywhere, so the gap can be reported rather than guessed at.</summary>
-        public IReadOnlyCollection<string> Missing => missing;
+        public IReadOnlyCollection<string> Missing => missing.Keys.ToArray();
 
-        private readonly HashSet<string> missing = new(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> missing =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Guards the two archive readers, which are stateful and are not safe to share.
+        ///
+        /// Callers load models in parallel, and most of that work - parsing a hull out of the bytes -
+        /// genuinely is independent. Fetching the bytes is not always: <see cref="ZipArchive"/> is
+        /// documented as unsafe for concurrent use, and a <see cref="VpkArchive"/> seeks and reads
+        /// shared file handles, so two threads reading different files from one archive would interleave
+        /// each other's seeks and return spliced garbage.
+        ///
+        /// Deliberately narrow. Loose files are read outside it, because <c>File.ReadAllBytes</c> is safe
+        /// concurrently and loose content is the common case - on a normal Garry's Mod install with
+        /// addons unpacked, nearly every model resolves before this lock is ever taken. Parsing always
+        /// happens outside it, which is where the time goes.
+        /// </summary>
+        private readonly object archives = new();
+
+        /// <summary>Milliseconds spent parsing VPK directories and reading the map's pakfile.</summary>
+        public long VpkMs, PakMs, GmaMs;
 
         public int RootCount => roots.Count;
-        public int VpkCount => vpks.Count;
+        public int VpkCount => vpkPaths.Count;
+        public int GmaCount => gmaPaths.Count;
+        public int GmasOpened => gmas?.Count ?? 0;
+        public int VpkOpened => vpks?.Count ?? 0;
         public int PakfileEntries => pakEntries.Count;
+
+        /// <summary>
+        /// Where reads were served from. Worth counting because two of the three sources are behind a
+        /// lock and one is not, so the split decides whether loading models in parallel is worth
+        /// anything at all on a given map.
+        /// </summary>
+        public int ReadsFromPakfile;
+        public int ReadsFromDisk;
+        public int ReadsFromVpk;
+        public int ReadsFromGma;
 
         /// <summary>
         /// Opens the content a map can see, inferring the install layout from the map's own path.
@@ -92,7 +146,39 @@ namespace Meshwright
             foreach (var root in files.roots.ToArray())
                 files.AddVpksIn(root);
 
+
+
+            // Subscribed content, which for Garry's Mod is where most third-party props live. The cache
+
+
+            // directory is the game's own download location; loose .gma files beside the addons are the
+
+
+            // other place they turn up.
+
+
+            if (mod is not null)
+
+
+            {
+                files.AddGmasIn(Path.Combine(mod.FullName, "cache", "workshop"));
+                files.AddGmasIn(Path.Combine(mod.FullName, "addons"));
+
+
+                // Steam keeps its own copy of subscribed items, outside the game directory entirely:
+
+                // steamapps/workshop/content/4000, a sibling of the "common" folder the install lives in.
+
+                if (mod.Parent?.Parent?.Parent is { } steamapps)
+
+                    files.AddGmasIn(Path.Combine(steamapps.FullName, "workshop", "content", "4000"));
+
+
+            }
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             files.OpenPakfile(bspPath);
+            files.PakMs = clock.ElapsedMilliseconds;
             return files;
         }
 
@@ -102,6 +188,29 @@ namespace Meshwright
                 roots.Add(path);
         }
 
+        /// <summary>
+        /// Collects addon archives from a directory, and from one level of subdirectories beneath it.
+        ///
+        /// Subscribed content lands in two shapes and both have to be looked at. The game downloads
+        /// straight into <c>garrysmod/cache/workshop</c> as loose .gma files, while Steam's own
+        /// workshop tree gives every item its own numbered folder with the archive inside. Scanning
+        /// only the top level finds 15 of this machine's addons and misses 55.
+        /// </summary>
+        private void AddGmasIn(string directory)
+        {
+            try
+            {
+                if (!Directory.Exists(directory)) return;
+
+                gmaPaths.AddRange(Directory.EnumerateFiles(directory, "*.gma", SearchOption.TopDirectoryOnly));
+
+                foreach (var child in Directory.EnumerateDirectories(directory))
+                    gmaPaths.AddRange(Directory.EnumerateFiles(child, "*.gma", SearchOption.TopDirectoryOnly));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
         private void AddVpksIn(string root)
         {
             try
@@ -109,10 +218,7 @@ namespace Meshwright
                 // Only the directory archives. The numbered ones beside them hold bodies and are opened
                 // through the directory that indexes them; treating one as an archive in its own right
                 // finds no directory and wastes a file handle.
-                foreach (var path in Directory.EnumerateFiles(root, "*_dir.vpk", SearchOption.TopDirectoryOnly))
-                {
-                    if (VpkArchive.TryOpen(path) is { } vpk) vpks.Add(vpk);
-                }
+                vpkPaths.AddRange(Directory.EnumerateFiles(root, "*_dir.vpk", SearchOption.TopDirectoryOnly));
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -158,10 +264,15 @@ namespace Meshwright
             {
                 try
                 {
-                    using var s = entry.Open();
-                    using var ms = new MemoryStream();
-                    s.CopyTo(ms);
-                    bytes = ms.ToArray();
+                    lock (archives)
+                    {
+                        using var s = entry.Open();
+                        using var ms = new MemoryStream();
+                        s.CopyTo(ms);
+                        bytes = ms.ToArray();
+                    }
+
+                    System.Threading.Interlocked.Increment(ref ReadsFromPakfile);
                     return true;
                 }
                 catch (InvalidDataException) { }
@@ -173,22 +284,100 @@ namespace Meshwright
 
                 if (File.Exists(full))
                 {
-                    try { bytes = File.ReadAllBytes(full); return true; }
+                    try { bytes = File.ReadAllBytes(full); System.Threading.Interlocked.Increment(ref ReadsFromDisk); return true; }
                     catch (IOException) { }
                 }
             }
 
-            foreach (var vpk in vpks)
-                if (vpk.TryRead(path, out bytes)) return true;
+            lock (archives)
+            {
+                // Addons before the base game, matching how the engine mounts them: a workshop addon
+                // that replaces a stock prop is meant to win.
+                foreach (var gma in OpenGmas())
+                    if (gma.TryRead(path, out bytes)) { System.Threading.Interlocked.Increment(ref ReadsFromGma); return true; }
 
-            missing.Add(path);
+                foreach (var vpk in OpenVpks())
+                    if (vpk.TryRead(path, out bytes)) { System.Threading.Interlocked.Increment(ref ReadsFromVpk); return true; }
+            }
+
+            missing[path] = 0;
             return false;
+        }
+
+        /// <summary>
+        /// The addon archives, indexed on first use.
+        ///
+        /// Lazily and in parallel for the same reasons as the VPKs, but it matters much more here: a
+        /// subscribed Garry's Mod install has hundreds of these - 652 on the machine this was written on
+        /// - and indexing one means walking its entire file list, because a .gma stores no offsets and a
+        /// body's position is the sum of every size before it.
+        /// </summary>
+        private List<GmaArchive> OpenGmas()
+        {
+            if (gmas is not null) return gmas;
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var found = new GmaArchive?[gmaPaths.Count];
+
+            System.Threading.Tasks.Parallel.For(0, gmaPaths.Count, NavConcurrency.Options,
+                i => found[i] = GmaArchive.TryOpen(gmaPaths[i]));
+
+            var opened = new List<GmaArchive>();
+
+            foreach (var gma in found)
+                if (gma is not null) opened.Add(gma);
+
+            GmaMs = clock.ElapsedMilliseconds;
+            return gmas = opened;
+        }
+
+        /// <summary>
+        /// The VPK archives, parsing their directories on first use. Callers hold
+        /// <see cref="archives"/>, which is what makes the one-time build safe to do lazily.
+        /// </summary>
+        private List<VpkArchive> OpenVpks()
+        {
+            if (vpks is not null) return vpks;
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
+            // Nine independent files, each needing its whole directory parsed. Doing them one at a time
+            // was 133ms; they share nothing, so they are parsed together and collected in path order
+            // afterwards to keep lookup priority stable.
+            //
+            // Being lazy alone was not enough here, and it is worth recording why. A map that names ten
+            // models nobody has still forces every VPK open, because "not in any VPK" is not a
+            // conclusion you can reach without looking - so the laziness only pays on a map where every
+            // model resolves earlier, and this one does not.
+            var found = new VpkArchive?[vpkPaths.Count];
+
+            System.Threading.Tasks.Parallel.For(0, vpkPaths.Count, NavConcurrency.Options,
+                i => found[i] = VpkArchive.TryOpen(vpkPaths[i]));
+
+            var opened = new List<VpkArchive>(vpkPaths.Count);
+
+            foreach (var vpk in found)
+                if (vpk is not null) opened.Add(vpk);
+
+            VpkMs = clock.ElapsedMilliseconds;
+            return vpks = opened;
         }
 
         public void Dispose()
         {
-            foreach (var vpk in vpks) vpk.Dispose();
-            vpks.Clear();
+            if (vpks is not null)
+            {
+                foreach (var vpk in vpks) vpk.Dispose();
+                vpks = null;
+            }
+
+
+            if (gmas is not null)
+            {
+                foreach (var gma in gmas) gma.Dispose();
+                gmas = null;
+            }
+
             pak?.Dispose();
             pak = null;
         }
