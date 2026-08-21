@@ -33,6 +33,7 @@ namespace Meshwright
 
                 return args[0].ToLowerInvariant() switch
                 {
+                    "generate" => Generate(args),
                     "verify" => Verify(args),
                     "info" => Info(args),
                     "bsp" => BspInfo(args),
@@ -155,6 +156,18 @@ namespace Meshwright
 
             Console.WriteLine("  -game NAME              Movement limits: cs/css/csgo, or gmod/hl2/tf2/source (default)");
             Console.WriteLine();
+            Console.WriteLine("  the whole build, in one run:");
+            Console.WriteLine("  meshwright generate <file.bsp> [file.nav] [-o out.nav]");
+            Console.WriteLine("      Run every pass in order and write the result. Without a nav path, the");
+            Console.WriteLine("      .nav beside the BSP is finished in place; with -generateareas and no");
+            Console.WriteLine("      mesh present, one is built from scratch.");
+            Console.WriteLine("      -generateareas   add walkable ground the mesh is missing");
+            Console.WriteLine("      -scratch         discard the mesh first (needs -generateareas)");
+            Console.WriteLine("      -noladders -nomovement -nospots -novisibility   skip a stage");
+            Console.WriteLine("      -nosnipers -noencounters                        skip a spot grading");
+            Console.WriteLine("      -maxviewdistance N   how far two areas can see each other (default 6000)");
+            Console.WriteLine("      -nocompress      store full visibility instead of Valve's delta encoding");
+            Console.WriteLine();
             Console.WriteLine("  build passes (each writes a new .nav; chain them in this order):");
             Console.WriteLine("  meshwright build-ladders    <file.bsp> <file.nav> [-o out.nav]");
             Console.WriteLine("      Add nav ladders for the BSP's ladder brushes. The engine builds none");
@@ -192,6 +205,141 @@ namespace Meshwright
             Console.WriteLine("  meshwright fit              <file.bsp> <file.nav>          Areas floating above ground or over air");
             Console.WriteLine("  meshwright fix-connections  <file.nav> [-o out.nav]        Redundant-shortcut count");
             Console.WriteLine("  meshwright reach            <file.bsp> x y z [-radius u]   Explain a coverage miss");
+        }
+
+        /// <summary>
+        /// Every pass, in order, in one process.
+        ///
+        /// This is what a host invokes. The <c>build-*</c> commands stay because being able to stop
+        /// after one pass and look at what it did is the whole reason they exist, but chaining five of
+        /// them means five BSP loads and four intermediate files for a result nobody wanted staged -
+        /// and, more to the point, it means the order lives in whoever is doing the chaining. It lives
+        /// in <see cref="NavPipeline"/> instead, and this is a thin front end onto it.
+        ///
+        /// Defaults are the ones a compile wants: finish the mesh that is there, do everything to it,
+        /// write it back over itself. Generating areas is opt-in because it is still experimental, and
+        /// is the one flag that changes the mesh rather than completing it.
+        /// </summary>
+        private static int Generate(string[] args)
+        {
+            if (args.Length < 2)
+                throw new ArgumentException("expected: generate <file.bsp> [file.nav] [-o out.nav] [flags]");
+
+            string bspPath = args[1];
+
+            if (!File.Exists(bspPath))
+                throw new FileNotFoundException($"no such file: {bspPath}");
+
+            // The second positional is optional and must not swallow a flag: `generate map.bsp -scratch`
+            // has to mean the nav beside the BSP, not a mesh called "-scratch".
+            string navPath = args.Length > 2 && !args[2].StartsWith('-')
+                ? args[2]
+                : Path.ChangeExtension(bspPath, ".nav");
+
+            // In place by default. A compile step wants the mesh the game will load to be the one it
+            // just built, and every other command here defaulting to a new file is for inspection,
+            // which is not what this is for.
+            string outPath = FlagValue(args, "-o") ?? navPath;
+
+            bool Off(string flag) => !args.Contains(flag, StringComparer.OrdinalIgnoreCase);
+
+            var options = new NavPipeline.Options
+            {
+                GenerateAreas = !Off("-generateareas"),
+                FromScratch = !Off("-scratch"),
+                Ladders = Off("-noladders"),
+                Movement = Off("-nomovement"),
+                Spots = Off("-nospots"),
+                SniperSpots = Off("-nosnipers"),
+                EncounterSpots = Off("-noencounters"),
+                Visibility = Off("-novisibility"),
+                CompressVisibility = Off("-nocompress"),
+                MaxViewDistance = ReadViewDistance(args),
+                Log = line => Console.WriteLine(line),
+            };
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            Console.WriteLine($"bsp   {Path.GetFileName(bspPath)}");
+
+            var (bsp, vis) = NavPipeline.LoadBsp(bspPath);
+
+            NavFile nav;
+            if (File.Exists(navPath))
+            {
+                nav = NavFile.Load(navPath);
+                Console.WriteLine($"nav   {Path.GetFileName(navPath)}: {nav.Areas.Count:N0} areas");
+            }
+            else if (options.GenerateAreas)
+            {
+                nav = new NavFile();
+                Console.WriteLine($"nav   none at {navPath}; generating one from scratch");
+            }
+            else
+            {
+                // A configuration mistake rather than a failure, and worth saying plainly: without
+                // -generateareas there is nothing here to finish, and every pass would run over an
+                // empty mesh and report success.
+                Console.Error.WriteLine(
+                    $"error: no nav mesh at {navPath}, and -generateareas was not given. " +
+                    "Generate one in game (nav_generate), or pass -generateareas to build one here.");
+                return 1;
+            }
+
+            // Set unconditionally, not only when creating a mesh. This is what the engine checks a
+            // .nav's stored size against to decide whether it is stale for the BSP it is loading, and
+            // nothing else in the pipeline revisits it - so finishing an existing mesh without touching
+            // this leaves it permanently mismatched against the map it was just built for.
+            nav.BspSize = (uint)new FileInfo(bspPath).Length;
+
+            using var bar = new ConsoleProgress([.. NavPipeline.Plan(options)]);
+            options.Progress = bar.Progress;
+
+            var result = NavPipeline.Run(bsp, vis, nav, options);
+
+            bar.Dispose();
+
+            foreach (string warning in result.Warnings)
+                Console.WriteLine($"warn  {warning}");
+
+            // Through a temp file: a half-written nav is worse than the old one, and writing in place
+            // over the mesh being finished means a crash mid-save destroys the input as well as the
+            // output.
+            string temporary = outPath + ".tmp";
+            nav.Save(temporary);
+            File.Move(temporary, outPath, overwrite: true);
+
+            sw.Stop();
+
+            Console.WriteLine($"out   {outPath}  ({new FileInfo(outPath).Length:N0} bytes) " +
+                              $"in {sw.Elapsed.TotalSeconds:F1}s");
+
+            var reloaded = NavFile.Load(outPath);
+            long links = reloaded.Areas.Sum(a => a.Connections.Sum(c => (long)c.Count));
+            Console.WriteLine($"check reloaded OK: {reloaded.Areas.Count:N0} areas, {links:N0} connections, " +
+                              $"analysed={reloaded.IsAnalyzed}");
+
+            return 0;
+        }
+
+        /// <summary>
+        /// The max view distance, under either spelling. <c>-d</c> is what the standalone
+        /// <c>build-visibility</c> takes and <c>-maxviewdistance</c> is what a host's parameter list
+        /// spells it; accepting one and not the other would make the two entry points disagree over a
+        /// value that silently changes the result rather than failing.
+        /// </summary>
+        private static float ReadViewDistance(string[] args)
+        {
+            string? raw = FlagValue(args, "-maxviewdistance") ?? FlagValue(args, "-d");
+
+            if (raw is null)
+                return VisibilityFilter.DefaultMaxViewDistance;
+
+            if (!float.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, out float distance) ||
+                distance <= 0)
+                throw new ArgumentException($"-maxviewdistance expects a positive distance, got '{raw}'");
+
+            return distance;
         }
 
         /// <summary>
@@ -797,55 +945,14 @@ namespace Meshwright
         }
 
         /// <summary>
-        /// Loads a BSP with everything the passes need attached to it.
+        /// The one way a command gets a BSP with everything the passes trace against attached to it.
         ///
-        /// Every command wants the same four lines, and sixteen copies of them is sixteen chances to
-        /// forget one. Forgetting is not a loud failure either: a tracer with no displacements attached
-        /// silently reports open air over every piece of terrain on the map, and the command still runs
-        /// and still prints plausible numbers.
+        /// Forwards to <see cref="NavPipeline.LoadBsp"/> so the command line and a host load a map
+        /// identically. Forgetting one of the attachments is not a loud failure - a tracer with no
+        /// displacements silently reports open air over every piece of terrain on the map, and the
+        /// command still runs and still prints plausible numbers - so there is exactly one copy of it.
         /// </summary>
-        /// <summary>
-        /// Reads a BSP and everything traced against it.
-        ///
-        /// Overlapped rather than sequential, because loading is not a small part of a run any more.
-        /// Once the passes themselves got fast, a cold `build-spots` on gm_construct was spending
-        /// roughly 590ms here against 933ms of actual work - all of it on one core while fifteen sat
-        /// idle, which is what the profiler was really showing when thread-wait climbed to half the
-        /// samples.
-        ///
-        /// Three of the four readers are independent, and the dependency graph says so plainly:
-        /// displacements need nothing but the file, so they start before anything else; models and
-        /// visibility both need the parsed lumps but never touch each other. Each opens its own handle,
-        /// and everything they read from <see cref="BspFile"/> is finished being written before either
-        /// is started, so none of them shares mutable state.
-        /// </summary>
-        private static (BspFile Bsp, BspVisibility Vis) LoadBsp(string path)
-        {
-            if (!File.Exists(path))
-                throw new FileNotFoundException($"no such file: {path}");
-
-            // Depends only on the file itself, so it need not wait for the lump parse at all.
-            var displacements = System.Threading.Tasks.Task.Run(() => BspDisplacements.Load(path));
-
-            // Likewise, and much the slower of the two: props read the prop lump, then hunt each model
-            // down through the map's pakfile, the loose game directories and the VPKs, and parse a
-            // collision hull out of every one. That is file system work rather than CPU work, so it
-            // overlaps the rest better than it would if it were competing for cores.
-            var props = System.Threading.Tasks.Task.Run(() => StaticProps.Load(path));
-
-            var bsp = BspFile.Load(path);
-
-            // Both need `bsp` and neither needs the other. Visibility is much the heavier of the two -
-            // it decompresses the whole PVS - so it stays on this thread and models goes to the pool.
-            var models = System.Threading.Tasks.Task.Run(() => BspModels.Load(path, bsp));
-            var vis = BspVisibility.Load(path, bsp);
-
-            vis.AttachModels(models.Result);
-            vis.AttachDisplacements(displacements.Result);
-            vis.AttachStaticProps(props.Result);
-
-            return (bsp, vis);
-        }
+        private static (BspFile Bsp, BspVisibility Vis) LoadBsp(string path) => NavPipeline.LoadBsp(path);
 
         private static string? FlagValue(string[] args, string flag)
         {
@@ -3041,21 +3148,21 @@ namespace Meshwright
             /// Redraw in place, or print occasional lines.
             ///
             /// Auto-detected from whether the output is a terminal, because a bar redrawn a few thousand
-            /// times is unreadable in a log file. <c>NAVPAL_PROGRESS</c> overrides it - "live", "plain"
-            /// or "off" - for the cases detection gets wrong, which is anything running the tool behind
-            /// a wrapper that owns the console.
+            /// times is unreadable in a log file. <c>MESHWRIGHT_PROGRESS</c> overrides it - "live",
+            /// "plain" or "off" - for the cases detection gets wrong, which is anything running the tool
+            /// behind a wrapper that owns the console.
             /// </summary>
-            private readonly bool live = Environment.GetEnvironmentVariable("NAVPAL_PROGRESS")?.ToLowerInvariant()
-                switch
-                {
-                    "live" => true,
-                    "plain" or "off" => false,
-                    _ => !Console.IsOutputRedirected,
-                };
+            private readonly bool live = Mode switch
+            {
+                "live" => true,
+                "plain" or "off" => false,
+                _ => !Console.IsOutputRedirected,
+            };
 
-            private readonly bool silent =
-                string.Equals(Environment.GetEnvironmentVariable("NAVPAL_PROGRESS"), "off",
-                    StringComparison.OrdinalIgnoreCase);
+            private readonly bool silent = Mode == "off";
+
+            private static string? Mode =>
+                Environment.GetEnvironmentVariable("MESHWRIGHT_PROGRESS")?.ToLowerInvariant();
 
             private string lastPhase = "";
             private TimeSpan lastLine = TimeSpan.MinValue;

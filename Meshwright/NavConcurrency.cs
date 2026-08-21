@@ -48,5 +48,14 @@ namespace Meshwright
         /// site to notice a mutation to shared, possibly-in-use options.
         /// </summary>
         public static ParallelOptions Options => new() { MaxDegreeOfParallelism = maxThreads, CancellationToken = CancellationToken };
+
+        /// <summary>
+        /// The between-passes check, for the sequential seams the parallel loops above do not cover.
+        ///
+        /// <see cref="NavPipeline"/> calls this between every pass. It reads the same token the parallel
+        /// options carry, so a host that sets one gets both halves of cancellation - inside a long pass
+        /// and between them - rather than having to remember to check the token itself at every seam.
+        /// </summary>
+        public static void ThrowIfCancelled() => CancellationToken.ThrowIfCancellationRequested();
     }
 }
