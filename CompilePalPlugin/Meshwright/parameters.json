@@ -1,0 +1,75 @@
+[
+  {
+    "Name": "Generate the mesh",
+    "Parameter": " -generateareas",
+    "Description": "Finds walkable ground the nav mesh is missing - rooftops, lift platforms, ground on top of props, and other spots the game's own generator skipped - and adds it. If there's no .nav file yet, this builds one from scratch instead.",
+    "Warning": "Experimental. Adds areas that have not been verified in game; review the result before shipping it."
+  },
+  {
+    "Name": "Start from scratch",
+    "Parameter": " -scratch",
+    "Description": "Throws away the existing nav mesh and builds a new one from the map's player spawns, instead of just filling in the missing parts. Only works together with \"Generate the mesh\".",
+    "Warning": "Destructive. Deletes every area, ladder and hand placement already in the .nav beside the BSP. Back it up first if you want to keep it."
+  },
+  {
+    "Name": "Counter-Strike movement limits",
+    "Parameter": " -game cs",
+    "Description": "Use Counter-Strike's movement limits - a 58 unit crouch jump, a 200 unit survivable drop and a 58 unit climb - instead of the defaults that suit Garry's Mod, HL2 and TF2 (64, 400 and 200). It is not cosmetic: the same map generates around 100 fewer areas under Counter-Strike's limits, because a ledge 62 units up stops being climbable.",
+    "Warning": "Only for Counter-Strike games. Setting it elsewhere throws away routes that game's players can actually take."
+  },
+  {
+    "Name": "Skip ladders",
+    "Parameter": " -noladders",
+    "Description": "Skip building nav ladders for the map's ladder brushes. The engine builds none of these outside Left 4 Dead, so skipping this leaves brush ladders invisible to bots."
+  },
+  {
+    "Name": "Skip movement",
+    "Parameter": " -nomovement",
+    "Description": "Don't mark stairs or add step, jump, drop and lift connections."
+  },
+  {
+    "Name": "Skip cover spots",
+    "Parameter": " -nospots",
+    "Description": "Skip finding hiding spots, grading sniper spots and building encounter spots. The game computes hiding spots during its own nav_generate, so a mesh without them is missing something it expects to find."
+  },
+  {
+    "Name": "Skip sniper spot grading",
+    "Parameter": " -nosnipers",
+    "Description": "Find cover spots but don't grade which of them are good or ideal sniper positions. This is the more expensive half of the cover work - every spot is traced against the whole mesh."
+  },
+  {
+    "Name": "Skip encounter spots",
+    "Parameter": " -noencounters",
+    "Description": "Find cover spots but don't work out which of them are visible along each route between areas."
+  },
+  {
+    "Name": "Skip visibility",
+    "Parameter": " -novisibility",
+    "Description": "Skip working out which areas can see each other. This is by far the slowest step - roughly two thirds of a full run - and skipping it leaves bots less aware of good hiding and ambush spots."
+  },
+  {
+    "Name": "Max view distance",
+    "Parameter": " -maxviewdistance",
+    "CanHaveValue": true,
+    "Value": "6000",
+    "Description": "How far apart two areas can be and still count as able to see each other. Lower values compile faster but bots lose some long-range awareness."
+  },
+  {
+    "Name": "Do not compress visibility",
+    "Parameter": " -nocompress",
+    "Description": "Store the full visibility data instead of the engine's delta encoding. Roughly doubles the file size; mainly useful for debugging."
+  },
+  {
+    "Name": "Thread limit",
+    "Parameter": " -threads",
+    "CanHaveValue": true,
+    "Description": "Limit how many CPU cores Meshwright uses. Leave this off to use all of them - useful if you want to keep using your computer for other things during a long compile."
+  },
+  {
+    "Name": "Write to a different file",
+    "Parameter": " -o",
+    "CanHaveValue": true,
+    "ValueIsFile": true,
+    "Description": "Write the finished mesh somewhere other than over the .nav beside the BSP. Useful for comparing a generated mesh against the one you already have."
+  }
+]

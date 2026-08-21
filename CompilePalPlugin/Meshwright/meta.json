@@ -1,0 +1,13 @@
+{
+  "Name": "Meshwright",
+  "Description": "Builds the nav mesh offline, from the compiled BSP, without launching the game. Adds ladders, movement connections, cover spots and visibility - and can generate the mesh itself.",
+  "Warning": "Without \"Generate the mesh\" enabled this finishes an existing .nav beside the BSP - run the NAV step first, or generate one in game.",
+  "Path": "Plugins\\Meshwright\\meshwright.exe",
+  "Arguments": "generate $mapCopyLocation$",
+  "BasisString": " -gamename $gameName$",
+  "Order": 8.5,
+  "DoRun": false,
+  "ReadOutput": true,
+  "CheckExitCode": true,
+  "SupportsBSP": true
+}

@@ -9,3 +9,8 @@ obj/
 # ours to redistribute.
 *.bsp
 *.nav
+
+# Plugin packaging output, produced by build-plugin.ps1. The plugin's own meta.json and
+# parameters.json live in CompilePalPlugin/ and are tracked; this is only where they are assembled
+# with a published executable.
+artifacts/
