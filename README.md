@@ -101,8 +101,38 @@ numbers a long way. Generating `rp_downtown_meowy` from the same seed mesh, befo
 | Areas over open air | 26 (0.1%) | **14 (0.0%)** |
 
 For scale: scored by the same tracer, the mesh Garry's Mod generates for that map has 5.1% of its areas
-above their floor. The cost is a bigger, more fragmented mesh — see [Limitations](#limitations) — and
-about 300 ms of extra load time, which overlaps the rest of the load.
+above their floor. The cost is a bigger, more fragmented mesh — see [Limitations](#limitations).
+
+It is not load time. Chasing where the prop load went turned up a much older problem in how the
+collision index is built, and fixing that left the whole geometry load **faster than it was before
+props existed at all**:
+
+| `rp_downtown_meowy`, min of 8 | props added, unoptimised | now |
+|---|---|---|
+| `StaticProps` | 710 ms | **128 ms** |
+| `LoadBsp` (all readers, overlapped) | 652 ms | **212 ms** |
+| `build-areas` + `build-movement` | 26 s | **22 s** |
+
+Displacement terrain shares the same index and got faster for free.
+
+### Loaded by the engine
+
+The mesh is checked by putting it in front of Garry's Mod and asking the game what it got. Generating
+`rp_downtown_meowy` in full, dropping the result in `maps/` and loading the map:
+
+| | Meshwright wrote | the engine loaded |
+|---|---|---|
+| Areas | 33,408 | 33,408 |
+| Connections | 154,926 | 154,926 |
+| Isolated areas | 284 | 284 |
+| `CNavArea::PostLoad` complaints | — | none |
+
+Then, measured by the engine on its own loaded copy: 4,000 area centres traced to the ground give a
+**median gap of 0.00 units and a p90 of 1.14**, with none over open air. Flooding the engine's own
+connection graph from a player spawn reaches **31,076 of 33,408 areas (93%)**.
+
+This is worth doing and not a formality — it is the only check that found the reference bug described
+in [Limitations](#limitations), which every offline measure here passed cleanly.
 
 Another part is settled, because it can be scored against the engine directly rather than judged by eye.
 Running `build-spots` over the mesh Garry's Mod itself produced for `gm_construct` — so both are
@@ -133,6 +163,37 @@ would have flattered every one of these numbers.
 
 ## Getting started
 
+### The whole build, in one command
+
+```bash
+meshwright generate map.bsp
+```
+
+That finishes the `.nav` beside the BSP — ladders, movement connections, cover spots and visibility —
+and writes it back over itself. Add `-generateareas` to also find walkable ground the mesh is missing,
+or to build one from nothing if there is no `.nav` there at all.
+
+### As a Compile Pal step
+
+Meshwright installs into [Compile Pal](https://github.com/ruarai/CompilePal) as an ordinary plugin.
+Nothing is compiled into Compile Pal and there is no fork to run — the step is there because the
+folder is there, and gone if you delete it.
+
+1. Download `Meshwright-plugin.zip` from the releases page, or build it yourself with
+   `./build-plugin.ps1 -Zip`.
+2. Extract the `Meshwright` folder into your Compile Pal `Plugins` directory.
+3. Restart Compile Pal, press **+** on the process list, and add **Meshwright**.
+
+It runs at order 8.5 — after Compile Pal's own **NAV** step and after the BSP has been copied to your
+maps folder, so it operates on the map the game will actually load. Every command-line flag below has
+a corresponding checkbox.
+
+### One pass at a time
+
+The staged commands still exist, because being able to stop after one pass and look at what it did is
+why they are there. Each writes a new file rather than editing in place, so you can inspect any stage
+and go back a step.
+
 ```bash
 meshwright build-areas    map.bsp map.nav -o map.areas.nav
 meshwright build-movement map.bsp map.areas.nav -o map.movement.nav
@@ -141,18 +202,20 @@ meshwright build-spots    map.bsp map.ladders.nav -o map.spots.nav
 meshwright build-visibility map.bsp map.spots.nav -o map.final.nav
 ```
 
-Each pass writes a new file rather than editing in place, so you can inspect any stage and go back a
-step. Run them in that order — later passes read what earlier ones wrote. `build-spots` is optional
-and only matters for games whose bots use cover positions; it needs `build-movement` to have run
-first, because it decides a corner is sheltered by looking at what connects across it.
+Run them in that order — later passes read what earlier ones wrote. `build-spots` is optional and
+only matters for games whose bots use cover positions; it needs `build-movement` to have run first,
+because it decides a corner is sheltered by looking at what connects across it. If you have no mesh at
+all, add `-scratch` to `build-areas` and it will generate one from the map's player spawns.
 
-If you have no mesh at all, add `-scratch` to `build-areas` and it will generate one from the map's
-player spawns.
+The ordering is not advice. It lives in `NavPipeline`, which is what `generate` drives and what these
+commands are staged views onto, because it used to be written out by hand in more than one place and
+they drifted — silently, since a mesh built in the wrong order is a valid file that is merely worse.
 
-Every command takes `-threads N` to cap how many cores it uses.
+Every command takes `-threads N` to cap how many cores it uses, and `-game NAME` to pick the movement
+limits — `cs`/`css`/`csgo` for Counter-Strike, otherwise the default suits Garry's Mod, HL2 and TF2.
 
 ```bash
-meshwright info map.nav        # summarise a mesh
+meshwright info map.nav        # summarise a mesh, and check every id resolves
 meshwright verify map.nav      # read and rewrite it, and diff byte for byte
 ```
 
@@ -171,6 +234,8 @@ about a mesh you are unhappy with:
 | `meshwright probe <bsp> x1 y1 z1 x2 y2 z2` | What blocks one straight line |
 | `meshwright compare-areas <ref.nav> <candidate.nav>` | How much of a known-good mesh a generated one covers |
 | `meshwright vis-compare <bsp> <analysed.nav>` | How computed visibility scores against an analysed mesh |
+| `meshwright reachable <bsp> <nav>` | What a bot can walk to from a spawn, and what is stranded where |
+| `meshwright reachable ... -against <ref.nav>` | Which areas a reference mesh reaches that this one does not |
 | `meshwright props <bsp>` | Every static prop, which models resolved, and how much collision was found |
 | `meshwright props <bsp> -near x y z` | Which prop is standing at a spot |
 | `meshwright props <bsp> -model <path>` | One model's `.phy` hull against the bounds its `.mdl` declares |
@@ -185,6 +250,21 @@ Run `meshwright` with no arguments for the full list.
 
 Worth knowing before you rely on it:
 
+- **About 7% of areas cannot be walked to from a player spawn** — 2,261 of 33,408 on
+  `rp_downtown_meowy`, against 626 of 18,857 (3.3%) in the mesh Garry's Mod generates for the same map.
+  `meshwright reachable` reports it, groups the strandings into islands, and with `-against` separates
+  the two causes that the totals hide:
+
+  - **310 areas the reference reaches and this does not.** Down from 336; the remainder are regions
+    whose entrance area was merged or split into a new id, where the replacement never got its
+    entrance connection rebuilt. This is the real remaining defect.
+  - **The rest are areas that did not exist to strand** — ground found on top of props and in corners
+    the engine's generator never sampled. Not a regression, but not useful either: the mesh carries
+    walkable surface a bot has no way to stand on.
+
+  Neither is pruned automatically. An unreachable area is not always wrong — somewhere a lift or a
+  teleport delivers a bot still needs a floor — and deleting them is not obviously better than leaving
+  them.
 - **Encounter sightings run about 16% short.** The encounters themselves match the engine exactly —
   63,628 over the same 2,149 areas — because which ones exist is decided by the connection graph. What
   lies *inside* them is decided by line-of-sight traces, and there Meshwright finds 10,730 sightings
@@ -234,13 +314,44 @@ Worth knowing before you rely on it:
   If you are running this on a build machine with no game installed, expect that number to be low and
   the mesh to float wherever the missing props are.
 
+  Content is searched in the order the engine mounts it: the map's own pakfile, loose files under the
+  mod and its addon folders, then `.gma` workshop archives, then VPKs. Both places subscribed content
+  lands are covered — the game's own `cache/workshop`, and Steam's `workshop/content/4000` where each
+  item gets its own folder. Archives are indexed only when a lookup has already missed everything
+  loose, which on a normal install is never.
+
   **A missing hull is left missing, never boxed.** Substituting the model's bounding box was tried and
   is measurably worse: the ten models on `rp_downtown_meowy` that lack a `.phy` are bushes,
   hedgerows, tree cards and skybox props, and a box round those deletes the ground beside them rather
   than adding any. Skybox props should not be collided against at all.
-- **Movement constants are not switched per game.** They use the non-Counter-Strike branch of
-  `nav.h` — a 64-unit crouch jump and a 400-unit survivable drop, which is right for Garry's Mod and
-  TF2 and wrong for CS:S/CS:GO (58 and 200).
+
+  The hulls themselves are checked against the running game: 261 of 261 sampled collision triangles,
+  spread over every prop on the map, sit within half a unit of real engine collision.
+- **Tidying redundant connections used to be able to remove the last route into a region** — fixed.
+  The rule is Valve's: drop `A→C` when `A→B→C` already goes the same way. The danger is in the
+  batching, which is also Valve's — collect every redundant edge, then remove them all, and the detour
+  justifying one removal may have been removed by another. On `rp_downtown_meowy` that cut four edges,
+  each the only way into a region, stranding 336 areas the engine's own mesh walks to. Each removal is
+  now re-checked against the graph as it stands, so it can never be the last link; since the pass never
+  adds an edge, reachability is preserved exactly rather than approximately.
+- **Generated meshes used to contain references to areas that did not exist** — fixed, and worth
+  recording because of how long it went unnoticed. Every offline check passed: the file round-tripped
+  byte for byte, reloaded with identical counts, and scored normally on ground fit and coverage.
+  Garry's Mod resolves every id at load and printed 9,631 copies of *"CNavArea::PostLoad: Corrupt
+  navigation data. Cannot connect Navigation Areas."*
+
+  Two passes were responsible. Merging deleted the absorbed area and left references pointing at it,
+  and also dropped that area's own connections — so the mesh lost routes while looking complete. That
+  one is fixed at source by repointing. Squaring splits an area into two pieces with fresh ids and
+  discards the original, which has no single successor to repoint to. `meshwright info` now reports
+  whether every id resolves, and a sweep runs before every write.
+- **Movement limits default to the non-Counter-Strike branch of `nav.h`** — a 64-unit crouch jump, a
+  400-unit survivable drop and a 200-unit climb, which is right for Garry's Mod, HL2 and TF2. Pass
+  `-game cs` (or `css`/`csgo`) for Counter-Strike's 58, 200 and 58. It is not a cosmetic difference:
+  the same `gm_construct` seed generates 2,780 areas under the default limits and 2,679 under
+  Counter-Strike's, because a ledge 62 units up stops being climbable.
+
+  There is no way to detect the right answer from the `.bsp`, so it has to be told.
 
 ## Licence
 
