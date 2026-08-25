@@ -27,9 +27,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      # setup-dotnet v6 needs runner 2.327.1 or newer, which the GitHub hosted runners are well past.
+      # It matters only if this is ever pointed at a self hosted runner.
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -51,7 +53,7 @@ jobs:
         run: ./build-plugin.ps1
         shell: pwsh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: meshwright-${{ github.sha }}
           path: artifacts/Meshwright/
