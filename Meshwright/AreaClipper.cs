@@ -68,6 +68,12 @@ namespace Meshwright
         /// offenders was one of these, including a 4x4 area 100% buried in a wall.
         ///
         /// Half a player's width, so anything still wide enough to be a doorway survives.
+        ///
+        /// The engine's own meshes keep areas narrower than this - 834 of the 19,275 in
+        /// rp_downtown_tits_v2 are between 8 and 16 units, and none are under 8 - so the threshold is
+        /// stricter than Valve's. Measured against dropping it to 8: coverage of that map's reachable
+        /// ground moved by 0.2 points while the footprint sitting inside solid rose from 0.28% to 0.36%,
+        /// which is not a trade worth taking.
         /// </summary>
         private const float MinimumUsableWidth = NavConstants.HalfHumanWidth;
 
@@ -82,12 +88,12 @@ namespace Meshwright
         /// The lowest id this run created; areas below it are left exactly as they are, both here and in
         /// <see cref="DiscardSlivers"/>.
         ///
-        /// This pass exists for one specific artefact of how areas are grown: a generated area runs one
-        /// sampling step past its outermost node, so where growth stopped at a wall the area reaches into
-        /// it. An area someone drew in game has no such overshoot - its edges are where they were put -
-        /// so pulling them back is not a repair but a change to somebody's work, and discarding one as a
-        /// sliver deletes a deliberately narrow area outright. Zero - the default - means every area is
-        /// treated as generated.
+        /// This pass exists for one specific artefact of how areas are grown: a generated area runs half
+        /// a sampling step past its outermost node on every side, so where growth stopped at a wall the
+        /// area reaches into it. An area someone drew in game has no such overshoot - its edges are
+        /// where they were put - so pulling them back is not a repair but a change to somebody's work,
+        /// and discarding one as a sliver deletes a deliberately narrow area outright. Zero - the
+        /// default - means every area is treated as generated.
         /// </param>
         public static Result Clip(NavFile nav, BspVisibility vis, float stepSize,
             NavProgress? progress = null, uint firstGeneratedId = 0)
@@ -123,21 +129,25 @@ namespace Meshwright
                 // usefully retreat further than its own width, and a runaway here would eat the mesh.
                 const int MaxPasses = 8;
 
-                bool east = false, south = false;
+                bool moved = false;
 
                 for (int pass = 0; pass < MaxPasses; pass++)
                 {
+                    // All four edges, because an area overhangs in all four directions. It grows from a
+                    // rectangle of nodes and reaches half a sampling step past the outermost one on
+                    // every side, so a wall can cut across any of them.
                     bool movedEast = ClipEast(area, vis, stepSize);
                     bool movedSouth = ClipSouth(area, vis, stepSize);
+                    bool movedWest = ClipWest(area, vis, stepSize);
+                    bool movedNorth = ClipNorth(area, vis, stepSize);
 
-                    east |= movedEast;
-                    south |= movedSouth;
+                    moved |= movedEast | movedSouth | movedWest | movedNorth;
 
-                    if (!movedEast && !movedSouth)
+                    if (!movedEast && !movedSouth && !movedWest && !movedNorth)
                         break;
                 }
 
-                if (!east && !south)
+                if (!moved)
                     return;
 
                 float shrunk = before - Extent(area);
@@ -235,6 +245,68 @@ namespace Meshwright
                 return false;
 
             SetMaxX(area, from + keep);
+            return true;
+        }
+
+        /// <summary>
+        /// <see cref="ClipEast"/>, mirrored onto the west edge.
+        ///
+        /// The probe runs inward-to-outward exactly as the east pass does - from a step inside the edge
+        /// out to it - so the reach it measures is the distance the area may keep, and the new edge sits
+        /// that far west of the probe's start rather than east of it.
+        /// </summary>
+        private static bool ClipWest(NavArea area, BspVisibility vis, float stepSize)
+        {
+            var b = NavGeometry.GetBounds(area);
+            if (b.Width <= MinimumOverhang || b.Depth <= 0.01f)
+                return false;
+
+            float from = b.MinX + stepSize;
+            var walls = new List<float>(Samples);
+            float floor = stepSize;
+
+            for (int i = 0; i < Samples; i++)
+            {
+                float y = b.MinY + (i + 0.5f) / Samples * b.Depth;
+                float z = MathF.Max(NavGeometry.SurfaceZ(area, from, y), NavGeometry.SurfaceZ(area, b.MinX, y));
+
+                walls.Add(Reach(vis, from, y, b.MinX, y, z, stepSize));
+                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MinX, y, stepSize));
+            }
+
+            float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
+            if (keep >= stepSize - 0.5f)
+                return false;
+
+            SetMinX(area, from - keep);
+            return true;
+        }
+
+        /// <summary><see cref="ClipSouth"/>, mirrored onto the north edge.</summary>
+        private static bool ClipNorth(NavArea area, BspVisibility vis, float stepSize)
+        {
+            var b = NavGeometry.GetBounds(area);
+            if (b.Depth <= MinimumOverhang || b.Width <= 0.01f)
+                return false;
+
+            float from = b.MinY + stepSize;
+            var walls = new List<float>(Samples);
+            float floor = stepSize;
+
+            for (int i = 0; i < Samples; i++)
+            {
+                float x = b.MinX + (i + 0.5f) / Samples * b.Width;
+                float z = MathF.Max(NavGeometry.SurfaceZ(area, x, from), NavGeometry.SurfaceZ(area, x, b.MinY));
+
+                walls.Add(Reach(vis, x, from, x, b.MinY, z, stepSize));
+                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MinY, stepSize));
+            }
+
+            float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
+            if (keep >= stepSize - 0.5f)
+                return false;
+
+            SetMinY(area, from - keep);
             return true;
         }
 
@@ -367,6 +439,48 @@ namespace Meshwright
                 area.NwCorner[0] = x;
                 area.NwCorner[2] = ne;
                 area.SwZ = se;
+            }
+        }
+
+        private static void SetMinX(NavArea area, float x)
+        {
+            bool seIsMax = area.SeCorner[0] >= area.NwCorner[0];
+
+            float north = NavGeometry.SurfaceZ(area, x, area.NwCorner[1]);
+            float south = NavGeometry.SurfaceZ(area, x, area.SeCorner[1]);
+
+            if (seIsMax)
+            {
+                area.NwCorner[0] = x;
+                area.NwCorner[2] = north;
+                area.SwZ = south;
+            }
+            else
+            {
+                area.SeCorner[0] = x;
+                area.NeZ = north;
+                area.SeCorner[2] = south;
+            }
+        }
+
+        private static void SetMinY(NavArea area, float y)
+        {
+            bool seIsMax = area.SeCorner[1] >= area.NwCorner[1];
+
+            float west = NavGeometry.SurfaceZ(area, area.NwCorner[0], y);
+            float east = NavGeometry.SurfaceZ(area, area.SeCorner[0], y);
+
+            if (seIsMax)
+            {
+                area.NwCorner[1] = y;
+                area.NwCorner[2] = west;
+                area.NeZ = east;
+            }
+            else
+            {
+                area.SeCorner[1] = y;
+                area.SwZ = west;
+                area.SeCorner[2] = east;
             }
         }
 

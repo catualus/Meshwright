@@ -300,7 +300,7 @@ namespace Meshwright
             /// Evaluating the fitted surface instead is self-consistent by construction: the plane the
             /// area was grown along is the plane its corners describe.
             /// </summary>
-            public float HeightAt(int dx, int dy, float stepSize)
+            public float HeightAt(float dx, float dy, float stepSize)
             {
                 EnsureGradient();
 
@@ -437,7 +437,7 @@ namespace Meshwright
         /// into open air. That cost 3.3 points of ground coverage when the far height was read
         /// unconditionally, against the 1.6 it gained on shape.
         /// </summary>
-        private static float FarHeight(Lattice lattice, int dx, int dy, NavNode near, float stepSize)
+        private static float FarHeight(Lattice lattice, float dx, float dy, NavNode near, float stepSize)
         {
             float fitted = lattice.HeightAt(dx, dy, stepSize);
 
@@ -471,12 +471,26 @@ namespace Meshwright
 
             // The rectangle spans from the NW node to one step past the SE node, so a single node still
             // produces an area a step across rather than a degenerate zero-width one.
-            area.NwCorner[0] = nw.Position.X;
-            area.NwCorner[1] = nw.Position.Y;
-            area.NwCorner[2] = nw.Z;
+            // Half a step out on every side, so the rectangle covers exactly the ground its nodes
+            // stand for. A node is a sample of the floor beneath it and speaks for the cell around it -
+            // that is what the sampler's own rounding means when it asks which cell a point falls in -
+            // so a run of nodes describes the ground from half a step before the first to half a step
+            // past the last.
+            //
+            // It used to run from the first node to a full step past the last, which is the same size
+            // but sits half a step east and south of the ground it was built from. Every area
+            // under-covered its west and north edge and overhung its east and south by the same 12.5
+            // units, and the overhang is most of what the clipper was pulling back: on
+            // rp_downtown_tits_v2 that one shift cut the area reclaimed from 11,214k square units to
+            // 6,373k.
+            const float Half = 0.5f;
+            float half = stepSize * Half;
 
-            area.SeCorner[0] = se.Position.X + stepSize;
-            area.SeCorner[1] = se.Position.Y + stepSize;
+            area.NwCorner[0] = nw.Position.X - half;
+            area.NwCorner[1] = nw.Position.Y - half;
+
+            area.SeCorner[0] = se.Position.X + half;
+            area.SeCorner[1] = se.Position.Y + half;
 
             // Heights for the three far corners come from the nodes those corners actually land on -
             // one step past the last node the rectangle grew through - not from the last node itself.
@@ -485,9 +499,14 @@ namespace Meshwright
             // plate per tread. Flat plates cannot merge across a step either, since the seam between two
             // of them is a 16-unit cliff rather than a shared edge, which is why a whole flight stayed a
             // row of fragments no matter how the merge was tuned.
-            area.SeCorner[2] = FarHeight(lattice, width, depth, se, stepSize);
-            area.NeZ = FarHeight(lattice, width, 0, ne, stepSize);
-            area.SwZ = FarHeight(lattice, 0, depth, sw, stepSize);
+            // Offsets in node steps, matching where the corners now actually sit: half a step outside
+            // the corner nodes rather than a whole one. The north-west corner is fitted the same way,
+            // where it used to take the seed node's own height - correct only while that corner sat on
+            // the node itself.
+            area.NwCorner[2] = FarHeight(lattice, -Half, -Half, nw, stepSize);
+            area.SeCorner[2] = FarHeight(lattice, width - 1 + Half, depth - 1 + Half, se, stepSize);
+            area.NeZ = FarHeight(lattice, width - 1 + Half, -Half, ne, stepSize);
+            area.SwZ = FarHeight(lattice, -Half, depth - 1 + Half, sw, stepSize);
 
             area.AttributeFlags = (int)lattice.Seed.Attributes;
 

@@ -84,6 +84,41 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// An area covers exactly the ground its nodes stand for: half a sampling step out from the
+        /// outermost node on every side.
+        ///
+        /// A node is a sample of the floor beneath it and speaks for the cell around it, which is what
+        /// the sampler means when it rounds a point to the nearest cell. The area has to agree, or the
+        /// mesh describes different ground from the one that was walked.
+        ///
+        /// It disagreed for a long time. Areas ran from the first node to a full step past the last -
+        /// the same size, and so invisible to every depth and area-count assertion here, but sitting
+        /// half a step east and south of their own nodes. Every area under-covered its west and north
+        /// edge by 12.5 units and overhung its east and south by the same, which is why the clipper had
+        /// only an east and a south pass: the overhang was systematic and one-sided by construction.
+        /// On rp_downtown_tits_v2 correcting it took ground coverage from 88.2% to 90.1% and mean
+        /// height error from 1.2 to 0.6.
+        ///
+        /// Asserted on position rather than size for that exact reason. Size was always right.
+        /// </summary>
+        [Fact]
+        public void AnAreaIsCentredOnItsNodes()
+        {
+            var nav = new NavFile();
+            NodeAreaBuilder.Build(nav, Run(length: 6, risePerStep: 0f, flatTreads: true, width: 3), Step);
+
+            var area = Assert.Single(nav.Areas);
+            var bounds = NavGeometry.GetBounds(area);
+            const float Half = Step / 2f;
+
+            // Nodes span x 0..2*Step and y 0..5*Step, so the area spans half a step beyond each end.
+            Assert.Equal(-Half, bounds.MinX, 3);
+            Assert.Equal(2 * Step + Half, bounds.MaxX, 3);
+            Assert.Equal(-Half, bounds.MinY, 3);
+            Assert.Equal(5 * Step + Half, bounds.MaxY, 3);
+        }
+
+        /// <summary>
         /// A staircase: flat treads (normal straight up) with a real riser at every sampling step.
         ///
         /// This is the case that regressed. Coplanarity against the seed's own surface normal makes the
