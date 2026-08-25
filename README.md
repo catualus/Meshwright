@@ -252,8 +252,8 @@ down from 25 points on every area and reports the gap.
 | Areas floating above the floor | 1 | **0** | 924 (4.8%) | **14 (0.1%)** |
 | Areas over open air | 3 | **0** | 19 | **1** |
 
-The large map is where this separates. The engine leaves 924 areas sitting above the floor and 19
-hanging over nothing; Meshwright leaves 14 and one.
+On gm_construct the two are level. On the large map they are not: the engine leaves 924 areas above
+the floor and 19 over nothing.
 
 ### What it covers
 
@@ -263,52 +263,47 @@ hanging over nothing; Meshwright leaves 14 and one.
 | Coverage of every engine area including stranded | 88.4% | 88.7% |
 | Areas on ground the engine's mesh does not have | 4.9% | 39.4% |
 
-Score against reachable ground rather than every area. An engine mesh contains ground nothing can
-path to: gm_construct's own mesh strands 224 of its 2,271 areas on platforms whose nearest reachable
-neighbour is up to three thousand units directly below, and its own connection graph cannot reach
-them either. Counting those as misses is how the first column reads 88.4% instead of 98.0%.
+Score against reachable ground rather than against every area, because an engine mesh contains ground
+nothing can path to. gm_construct's own mesh strands 224 of its 2,271 areas that its own connection
+graph cannot reach. Counting those as misses is what drops the second row to 88.4%.
 `compare-areas -reachable <map.bsp>` does the filtering.
 
-90.1% on the large map is the honest number and the weakest result here. Of the ground missed, most is
-ground the sampling flood never reached; the rest is ground it judged unstandable, found no floor in,
-or that the clip pulled back out of geometry. It is not the stranded-platform artefact that explains
-the gm_construct figure. `build-areas -reference <known-good.nav>` breaks the misses down by cause.
+90.1% on the large map is the weakest result here. Most of the missing ground is ground the sampling
+flood never reached; the rest was judged unstandable, had no floor found in its column, or was pulled
+back out of geometry by the clip. `build-areas -reference <known-good.nav>` breaks the misses down by
+cause.
 
 ### Speed
 
-`rp_downtown_tits_v2`, everything: areas, movement, ladders, hiding spots, sniper grading, encounter
-spots and visibility. The engine run used `nav_quicksave 0`, so it computed the sniper and encounter
-phases too and the two are doing the same work.
+`rp_downtown_tits_v2`, both tools running the same passes: areas, movement, ladders, hiding spots,
+sniper grading, encounter spots and visibility.
 
 | | time |
 |---|---|
 | `nav_generate`, one core, game blocked | about 80 minutes |
 | Meshwright, 16 threads | **220 seconds** |
 
-More than twenty times faster on this machine, and the run can be cancelled, scripted, and given
-fewer cores if you want to keep using the machine. Thread count changes the time and nothing else:
-the same map generated on 8 threads produces a byte-identical mesh.
+`gm_construct`, the same passes, takes 7.4 seconds.
 
-Beware any timing comparison that does not say what `nav_quicksave` was set to. It defaults to 1, and
+Thread count changes the time and nothing else. The same map on 8 threads produces a byte-identical
+mesh.
+
+A timing comparison is worthless unless it says what `nav_quicksave` was set to. It defaults to 1, and
 both `ComputeSniperSpots` and `ComputeSpotEncounters` return immediately when it is, so a stock
-`nav_generate` produces neither and finishes very much sooner than the figure above. Against that
-default the honest comparison is a Meshwright run with `-nosnipers -noencounters`.
-
-`gm_construct`, everything, is 7.4 seconds.
+`nav_generate` skips both phases and finishes far sooner than the figure above. The run measured here
+used `nav_quicksave 0`, so both tools did the same work. To compare against the default instead, run
+Meshwright with `-nosnipers -noencounters`.
 
 ---
 
 ## Limitations
 
-Worth knowing before you rely on it.
-
 **A prop whose model you do not have is invisible.** Collision comes from each model's `.phy`, found
 through the map's embedded pakfile, the loose game and addon directories, `.gma` workshop archives and
 then VPKs, the order the engine mounts them, taken from the mod's own `gameinfo.txt` where there is
-one. Anything not found contributes nothing, and the mesh
-will float where those props are. `meshwright props <bsp>` reports the split; check it if a mesh looks
-wrong, because nothing else will tell you. If the content exists but the map is not inside the game
-directory, `-content` is the fix.
+one. Anything not found contributes nothing, and the mesh will float where those props are.
+`meshwright props <bsp>` reports the split; check it if a mesh looks wrong, because nothing else will
+tell you. If the content exists but the map is not inside the game directory, `-content` is the fix.
 
 A missing hull is left missing rather than replaced with the model's bounding box. Substituting a box
 measured worse: the models that lack a `.phy` are typically bushes, tree cards and skybox props, and a
@@ -322,14 +317,14 @@ mesh is more truthful and a bot will not walk into scenery, but it is larger and
 `meshwright reachable` shows where. `-pruneunreachable` deletes them, capped to groups of eight or
 fewer, and refusing outright if the result would remove more than a third of the mesh.
 
-It is off by default on the evidence. Most unreachable ground is real ground the movement pass simply
-failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning removes 662
-areas and takes coverage of the engine's reachable ground from 90.1% to 88.8%. A stranded area costs
-nothing at runtime, because nothing can path into it, where deleting one costs the map.
+It is off by default because deleting it measures worse. Most unreachable ground is real ground the
+movement pass failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning
+removes 662 areas and takes coverage of the engine's reachable ground from 90.1% to 88.8%. A stranded
+area costs nothing at runtime, since nothing can path into it. Deleting real ground does cost
+something.
 
-Worth knowing that the engine does this too. Its own mesh for that map strands 1,032 of 19,275 areas,
-5.4%, that its own connection graph cannot reach. Meshwright strands 8.1%, which is more than the
-engine and the weaker number of the two. Most of it is small: 293 of its 451 stranded groups are a
+The engine strands areas too: 1,032 of the 19,275 in its own mesh for that map, 5.4%. Meshwright
+strands 8.1%, which is the worse of the two figures, though 293 of its 451 stranded groups are a
 single area.
 
 **Some collision questions use a line rather than a swept box.** Movement between samples is tested
