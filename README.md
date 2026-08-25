@@ -238,10 +238,8 @@ them run after the mesh is built, because a mesh has to be built while the entit
 to read. The mesh is not stale in that case, only the stamp is. This rewrites the one field and
 nothing else.
 
-As a Compile Pal step this is automatic and has nothing to configure. The plugin zip contains two
-folders: `Meshwright`, which builds the mesh, and `Meshwright Stamp`, which runs after the entity
-lump step and re-stamps it. Install both. The second holds only metadata and runs the first one's
-executable, so it costs a few hundred bytes rather than a second copy of the tool.
+Compile Pal does this for you: it knows which of its own steps rewrote the BSP, so it re-stamps any
+mesh beside the map once the compile has finished. The command is here for every other pipeline.
 
 Run `meshwright` with no arguments for the full list.
 
