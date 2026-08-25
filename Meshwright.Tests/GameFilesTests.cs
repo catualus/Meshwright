@@ -189,5 +189,108 @@ namespace Meshwright.Tests
             Assert.True(files.TryRead("models/custom/thing.phy", out var bytes));
             Assert.Equal("installed", Text(bytes));
         }
+
+        /// <summary>
+        /// A map outside any game directory resolves nothing, and says nothing about it.
+        ///
+        /// This is the failure the -content flag exists for, and it is worth pinning down because it
+        /// looks like success: the run completes, reports its numbers, and writes a mesh with no prop
+        /// collision anywhere in it. The only visible symptom is areas floating where props stand,
+        /// which reads as a generator bug rather than a missing content path.
+        /// </summary>
+        [Fact]
+        public void AMapOutsideAGameDirectoryFindsNothingUntilARootIsNamed()
+        {
+            // A .bsp on its own, nowhere near the mod directory holding the model it names.
+            string loose = Path.Combine(root, "elsewhere");
+            Directory.CreateDirectory(Path.Combine(loose, "maps"));
+
+            string bsp = Path.Combine(loose, "maps", "orphan.bsp");
+            File.WriteAllBytes(bsp, File.ReadAllBytes(WriteBsp("donor.bsp")));
+
+            WriteLoose("models/custom/thing.phy", "installed");
+
+            using (var blind = GameFiles.Open(bsp))
+            {
+                Assert.False(blind.TryRead("models/custom/thing.phy", out _));
+                Assert.Contains("models/custom/thing.phy", blind.Missing);
+            }
+
+            // Named explicitly, the same lookup resolves.
+            using (var told = GameFiles.Open(bsp, [Mod]))
+            {
+                Assert.True(told.TryRead("models/custom/thing.phy", out var found));
+                Assert.Equal("installed", Text(found));
+            }
+        }
+
+        /// <summary>
+        /// A model name is a string from somebody else's map, and it does not get to leave the root.
+        ///
+        /// Both of these escape <see cref="Path.Combine"/>: a relative walk goes up out of the content
+        /// directory, and on Windows a rooted second argument makes Combine discard the first entirely
+        /// and hand back the absolute path. Neither amounts to much on its own - the bytes are parsed as
+        /// a collision hull and discarded if they are not one - but reading arbitrary files the user
+        /// happens to have access to is not something a nav generator should do at the say-so of a
+        /// downloaded map.
+        /// </summary>
+        [Fact]
+        public void AModelNameCannotReadOutsideTheContentRoot()
+        {
+            string secret = Path.Combine(root, "secret.txt");
+            File.WriteAllText(secret, "private");
+
+            // Inside the mod directory, a normal lookup still works.
+            WriteLoose("models/ok.phy", "fine");
+
+            string bsp = WriteBsp("map.bsp");
+            using var files = GameFiles.Open(bsp);
+
+            Assert.True(files.TryRead("models/ok.phy", out var ok));
+            Assert.Equal("fine", Text(ok));
+
+            // Walking up out of the root.
+            Assert.False(files.TryRead("../secret.txt", out _));
+            Assert.False(files.TryRead("models/../../secret.txt", out _));
+
+            // A rooted path, which Path.Combine would otherwise return verbatim.
+            Assert.False(files.TryRead(secret, out _));
+        }
+
+        /// <summary>
+        /// The process-wide root reaches call sites that were never given one.
+        ///
+        /// <see cref="GameFiles.AdditionalRoots"/> is static precisely so that a caller cannot lose it:
+        /// a BSP is opened from a dozen places, and one that forgets to pass a root along produces a
+        /// silently prop-less mesh rather than an error. This asserts the guarantee that makes the
+        /// static worth having.
+        /// </summary>
+        [Fact]
+        public void TheProcessWideRootIsHonouredWithoutBeingPassed()
+        {
+            string loose = Path.Combine(root, "elsewhere2");
+            Directory.CreateDirectory(Path.Combine(loose, "maps"));
+
+            string bsp = Path.Combine(loose, "maps", "orphan.bsp");
+            File.WriteAllBytes(bsp, File.ReadAllBytes(WriteBsp("donor2.bsp")));
+
+            WriteLoose("models/custom/thing.phy", "installed");
+
+            var previous = GameFiles.AdditionalRoots;
+            try
+            {
+                GameFiles.AdditionalRoots = [Mod];
+
+                // No extraRoots argument, which is the whole point.
+                using var files = GameFiles.Open(bsp);
+
+                Assert.True(files.TryRead("models/custom/thing.phy", out var found));
+                Assert.Equal("installed", Text(found));
+            }
+            finally
+            {
+                GameFiles.AdditionalRoots = previous;
+            }
+        }
     }
 }

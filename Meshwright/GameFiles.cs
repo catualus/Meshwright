@@ -99,11 +99,31 @@ namespace Meshwright
         public int ReadsFromGma;
 
         /// <summary>
+        /// Directories to search on top of the ones inferred from the map's own path, for every lookup
+        /// in the process.
+        ///
+        /// **Process-wide because the alternative silently loses content.** Where the map is loaded from
+        /// is decided in a dozen places - every command that opens a BSP, plus the overlapped readers in
+        /// <see cref="NavPipeline.LoadBsp"/> - and a caller that forgets to pass a root along does not
+        /// get an error. It gets a mesh with no prop collision, floating wherever the missing props are,
+        /// and nothing anywhere says so. Setting it once means no path can miss it.
+        ///
+        /// The same shape as <see cref="NavConcurrency.MaxThreads"/> and
+        /// <see cref="NavConstants.UseCounterStrikeLimits"/>: configuration a person supplies once for a
+        /// whole run, not state a pass reasons about. The <paramref name="extraRoots"/> parameter stays
+        /// for callers that want to be explicit; both are used.
+        /// </summary>
+        public static IReadOnlyList<string> AdditionalRoots { get; set; } = [];
+
+        /// <summary>
         /// Opens the content a map can see, inferring the install layout from the map's own path.
         ///
         /// A .bsp lives in <c>&lt;mod&gt;/maps</c>, so the mod directory is two levels up and the rest of
         /// the install is its siblings. That inference is the whole reason no configuration is needed
-        /// for the ordinary case; <paramref name="extraRoots"/> covers the rest.
+        /// for the ordinary case, and it is also its limit: a BSP sitting anywhere else - a build
+        /// server's output directory, a scratch copy - infers a mod directory that does not exist, finds
+        /// nothing, and produces a mesh with no prop collision at all. <paramref name="extraRoots"/> and
+        /// <see cref="AdditionalRoots"/> are how that case is answered.
         /// </summary>
         public static GameFiles Open(string bspPath, IEnumerable<string>? extraRoots = null)
         {
@@ -127,9 +147,17 @@ namespace Meshwright
                         files.AddRoot(dir);
                 }
 
-                // Sibling game directories the mod inherits content from. Named rather than enumerated:
-                // a mod folder's siblings include plenty that are not content, and walking all of them
-                // turns a lookup into a directory scan of the whole install.
+                // What the mod itself says it mounts, which is the authoritative answer and the one
+                // the engine uses.
+                files.AddSearchPaths(GameInfo.Read(mod.FullName));
+
+                // The old guess, kept behind it rather than replaced by it. Naming the base games a
+                // mod is likely to inherit from is right for the common cases and costs nothing when
+                // gameinfo already covered them - AddRoot ignores duplicates - while still answering
+                // for a mod whose gameinfo is missing, unreadable, or shaped in a way the reader above
+                // declines to guess at. Enumerated rather than scanned: a mod folder's siblings include
+                // plenty that are not content, and walking all of them turns a lookup into a directory
+                // scan of the whole install.
                 if (mod.Parent is { } install)
                 {
                     foreach (var name in new[] { "sourceengine", "platform", "hl2", "cstrike", "episodic", "ep2", "tf", "portal" })
@@ -140,8 +168,20 @@ namespace Meshwright
                 }
             }
 
-            if (extraRoots is not null)
-                foreach (var root in extraRoots) files.AddRoot(root);
+            // Both, and after the inferred ones: a root someone named explicitly is a supplement to the
+            // install layout, not a replacement for it. AddRoot already ignores duplicates, so naming a
+            // directory the inference had found anyway costs nothing.
+            foreach (var root in Named(extraRoots))
+            {
+                files.AddRoot(root);
+
+                // A directory someone names with -content is nearly always a mod directory - it is the
+                // thing you point at when the map is not inside the install. Reading its gameinfo is
+                // what turns that one flag from "also look here" into "mount this game the way the
+                // engine would", which is the difference between finding the mod's own models and
+                // finding the base game's as well.
+                files.AddSearchPaths(GameInfo.Read(root));
+            }
 
             foreach (var root in files.roots.ToArray())
                 files.AddVpksIn(root);
@@ -176,11 +216,67 @@ namespace Meshwright
 
             }
 
+            // A named root gets the same treatment as the mod directory, addon archives included. It is
+            // typically a copy of one - content staged onto a build server keeps the shape it had - and
+            // finding its loose files while ignoring its .gma files would resolve a map's props on the
+            // developer's machine and not on the server, which is the whole case this exists for.
+            foreach (var root in Named(extraRoots))
+            {
+                files.AddGmasIn(root);
+                files.AddGmasIn(Path.Combine(root, "addons"));
+                files.AddGmasIn(Path.Combine(root, "cache", "workshop"));
+            }
+
             var clock = System.Diagnostics.Stopwatch.StartNew();
             files.OpenPakfile(bspPath);
             files.PakMs = clock.ElapsedMilliseconds;
             return files;
         }
+
+        /// <summary>
+        /// Resolves a model path against a content root, refusing anything that escapes it.
+        ///
+        /// **The path is not ours.** It is the model name a static prop carries in the BSP's prop lump,
+        /// and a BSP is a file from somebody else - a map downloaded from the workshop, a map handed to
+        /// a build server by whoever submitted it. <see cref="Path.Combine"/> takes such a string at its
+        /// word in two ways that both leave the root behind: <c>../../..</c> walks up out of it, and on
+        /// Windows a rooted second argument (<c>C:/Users/…</c>) makes Combine discard the first entirely
+        /// and return the absolute path unchanged.
+        ///
+        /// Neither turns into much on its own - the bytes are parsed as a collision hull and thrown away
+        /// if they are not one - but "read an arbitrary file the user can read" is not a thing a nav
+        /// generator should do, and the diagnostics do print what they found and where. Resolving fully
+        /// and checking containment costs one call per lookup on a path that is about to hit the disk
+        /// anyway.
+        /// </summary>
+        private static bool TryResolveUnder(string root, string relativePath, out string full)
+        {
+            full = string.Empty;
+
+            try
+            {
+                string candidate = Path.GetFullPath(
+                    Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+                string prefix = Path.GetFullPath(root);
+
+                if (!prefix.EndsWith(Path.DirectorySeparatorChar))
+                    prefix += Path.DirectorySeparatorChar;
+
+                if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                full = candidate;
+                return true;
+            }
+            catch (ArgumentException) { return false; }      // illegal characters in the name
+            catch (PathTooLongException) { return false; }
+            catch (NotSupportedException) { return false; }
+        }
+
+        /// <summary>Every explicitly named root: the call's own, plus the process-wide ones.</summary>
+        private static IEnumerable<string> Named(IEnumerable<string>? extraRoots)
+            => (extraRoots ?? []).Concat(AdditionalRoots);
 
         private void AddRoot(string path)
         {
@@ -209,6 +305,40 @@ namespace Meshwright
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+
+        /// <summary>
+        /// Adds what a gameinfo declared: directories become content roots, VPKs are queued for
+        /// indexing on first use like any other.
+        /// </summary>
+        private void AddSearchPaths(IReadOnlyList<GameInfo.Mount> mounts)
+        {
+            foreach (var mount in mounts)
+            {
+                if (mount.IsArchive)
+                    AddVpk(mount.Path);
+                else
+                    AddRoot(mount.Path);
+            }
+        }
+
+        /// <summary>
+        /// Queues one named VPK.
+        ///
+        /// A gameinfo names the logical archive - <c>hl2_misc.vpk</c> - where a multi-part set is stored
+        /// as <c>hl2_misc_dir.vpk</c> plus numbered body files. The engine resolves the one to the
+        /// other, so this does too; naming the file that does not exist would silently mount nothing.
+        /// </summary>
+        private void AddVpk(string path)
+        {
+            string directoryForm = path[..^4] + "_dir.vpk";
+
+            string? actual =
+                File.Exists(directoryForm) ? directoryForm :
+                File.Exists(path) ? path : null;
+
+            if (actual is not null && !vpkPaths.Contains(actual, StringComparer.OrdinalIgnoreCase))
+                vpkPaths.Add(actual);
         }
 
         private void AddVpksIn(string root)
@@ -280,7 +410,8 @@ namespace Meshwright
 
             foreach (var root in roots)
             {
-                string full = Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar));
+                if (!TryResolveUnder(root, path, out string full))
+                    continue;
 
                 if (File.Exists(full))
                 {

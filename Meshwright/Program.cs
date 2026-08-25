@@ -30,6 +30,7 @@ namespace Meshwright
                     NavConcurrency.MaxThreads = threads;
 
                 ApplyGame(args);
+                ApplyContentRoots(args);
 
                 return args[0].ToLowerInvariant() switch
                 {
@@ -147,6 +148,46 @@ namespace Meshwright
             }
         }
 
+        /// <summary>
+        /// Reads every "-content DIR" flag and points content lookup at those directories as well.
+        ///
+        /// The install layout is normally inferred from the BSP's own path - a .bsp lives in
+        /// <c>&lt;mod&gt;/maps</c>, so the mod directory is two levels up. That works wherever the map
+        /// sits inside a game install and fails completely anywhere else: a BSP in a build server's
+        /// output directory infers a mod directory that does not exist, so no model resolves, every
+        /// static prop contributes nothing, and the mesh floats over all of them. Nothing about that
+        /// looks like an error - the run reports "0 collision triangles" among a page of other numbers
+        /// and otherwise succeeds.
+        ///
+        /// That is the case the README has always described and had no answer for, which is why a
+        /// directory that does not exist is refused here rather than skipped. A typo would put the run
+        /// straight back into the failure this exists to prevent, and silently.
+        /// </summary>
+        private static void ApplyContentRoots(string[] args)
+        {
+            var roots = new List<string>();
+
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (!args[i].Equals("-content", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string path = args[i + 1];
+
+                if (!Directory.Exists(path))
+                    throw new DirectoryNotFoundException($"-content: no such directory: {path}");
+
+                roots.Add(Path.GetFullPath(path));
+            }
+
+            if (roots.Count == 0)
+                return;
+
+            GameFiles.AdditionalRoots = roots;
+
+            Console.WriteLine($"      content roots: {string.Join(", ", roots)}");
+        }
+
         private static void Usage()
         {
             Console.WriteLine("meshwright - Source engine navigation mesh tool");
@@ -155,6 +196,17 @@ namespace Meshwright
             Console.WriteLine("  -threads N              Cap parallel work at N threads (default: every core)");
 
             Console.WriteLine("  -game NAME              Movement limits: cs/css/csgo, or gmod/hl2/tf2/source (default)");
+            Console.WriteLine("  -content DIR            Extra directory to resolve prop models from, on top of the");
+            Console.WriteLine("                          install inferred from the map's path. May be repeated.");
+            Console.WriteLine("                          Needed whenever the .bsp is not inside a game directory:");
+            Console.WriteLine("                          without it no model resolves and props are not collided");
+            Console.WriteLine("                          against at all.");
+            Console.WriteLine();
+            Console.WriteLine("  many maps, one process:");
+            Console.WriteLine("  meshwright batch <file.bsp|directory|pattern>... [flags]");
+            Console.WriteLine("      Run generate over every map named, finishing each .nav in place.");
+            Console.WriteLine("      Takes every generate flag. One map failing does not stop the rest;");
+            Console.WriteLine("      failures are listed at the end and set a non-zero exit code.");
             Console.WriteLine();
             Console.WriteLine("  the whole build, in one run:");
             Console.WriteLine("  meshwright generate <file.bsp> [file.nav] [-o out.nav]");

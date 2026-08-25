@@ -16,4 +16,10 @@
     <PackageReference Include="SharpCompress" Version="0.50.4" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- So a test can reach a parser that has no business being public. GameInfo.Parse takes text
+         rather than a path, which is what makes it testable without a game install on the machine. -->
+    <InternalsVisibleTo Include="Meshwright.Tests" />
+  </ItemGroup>
+
 </Project>
