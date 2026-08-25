@@ -76,6 +76,36 @@ namespace Meshwright
             buffer.CopyTo(file);
         }
 
+        /// <summary>
+        /// A record count the remaining bytes could not possibly supply, refused before anything is
+        /// sized from it.
+        ///
+        /// Every count in this format is read straight off disk and then used to allocate or to bound a
+        /// loop. A file that is corrupt, truncated, or simply not the mesh it claims to be hands over
+        /// whatever those four bytes happened to be - and 0xFFFFFFFF as a visible-area count is an
+        /// immediate request for a two-billion-element list, which fails as an OutOfMemoryException or
+        /// an overflow rather than as "this file is not valid".
+        ///
+        /// Checked against the bytes actually left in the stream, which is exact rather than a guessed
+        /// ceiling: a record cannot be smaller than its fixed fields, so a count larger than
+        /// <c>remaining / bytesEach</c> describes a file that does not exist. Reading is done from a
+        /// MemoryStream over the whole file, so the length is always known.
+        /// </summary>
+        internal static int Counted(BinaryReader r, uint count, int bytesEach, string what)
+        {
+            long remaining = r.BaseStream.Length - r.BaseStream.Position;
+            long possible = remaining / Math.Max(1, bytesEach);
+
+            if (count > possible)
+            {
+                throw new InvalidDataException(
+                    $"Corrupt nav file: claims {count:N0} {what} with {remaining:N0} bytes left, " +
+                    $"which is room for at most {possible:N0}.");
+            }
+
+            return (int)count;
+        }
+
         public static NavFile Read(BinaryReader r)
         {
             var nav = new NavFile();
@@ -98,9 +128,12 @@ namespace Meshwright
 
             // place directory: names are stored once and referenced by index from each area
             ushort placeCount = r.ReadUInt16();
+            Counted(r, placeCount, 3, "places");   // a name is at least a length and a NUL
+
             for (int i = 0; i < placeCount; i++)
             {
                 ushort length = r.ReadUInt16();
+                Counted(r, length, 1, "bytes of place name");
                 // length includes the trailing NUL
                 string name = Encoding.ASCII.GetString(r.ReadBytes(length)).TrimEnd('\0');
                 nav.Places.Add(name);
@@ -109,16 +142,25 @@ namespace Meshwright
             if (nav.Version >= 12)
                 nav.HasUnnamedAreas = r.ReadByte() != 0;
 
-            uint areaCount = r.ReadUInt32();
-            for (uint i = 0; i < areaCount; i++)
+            // 60 is a lower bound on an area record: ids, corners, four connection counts, a hiding
+            // spot count, an encounter count, a place index, two ladder counts and the occupy times,
+            // before any of the optional or variable-length parts.
+            int areaCount = Counted(r, r.ReadUInt32(), 60, "areas");
+            nav.Areas.Capacity = areaCount;
+
+            for (int i = 0; i < areaCount; i++)
                 nav.Areas.Add(NavArea.Read(r, nav.Version));
 
-            uint ladderCount = r.ReadUInt32();
-            for (uint i = 0; i < ladderCount; i++)
+            int ladderCount = Counted(r, r.ReadUInt32(), NavLadder.SizeOf, "ladders");
+            nav.Ladders.Capacity = ladderCount;
+
+            for (int i = 0; i < ladderCount; i++)
                 nav.Ladders.Add(NavLadder.Read(r));
 
+            // Clamped to int rather than cast: a file over 2GB would otherwise wrap to a negative
+            // length. Nothing here writes one, but this reads files it did not write.
             long remaining = r.BaseStream.Length - r.BaseStream.Position;
-            nav.TrailingData = remaining > 0 ? r.ReadBytes((int)remaining) : [];
+            nav.TrailingData = remaining > 0 ? r.ReadBytes((int)Math.Min(remaining, int.MaxValue)) : [];
 
             return nav;
         }
@@ -216,25 +258,27 @@ namespace Meshwright
 
             for (int d = 0; d < NumDirections; d++)
             {
-                uint count = r.ReadUInt32();
-                for (uint i = 0; i < count; i++)
+                int count = NavFile.Counted(r, r.ReadUInt32(), 4, "connections");
+                for (int i = 0; i < count; i++)
                     area.Connections[d].Add(r.ReadUInt32());
             }
 
             byte hidingSpotCount = r.ReadByte();
+            NavFile.Counted(r, hidingSpotCount, HidingSpot.SizeOf, "hiding spots");
+
             for (int i = 0; i < hidingSpotCount; i++)
                 area.HidingSpots.Add(HidingSpot.Read(r));
 
-            uint encounterCount = r.ReadUInt32();
-            for (uint i = 0; i < encounterCount; i++)
+            int encounterCount = NavFile.Counted(r, r.ReadUInt32(), 11, "encounters");
+            for (int i = 0; i < encounterCount; i++)
                 area.Encounters.Add(SpotEncounter.Read(r));
 
             area.PlaceIndex = r.ReadUInt16();
 
             for (int d = 0; d < NumLadderDirections; d++)
             {
-                uint count = r.ReadUInt32();
-                for (uint i = 0; i < count; i++)
+                int count = NavFile.Counted(r, r.ReadUInt32(), 4, "ladder links");
+                for (int i = 0; i < count; i++)
                     area.Ladders[d].Add(r.ReadUInt32());
             }
 
@@ -249,7 +293,10 @@ namespace Meshwright
 
             if (version >= 16)
             {
-                uint visibleCount = r.ReadUInt32();
+                // Five bytes each, and the count is checked before Capacity is set from it - this is
+                // the record that runs to millions on an analysed mesh and the one where a bad count
+                // asks for a multi-gigabyte allocation instead of failing as a bad file.
+                int visibleCount = NavFile.Counted(r, r.ReadUInt32(), 5, "visible areas");
 
                 // These five-byte records are the overwhelming bulk of an analysed mesh - 1.37 million
                 // of them on gm_construct, 96% of the file - so reading them as one block and decoding
@@ -336,6 +383,9 @@ namespace Meshwright
             Exposed = 0x08,
         }
 
+        /// <summary>Bytes on disk: id, position and the flag byte.</summary>
+        public const int SizeOf = 4 + 12 + 1;
+
         public uint Id { get; set; }
         public float[] Position { get; set; } = new float[3];
         public byte Flags { get; set; }
@@ -377,6 +427,8 @@ namespace Meshwright
             };
 
             byte spotCount = r.ReadByte();
+            NavFile.Counted(r, spotCount, 5, "encounter spots");
+
             for (int i = 0; i < spotCount; i++)
                 e.Spots.Add((r.ReadUInt32(), r.ReadByte()));
 
@@ -408,6 +460,9 @@ namespace Meshwright
 
     public sealed class NavLadder
     {
+        /// <summary>Bytes on disk: id, width, two points, length, direction and five area ids.</summary>
+        public const int SizeOf = 4 + 4 + 12 + 12 + 4 + 4 + (5 * 4);
+
         public uint Id { get; set; }
         public float Width { get; set; }
         public float[] Top { get; set; } = new float[3];
