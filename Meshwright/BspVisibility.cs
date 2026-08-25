@@ -772,6 +772,25 @@ namespace Meshwright
         /// gm_construct's isolated areas from 46 to 321, by accepting samples under displacement that no
         /// body could fit in.
         /// </summary>
+        /// <summary>
+        /// Builds a visibility set straight from geometry, for tests.
+        ///
+        /// The sweep is only testable against a real BSP tree, and the bug this exists to pin down
+        /// lives in how the tree is descended rather than in how a brush is clipped, so a stub that
+        /// skipped the tree would not have caught it.
+        /// </summary>
+        internal static BspVisibility FromGeometry(BspFile.Plane[] planes, Node[] nodes, Leaf[] leafs,
+            BspFile.Brush[] brushes, BspFile.BrushSide[] brushSides, int[]?[] leafBrushes)
+            => new()
+            {
+                planes = planes,
+                nodes = nodes,
+                leafs = leafs,
+                brushes = brushes,
+                brushSides = brushSides,
+                leafBrushes = leafBrushes,
+            };
+
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
             out float fraction, out BspFile.Vector3 normal, out bool startSolid)
@@ -892,29 +911,68 @@ namespace Meshwright
                 if (d1 >= offset && d2 >= offset) { num = node.Child0; continue; }
                 if (d1 < -offset && d2 < -offset) { num = node.Child1; continue; }
 
-                // straddles: take both halves, nearest first
-                float t = MathF.Abs(d1 - d2) < 1e-6f ? 0f : d1 / (d1 - d2);
-                t = Math.Clamp(t, 0f, 1f);
+                // Straddles, so both halves get walked, nearest first. The two halves overlap by the
+                // box offset rather than meeting at the crossing point: the box is wider than the line
+                // through its middle, so it is still inside the near half a little past the plane and
+                // already inside the far half a little before it. Splitting exactly at the crossing
+                // leaves a slab the width of the box that neither half looks in. This is Quake's
+                // CM_RecursiveHullCheck, frac and frac2.
+                //
+                // The parallel case is the one that mattered. A segment running along a plane has
+                // d1 == d2, and there is no crossing point to split at, so Quake hands the whole
+                // segment to both children. This used to collapse to t = 0, which gave the near child
+                // a zero length segment starting at p1 - and a degenerate segment prunes everything,
+                // so every leaf reachable only through that child went unexamined.
+                //
+                // That is not an edge case. Every generation sweep is horizontal, every floor and
+                // ceiling plane is horizontal, and the box is tall enough to straddle the floor it is
+                // walking on, so the near child was being skipped on the most ordinary trace there is.
+                // A wall standing on that floor sits in the skipped child: measured on
+                // rp_downtown_meowy, a 55 unit box reported a solid brick wall completely clear, the
+                // link across it was allowed, and areas grew through buildings.
+                float gap = d1 - d2;
+                float nearEnd, farStart;
 
-                float mid = startFraction + (endFraction - startFraction) * t;
-                var midPoint = new BspFile.Vector3(
-                    p1.X + t * (p2.X - p1.X),
-                    p1.Y + t * (p2.Y - p1.Y),
-                    p1.Z + t * (p2.Z - p1.Z));
+                if (MathF.Abs(gap) < 1e-6f)
+                {
+                    nearEnd = 1f;
+                    farStart = 0f;
+                }
+                else
+                {
+                    float inverse = 1f / gap;
+
+                    if (d1 < d2)
+                    {
+                        nearEnd = (d1 - offset - DistEpsilon) * inverse;
+                        farStart = (d1 + offset + DistEpsilon) * inverse;
+                    }
+                    else
+                    {
+                        nearEnd = (d1 + offset + DistEpsilon) * inverse;
+                        farStart = (d1 - offset - DistEpsilon) * inverse;
+                    }
+                }
+
+                nearEnd = Math.Clamp(nearEnd, 0f, 1f);
+                farStart = Math.Clamp(farStart, 0f, 1f);
 
                 bool behind = d1 < d2;
                 int near = behind ? node.Child1 : node.Child0;
                 int far = behind ? node.Child0 : node.Child1;
 
-                if (HullTrace(near, p1, midPoint, startFraction, mid, ref hit, ref startSolid, mask,
-                        rayStart, rayEnd, mins, maxs))
+                float nearFraction = startFraction + (endFraction - startFraction) * nearEnd;
+                var nearPoint = Along(p1, p2, nearEnd);
+
+                if (HullTrace(near, p1, nearPoint, startFraction, nearFraction, ref hit, ref startSolid,
+                        mask, rayStart, rayEnd, mins, maxs))
                 {
                     return true;
                 }
 
                 num = far;
-                p1 = midPoint;
-                startFraction = mid;
+                startFraction += (endFraction - startFraction) * farStart;
+                p1 = Along(p1, p2, farStart);
             }
 
             int leafIndex = -num - 1;
@@ -923,6 +981,10 @@ namespace Meshwright
 
             return ClipHullToLeaf(leafIndex, rayStart, rayEnd, mins, maxs, mask, ref hit, ref startSolid);
         }
+
+        /// <summary>A point along a segment, by fraction.</summary>
+        private static BspFile.Vector3 Along(BspFile.Vector3 a, BspFile.Vector3 b, float f)
+            => new(a.X + f * (b.X - a.X), a.Y + f * (b.Y - a.Y), a.Z + f * (b.Z - a.Z));
 
         /// <summary>The box's support distance along one axis of a plane normal.</summary>
         private static float Extent(float normal, float min, float max)
