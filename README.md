@@ -245,11 +245,11 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v2 | |
 |---|---|---|---|---|
 | | engine | Meshwright | engine | Meshwright |
-| Areas | 2,271 | 2,744 | 19,275 | 22,511 |
-| Connections | 11,446 | 14,604 | 85,083 | 101,124 |
+| Areas | 2,271 | 2,753 | 19,275 | 22,963 |
+| Connections | 11,446 | 14,659 | 85,083 | 104,216 |
 | Height error, mean | 1.0 | 1.0 | 2.9 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.3 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 924 (4.8%) | **14 (0.1%)** |
+| Areas floating above the floor | 1 | **0** | 924 (4.8%) | **18 (0.1%)** |
 | Areas over open air | 3 | **0** | 19 | **1** |
 
 On gm_construct the two are level. On the large map they are not: the engine leaves 924 areas above
@@ -259,16 +259,16 @@ the floor and 19 over nothing.
 
 | | gm_construct | rp_downtown_tits_v2 |
 |---|---|---|
-| Coverage of the engine's ground a player can reach | **98.0%** | **90.0%** |
+| Coverage of the engine's ground a player can reach | **98.0%** | **90.1%** |
 | Coverage of every engine area including stranded | 88.4% | 88.6% |
-| Areas on ground the engine's mesh does not have | 5.0% | 39.2% |
+| Areas on ground the engine's mesh does not have | 5.3% | 40.0% |
 
 Score against reachable ground rather than against every area, because an engine mesh contains ground
 nothing can path to. gm_construct's own mesh strands 224 of its 2,271 areas that its own connection
 graph cannot reach. Counting those as misses is what drops the second row to 88.4%.
 `compare-areas -reachable <map.bsp>` does the filtering.
 
-90.0% on the large map is the weakest result here. Most of the missing ground is ground the sampling
+90.1% on the large map is the weakest result here. Most of the missing ground is ground the sampling
 flood never reached; the rest was judged unstandable, had no floor found in its column, or was pulled
 back out of geometry by the clip. `build-areas -reference <known-good.nav>` breaks the misses down by
 cause.
@@ -281,13 +281,14 @@ sniper grading, encounter spots and visibility.
 | | time |
 |---|---|
 | `nav_generate`, one core, game blocked | about 80 minutes |
-| Meshwright, 16 threads | **232 seconds** |
+| Meshwright, 16 threads | **255 seconds** |
 
-`gm_construct`, the same passes, takes 9.0 seconds.
+`gm_construct`, the same passes, takes 8.6 seconds.
 
 Runs are not yet bit-for-bit reproducible across different thread counts. On
-`rp_downtown_tits_v2` the same build produced 25,382 areas on 8 and 3 threads and 25,379 on 16, a
-difference of one sampled cell out of 562,905. Repeat runs at a fixed thread count agree. This is a
+`rp_downtown_tits_v2` the same build produces 25,382 areas at some thread counts and 25,379 at
+others, a difference of one sampled cell out of 562,905, and which counts disagree is not itself
+stable. Repeat runs at a fixed thread count do agree. This is a
 known defect rather than a property being claimed.
 
 A timing comparison is worthless unless it says what `nav_quicksave` was set to. It defaults to 1, and
@@ -327,12 +328,12 @@ fewer, and refusing outright if the result would remove more than a third of the
 
 It is off by default because deleting it measures worse. Most unreachable ground is real ground the
 movement pass failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning
-removes 756 areas and takes coverage of the engine's reachable ground from 90.0% to 88.0%. A stranded
+removes 665 areas and takes coverage of the engine's reachable ground from 90.1% to 88.2%. A stranded
 area costs nothing at runtime, since nothing can path into it. Deleting real ground does cost
 something.
 
 The engine strands areas too: 1,032 of the 19,275 in its own mesh for that map, 5.4%. Meshwright
-strands 8.9%, which is the worse of the two figures, though 323 of its 508 stranded groups are a
+strands 7.0%, which is the worse of the two figures, though 276 of its 430 stranded groups are a
 single area.
 
 **Some collision questions use a line rather than a swept box.** Movement between samples is tested
