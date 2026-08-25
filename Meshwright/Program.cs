@@ -39,6 +39,7 @@ namespace Meshwright
                     "generate" => Generate(args),
                     "batch" => Batch(args),
                     "verify" => Verify(args),
+                    "stamp" => Stamp(args),
                     "info" => Info(args),
                     "bsp" => BspInfo(args),
                     "ladders" => FindLadders(args),
@@ -321,6 +322,7 @@ namespace Meshwright
             Console.WriteLine("  inspection:");
             Console.WriteLine("  meshwright info    <file.nav>                  Summarise a nav mesh");
             Console.WriteLine("  meshwright verify  <file.nav>                  Round-trip and diff byte-for-byte");
+            Console.WriteLine("  meshwright stamp   <file.bsp> <file.nav>       Re-stamp the BSP size after the BSP changes");
             Console.WriteLine("  meshwright bsp     <file.bsp>                  Summarise BSP geometry lumps");
             Console.WriteLine("  meshwright ladders <file.bsp>                  List ladder brushes in a BSP");
             Console.WriteLine();
@@ -3948,6 +3950,53 @@ namespace Meshwright
         /// whose lengths come from engine constants, and a wrong length shifts every subsequent byte
         /// without throwing. A clean round-trip on a real mesh is what proves the layout is right.
         /// </summary>
+        /// <summary>
+        /// Rewrites the BSP size a mesh carries, without touching anything else in it.
+        ///
+        /// The engine records the size of the BSP a mesh was built for and compares it against the map
+        /// it is loading, printing "Warning! .nav file is out of date!" when the two disagree. Anything
+        /// that rewrites the BSP after the mesh is written moves that size: packing content into it,
+        /// repacking, and moving the entity lump out of it all do, and all of them normally run after
+        /// the mesh is built, because a mesh has to be built while the entities are still there to be
+        /// read.
+        ///
+        /// So the mesh is correct and the stamp is stale. Re-stamping is the last step of a build
+        /// rather than a repair: run it once the BSP is final and nothing else will touch it.
+        ///
+        /// Only the one field is changed. The mesh is loaded and written back, which is the same round
+        /// trip `verify` proves is byte-for-byte faithful, so nothing else in the file moves.
+        /// </summary>
+        private static int Stamp(string[] args)
+        {
+            if (args.Length < 3)
+                throw new ArgumentException("expected: stamp <file.bsp> <file.nav>");
+
+            string bspPath = args[1];
+            string navPath = args[2];
+
+            if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such BSP: {bspPath}");
+            if (!File.Exists(navPath)) throw new FileNotFoundException($"no such nav: {navPath}");
+
+            var nav = NavFile.Load(navPath);
+            uint was = nav.BspSize;
+            uint now = (uint)new FileInfo(bspPath).Length;
+
+            Console.WriteLine($"nav   {Path.GetFileName(navPath)}: {nav.Areas.Count:N0} areas");
+            Console.WriteLine($"bsp   {Path.GetFileName(bspPath)}: {now:N0} bytes");
+
+            if (was == now)
+            {
+                Console.WriteLine("      already stamped for this BSP, nothing to do");
+                return 0;
+            }
+
+            nav.BspSize = now;
+            nav.Save(navPath);
+
+            Console.WriteLine($"      stamp {was:N0} -> {now:N0}");
+            return 0;
+        }
+
         private static int Verify(string[] args)
         {
             string path = RequirePath(args);

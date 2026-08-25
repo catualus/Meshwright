@@ -225,6 +225,19 @@ unhappy with.
 | `meshwright disp <bsp>` | What every displacement reconstructed to |
 | `meshwright vis-compare <bsp> <analysed.nav>` | How computed visibility scores against an analysed mesh |
 
+If anything rewrites the BSP after the mesh is built, re-stamp it as the last step of the build:
+
+```bash
+meshwright stamp map.bsp map.nav
+```
+
+A mesh records the size of the BSP it was built for, and the engine prints
+`Warning! .nav file is out of date!` when that no longer matches the map it is loading. Packing
+content into the BSP, repacking it, or moving its entity lump out all change that size, and all of
+them run after the mesh is built, because a mesh has to be built while the entities are still there
+to read. The mesh is not stale in that case, only the stamp is. This rewrites the one field and
+nothing else.
+
 Run `meshwright` with no arguments for the full list.
 
 ---
