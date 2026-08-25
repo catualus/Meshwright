@@ -442,8 +442,11 @@ namespace Meshwright
 
             // Only downward: a climb has no fall path to check, and the space above a step is already
             // covered by the horizontal clearance lines.
-            if (toZ < fromZ - NavConstants.StepHeight && !CanFallTo(vis, fromZ, toX, toY, toZ))
+            if (toZ < fromZ - NavConstants.StepHeight &&
+                !CanFallTo(vis, fromX, fromY, fromZ, toX, toY, toZ))
+            {
                 return Refusal.Fall;
+            }
 
             return Refusal.Clear;
         }
@@ -540,17 +543,81 @@ namespace Meshwright
         /// punching through solid concrete, which is exactly what it looks like in game: a nav area at
         /// ceiling height with links dropping through the floor to the room below.
         ///
-        /// Traced at the landing point rather than the midpoint, because that is where the fall
-        /// actually happens - just past the edge being stepped off.
+        /// Swept along the whole run rather than probed at the landing point alone, and given the
+        /// walker's width, for the same two reasons the horizontal clearance test above is.
+        ///
+        /// A single column at the landing point is in the wrong place whenever the two areas do not
+        /// actually abut. <see cref="SharedEdge"/> accepts facing edges up to <see cref="EdgeGap"/>
+        /// apart and the landing point sits a further <see cref="Inset"/> inside the lower area, so the
+        /// one column tested could be 46 units past the edge the walker actually steps off - out beyond
+        /// the end of the slab that is in the way, in open air, reporting a clean fall. And being one
+        /// infinitely thin line it slips through any crack narrower than itself, exactly as the
+        /// centre-only horizontal test used to.
+        ///
+        /// Starts just past the upper area's edge rather than at the inset point itself, which sits
+        /// <see cref="Inset"/> units inside that area and therefore directly on top of its own floor -
+        /// a column there would begin inside the slab being stepped off and refuse every drop on the
+        /// map. The lateral offsets run parallel to the shared edge, so all three columns in a sample
+        /// stand the same distance past it.
         /// </summary>
-        private static bool CanFallTo(BspVisibility vis, float fromZ, float toX, float toY, float toZ)
+        private static bool CanFallTo(BspVisibility vis,
+            float fromX, float fromY, float fromZ, float toX, float toY, float toZ)
         {
-            // Started just under the upper surface and stopped just above the lower one, so neither
-            // floor counts as the obstruction - only something genuinely in between does.
-            var top = new BspFile.Vector3(toX, toY, fromZ - 1f);
-            var bottom = new BspFile.Vector3(toX, toY, toZ + 4f);
+            float dx = toX - fromX, dy = toY - fromY;
+            float run = MathF.Sqrt(dx * dx + dy * dy);
 
-            return vis.IsLineClear(top, bottom, BspVisibility.GenerationMask);
+            float sideX = 0, sideY = 0;
+            if (run > 0.01f)
+            {
+                sideX = -dy / run * NavConstants.HalfHumanWidth;
+                sideY = dx / run * NavConstants.HalfHumanWidth;
+            }
+
+            // Where along the run the first sample sits: clear of the upper area's own edge.
+            float first = run > 0.01f ? MathF.Min((Inset + 2f) / run, 1f) : 1f;
+
+            for (int i = 0; i < FallSamples; i++)
+            {
+                float t = FallSamples == 1 ? 1f : first + (1f - first) * i / (FallSamples - 1);
+                float x = fromX + dx * t;
+                float y = fromY + dy * t;
+
+                int sidesBlocked = 0;
+
+                for (int side = -1; side <= 1; side++)
+                {
+                    // Started just under the upper surface and stopped just above the lower one, so
+                    // neither floor counts as the obstruction - only something genuinely in between.
+                    var top = new BspFile.Vector3(x + sideX * side, y + sideY * side, fromZ - 1f);
+                    var bottom = new BspFile.Vector3(x + sideX * side, y + sideY * side, toZ + 4f);
+
+                    if (vis.IsLineClear(top, bottom, BspVisibility.GenerationMask))
+                        continue;
+
+                    // The centre line is the fall itself, so anything in its way settles the question.
+                    if (side == 0)
+                        return false;
+
+                    sidesBlocked++;
+                }
+
+                // A side column is weaker evidence and is not allowed to refuse on its own. A ledge is
+                // rarely as wide as the crossing being stepped off, so one lateral column routinely
+                // lands over the floor of whatever sits alongside the upper area rather than over the
+                // fall - refusing on that would delete legitimate drops off the corner of every walkway.
+                // Both sides blocked is a different claim: the walker does not fit through.
+                if (sidesBlocked == 2)
+                    return false;
+            }
+
+            return true;
         }
+
+        /// <summary>
+        /// How many points along the fall's horizontal run are probed. Three: just past the edge being
+        /// stepped off, the landing point, and the middle. Two would leave the span between them
+        /// untested, which on a crossing that can be 46 units long is where a slab edge sits.
+        /// </summary>
+        private const int FallSamples = 3;
     }
 }
