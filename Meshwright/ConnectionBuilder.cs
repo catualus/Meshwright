@@ -428,8 +428,22 @@ namespace Meshwright
 
             // Both evaluated, not short-circuited: either end being buried is worth recording, and the
             // two traces are cheap next to the ones already done above.
-            bool fromClear = HasRoom(vis, fromX, fromY, fromZ, out bool fromBuried);
-            bool toClear = HasRoom(vis, toX, toY, toZ, out bool toBuried);
+            // Stepping back from the edge if the edge itself is pinched. The probe sits six units
+            // inside the boundary, and at the foot of a ledge that is under whatever the ledge is
+            // capped with: measured on rp_downtown_meowy, a 40 unit ledge had a kerb at its base and a
+            // coping stone overhanging at 36, leaving a 30 unit slot that no 55 unit body fits in.
+            // Twenty units back the same column is clear for 128 units, which is where the jump is
+            // actually made from.
+            //
+            // This is asking the question the test was always meant to ask - whether the walker can be
+            // at that end of the crossing - rather than whether it can stand in the one spot hard
+            // against the obstacle. The direction to retreat comes from the crossing itself: each end
+            // backs away from the other.
+            float backX = 0f, backY = 0f;
+            if (length > 0.01f) { backX = dx / length; backY = dy / length; }
+
+            bool fromClear = HasRoomNear(vis, from, fromX, fromY, fromZ, -backX, -backY, out bool fromBuried);
+            bool toClear = HasRoomNear(vis, to, toX, toY, toZ, backX, backY, out bool toBuried);
 
             if (!fromClear || !toClear)
             {
@@ -449,6 +463,49 @@ namespace Meshwright
             }
 
             return Refusal.Clear;
+        }
+
+        /// <summary>How far back from a pinched edge to look for somewhere the walker could stand.</summary>
+        private static readonly float[] SetBack = [16f, 32f];
+
+        /// <summary>
+        /// <see cref="HasRoom"/> at the edge, and failing that a little way back into the area.
+        ///
+        /// Only ever adds connections: the edge point is tried first and unchanged, so anything that
+        /// passed before still passes. What it stops is a ledge being unreachable because the strip of
+        /// ground at its foot is roofed by the ledge's own overhang.
+        ///
+        /// Bounded by the area's own footprint. Retreating past that would be answering for ground this
+        /// crossing is not about, and on a narrow area there is nowhere to retreat to, so the edge
+        /// answer stands.
+        /// </summary>
+        private static bool HasRoomNear(BspVisibility vis, NavArea area, float x, float y, float z,
+            float backX, float backY, out bool startedSolid)
+        {
+            if (HasRoom(vis, x, y, z, out startedSolid))
+                return true;
+
+            var b = NavGeometry.GetBounds(area);
+            float lowX = MathF.Min(b.MinX + Inset, b.MaxX), highX = MathF.Max(b.MaxX - Inset, b.MinX);
+            float lowY = MathF.Min(b.MinY + Inset, b.MaxY), highY = MathF.Max(b.MaxY - Inset, b.MinY);
+
+            foreach (float back in SetBack)
+            {
+                float bx = Math.Clamp(x + backX * back, MathF.Min(lowX, highX), MathF.Max(lowX, highX));
+                float by = Math.Clamp(y + backY * back, MathF.Min(lowY, highY), MathF.Max(lowY, highY));
+
+                // Clamped back onto the point we already tried, so the area has no room to give.
+                if (MathF.Abs(bx - x) < 1f && MathF.Abs(by - y) < 1f)
+                    break;
+
+                if (HasRoom(vis, bx, by, GroundAt(vis, bx, by, NavGeometry.SurfaceZ(area, bx, by)), out _))
+                {
+                    startedSolid = false;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
