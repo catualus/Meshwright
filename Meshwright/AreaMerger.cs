@@ -266,8 +266,17 @@ namespace Meshwright
                 if (!dead.Contains(area)) survivors[area.Id] = area;
 
             // The absorbed areas' own links, moved onto whoever absorbed them.
-            foreach (var area in dead)
+            //
+            // Walked in nav.Areas order and filtered, rather than by enumerating `dead` directly. That
+            // set is keyed on object identity, and .NET's default hash for a reference comes from a
+            // per-thread pseudo-random generator - so its enumeration order is not merely unspecified,
+            // it genuinely differs between two runs of the same program on the same input. Since the
+            // links land here by AddRange and the dedup below keeps them first-seen, that order is
+            // visible in the finished file: the mesh stayed correct but stopped being reproducible, and
+            // `verify` cannot see it because it only ever compares a file with itself.
+            foreach (var area in nav.Areas)
             {
+                if (!dead.Contains(area)) continue;
                 if (!survivors.TryGetValue(Survivor(area.Id), out var into)) continue;
 
                 for (int d = 0; d < area.Connections.Length; d++)
@@ -279,8 +288,14 @@ namespace Meshwright
 
             // Then every surviving reference repointed, with the area's own id and duplicates dropped -
             // a merge routinely leaves both, and the engine treats a self-connection as corrupt too.
-            foreach (var area in survivors.Values)
+            //
+            // Also walked in nav.Areas order rather than over survivors.Values, for the same reason and
+            // one more: Dictionary enumeration order is an implementation detail nothing promises to
+            // keep, and this pass is one of the two places a run-to-run difference could enter the file.
+            foreach (var area in nav.Areas)
             {
+                if (dead.Contains(area)) continue;
+
                 foreach (var list in area.Connections)
                 {
                     var seen = new HashSet<uint>();

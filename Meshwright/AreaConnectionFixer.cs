@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Meshwright
@@ -19,6 +20,21 @@ namespace Meshwright
         public sealed class Result
         {
             public int ShortcutsRemoved;
+
+            /// <summary>
+            /// The edges dropped, in the order they were applied.
+            ///
+            /// Reported so the ordering itself can be asserted. The determinism this pass has to keep
+            /// is a property of that order - where two redundant edges each justify removing the other,
+            /// whichever is considered first is the one that goes - and the order comes from a
+            /// ConcurrentBag, which hands its contents back according to which worker queue they landed
+            /// in. That varies with real thread scheduling and not with anything a test can arrange from
+            /// outside: shuffling the input, varying the thread count and repeating the pass all fail to
+            /// reproduce it in one process, while five separate runs of the same build produced five
+            /// different meshes. Exposing the applied order makes the guarantee checkable directly
+            /// rather than by trying to lose a race on purpose.
+            /// </summary>
+            public readonly List<(uint From, int Direction, uint Through, uint To)> Removed = [];
         }
 
         public static Result Fix(NavFile nav)
@@ -29,7 +45,7 @@ namespace Meshwright
             foreach (var area in nav.Areas)
                 byId[area.Id] = area;
 
-            result.ShortcutsRemoved = RemoveRedundantShortcuts(nav, byId);
+            result.ShortcutsRemoved = RemoveRedundantShortcuts(nav, byId, result);
             return result;
         }
 
@@ -46,7 +62,8 @@ namespace Meshwright
         /// depend on iteration order, since removing A-&gt;C while scanning could hide a shortcut that a
         /// different starting area would have found through the same triple.
         /// </summary>
-        private static int RemoveRedundantShortcuts(NavFile nav, Dictionary<uint, NavArea> byId)
+        private static int RemoveRedundantShortcuts(NavFile nav, Dictionary<uint, NavArea> byId,
+            Result result)
         {
             // The intermediate area is recorded alongside the edge, not just the edge. It is what makes
             // the removal justified, and whether it still is has to be re-checked when the removal is
@@ -78,7 +95,33 @@ namespace Meshwright
 
             int removed = 0;
 
-            foreach (var (area, dir, throughId, targetId) in doomed)
+            // **Ordered before anything is removed, and ordered on the mesh rather than on this process.**
+            //
+            // A ConcurrentBag hands its contents back in whatever order threads happened to push them,
+            // which varies run to run with nothing but scheduling. That was harmless while the removals
+            // were unconditional - a set is a set - and stopped being harmless the moment each one
+            // started being re-validated against the graph as it stands: where two edges each justify
+            // dropping the other, whichever is considered first is the one that goes. So the same mesh
+            // and the same BSP could produce two different files, differing in exactly the connections
+            // this pass is most careful about, with no way to tell from either which was which.
+            //
+            // Sorted on ids, not on list position or object identity, so the order is a property of the
+            // mesh and survives anything that reorders nav.Areas.
+            var ordered = doomed.ToList();
+
+            ordered.Sort((x, y) =>
+            {
+                int by = x.Area.Id.CompareTo(y.Area.Id);
+                if (by != 0) return by;
+
+                by = x.Direction.CompareTo(y.Direction);
+                if (by != 0) return by;
+
+                by = x.ThroughId.CompareTo(y.ThroughId);
+                return by != 0 ? by : x.TargetId.CompareTo(y.TargetId);
+            });
+
+            foreach (var (area, dir, throughId, targetId) in ordered)
             {
                 // **Re-validated against the graph as it stands now, not as it stood when the scan ran.**
                 //
@@ -103,7 +146,10 @@ namespace Meshwright
                 if (!through.Connections[dir].Contains(targetId)) continue;
 
                 if (area.Connections[dir].Remove(targetId))
+                {
+                    result.Removed.Add((area.Id, dir, throughId, targetId));
                     removed++;
+                }
             }
 
             return removed;
