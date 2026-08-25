@@ -274,15 +274,24 @@ artefact that explains the gm_construct figure.
 
 ### Speed
 
-| | engine | Meshwright, 8 threads |
-|---|---|---|
-| `rp_downtown_tits_v2`, mesh and movement | not comparable, see below | 17.4 s |
-| `gm_construct`, everything including visibility | | 10.9 s |
+`rp_downtown_tits_v2`, everything: areas, movement, ladders, hiding spots, sniper grading, encounter
+spots and visibility. The engine run used `nav_quicksave 0`, so it computed the sniper and encounter
+phases too and the two are doing the same work.
 
-The engine timing is left blank on purpose. A stock `nav_generate` skips sniper spots and encounter
-spots entirely, because `nav_quicksave` defaults to 1 and both phases return immediately when it is
-set, so the two are not doing the same work. What can be said without qualification is that
-`nav_generate` runs on one core and blocks the game while it does.
+| | time |
+|---|---|
+| `nav_generate`, one core, game blocked | about 80 minutes |
+| Meshwright, 16 threads | **243 seconds** |
+
+Roughly twenty times faster on this machine, and the run can be cancelled, scripted, and given fewer
+cores if you want to keep using the machine.
+
+Beware any timing comparison that does not say what `nav_quicksave` was set to. It defaults to 1, and
+both `ComputeSniperSpots` and `ComputeSpotEncounters` return immediately when it is, so a stock
+`nav_generate` produces neither and finishes very much sooner than the figure above. Against that
+default the honest comparison is a Meshwright run with `-nosnipers -noencounters`.
+
+`gm_construct`, everything, is 10.9 seconds.
 
 ---
 
