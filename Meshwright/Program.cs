@@ -37,6 +37,7 @@ namespace Meshwright
                 return args[0].ToLowerInvariant() switch
                 {
                     "generate" => Generate(args),
+                    "batch" => Batch(args),
                     "verify" => Verify(args),
                     "info" => Info(args),
                     "bsp" => BspInfo(args),
@@ -375,6 +376,164 @@ namespace Meshwright
             // which is not what this is for.
             string outPath = FlagValue(args, "-o") ?? navPath;
 
+            return GenerateOne(bspPath, navPath, outPath, args);
+        }
+
+        /// <summary>
+        /// Runs <see cref="GenerateOne"/> over many maps in one process.
+        ///
+        /// The reason to have it is mostly that a map pack is a normal thing to own and looping over
+        /// one from a shell is awkward on Windows, where the command processor does not expand a glob
+        /// and every invocation is a fresh process. What it saves in time is real but modest and worth
+        /// stating rather than implying: the JIT and the runtime are paid once instead of once per map,
+        /// which on a pack of fifty is tens of seconds against several minutes of actual work. The
+        /// per-map content indexing - parsing fifteen VPK directories and opening seventy workshop
+        /// archives, about 180ms - is *not* shared, because a GameFiles is bound to one map's embedded
+        /// pakfile and separating the two is a larger change than the saving justifies.
+        ///
+        /// One map failing does not stop the rest. A pack usually contains something odd - a map with
+        /// no spawns, a truncated download, a .bsp that is not one - and abandoning forty-nine good
+        /// maps over the fiftieth is the wrong trade when the whole point is to leave it running. Every
+        /// failure is reported as it happens, listed again at the end, and makes the exit code non-zero
+        /// so a script still knows.
+        /// </summary>
+        private static int Batch(string[] args)
+        {
+            if (args.Length < 2)
+            {
+                throw new ArgumentException(
+                    "expected: batch <file.bsp|directory>... [flags]  (every generate flag applies)");
+            }
+
+            var maps = CollectMaps(args);
+
+            if (maps.Count == 0)
+                throw new FileNotFoundException("no .bsp files matched");
+
+            Console.WriteLine($"batch  {maps.Count:N0} maps");
+            Console.WriteLine();
+
+            var failed = new List<(string Map, string Why)>();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            int done = 0;
+
+            foreach (string bspPath in maps)
+            {
+                NavConcurrency.ThrowIfCancelled();
+
+                string name = Path.GetFileName(bspPath);
+                Console.WriteLine($"[{++done}/{maps.Count}] {name}");
+
+                string navPath = Path.ChangeExtension(bspPath, ".nav");
+
+                try
+                {
+                    // -o names a single file, which cannot mean anything sensible for many maps; each
+                    // one is finished in place beside itself, which is what a pack wants anyway.
+                    if (GenerateOne(bspPath, navPath, navPath, args) != 0)
+                        failed.Add((name, "refused - see above"));
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;      // the whole batch stops, not just this map
+                }
+                catch (Exception ex)
+                {
+                    // Reported here and again in the summary. A pack left running unattended is
+                    // exactly the case where a failure scrolled past an hour ago needs repeating.
+                    Console.Error.WriteLine($"        failed: {ex.Message}");
+                    failed.Add((name, ex.Message));
+                }
+
+                Console.WriteLine();
+            }
+
+            clock.Stop();
+
+            Console.WriteLine($"batch  {maps.Count - failed.Count:N0} of {maps.Count:N0} maps in " +
+                              $"{clock.Elapsed.TotalMinutes:F1} min");
+
+            foreach (var (map, why) in failed)
+                Console.WriteLine($"       failed: {map} - {why}");
+
+            return failed.Count == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// The maps a batch was pointed at: .bsp files named directly, and the .bsp files in any
+        /// directory named.
+        ///
+        /// Patterns are expanded here rather than left to the shell, because on Windows the command
+        /// processor does not do it and naming a maps folder with a wildcard is the obvious thing to
+        /// type. Sorted so a run is reproducible and easy to follow.
+        /// </summary>
+        internal static List<string> CollectMaps(string[] args)
+        {
+            var found = new List<string>();
+
+            for (int i = 1; i < args.Length; i++)
+            {
+                string arg = args[i];
+
+                if (arg.StartsWith('-'))
+                {
+                    // Skip a flag's value, so "-threads 8" does not read 8 as a map.
+                    if (TakesValue(arg)) i++;
+                    continue;
+                }
+
+                if (Directory.Exists(arg))
+                {
+                    found.AddRange(Directory.GetFiles(arg, "*.bsp", SearchOption.TopDirectoryOnly));
+                    continue;
+                }
+
+                if (arg.Contains('*') || arg.Contains('?'))
+                {
+                    string directory = Path.GetDirectoryName(arg) is { Length: > 0 } d ? d : ".";
+                    string pattern = Path.GetFileName(arg);
+
+                    if (Directory.Exists(directory))
+                        found.AddRange(Directory.GetFiles(directory, pattern, SearchOption.TopDirectoryOnly));
+
+                    continue;
+                }
+
+                if (File.Exists(arg))
+                    found.Add(arg);
+                else
+                    throw new FileNotFoundException($"no such file or directory: {arg}");
+            }
+
+            return found
+                .Where(f => f.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase))
+                .Select(Path.GetFullPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>Flags whose next argument is a value rather than a map.</summary>
+        private static bool TakesValue(string flag) =>
+            flag.Equals("-threads", StringComparison.OrdinalIgnoreCase) ||
+            flag.Equals("-game", StringComparison.OrdinalIgnoreCase) ||
+            flag.Equals("-gamename", StringComparison.OrdinalIgnoreCase) ||
+            flag.Equals("-content", StringComparison.OrdinalIgnoreCase) ||
+            flag.Equals("-maxviewdistance", StringComparison.OrdinalIgnoreCase) ||
+            flag.Equals("-d", StringComparison.OrdinalIgnoreCase) ||
+            flag.Equals("-o", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// One map, from its BSP to a written mesh.
+        ///
+        /// Shared with <see cref="Batch"/> rather than duplicated, for the reason
+        /// <see cref="NavPipeline"/> exists at all: two entry points that are supposed to produce the
+        /// same mesh will not, once they are written out twice. Here the drift would be silent in the
+        /// same way - a flag honoured by one and not the other gives a valid .nav that is merely
+        /// different.
+        /// </summary>
+        private static int GenerateOne(string bspPath, string navPath, string outPath, string[] args)
+        {
             bool Off(string flag) => !args.Contains(flag, StringComparer.OrdinalIgnoreCase);
 
             var options = new NavPipeline.Options
