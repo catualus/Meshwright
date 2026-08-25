@@ -1,0 +1,58 @@
+# Build and test on every push and pull request.
+#
+# Windows only, and deliberately. Meshwright reads Source engine game installs, resolves content out
+# of VPK and GMA archives by path, and ships as a Compile Pal plugin, so Windows is the platform it
+# runs on and the only one the release is built for. A Linux job would test path handling that nothing
+# depends on.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore Meshwright.slnx
+
+      # Warnings are errors here and nowhere else. The build is clean, so anything new is worth
+      # stopping for, and keeping it out of the csproj means a warning does not block someone
+      # mid-change on their own machine.
+      - name: Build
+        run: dotnet build Meshwright.slnx --configuration Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test Meshwright.slnx --configuration Release --no-build
+
+      # The release publishes self-contained, single-file and trimmed, which is a different compile
+      # from the one above and can fail on its own. Better to find that here than when cutting a tag.
+      - name: Check the release publish still works
+        run: ./build-plugin.ps1
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshwright-${{ github.sha }}
+          path: artifacts/Meshwright/
+          retention-days: 14

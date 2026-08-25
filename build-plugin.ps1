@@ -20,10 +20,18 @@
 
 .PARAMETER Zip
     Also write artifacts/Meshwright-plugin.zip, which is the form to attach to a release.
+
+.PARAMETER Version
+    Stamps the executable with a version. Left off, the build carries whatever the SDK defaults to,
+    which is fine for a local build and not fine for something attached to a release: the release
+    workflow passes the tag through here so one number is the source of both.
 #>
 [CmdletBinding()]
 param(
-    [switch]$Zip
+    [switch]$Zip,
+
+    [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
+    [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,16 +47,26 @@ $source = Join-Path $root 'CompilePalPlugin/Meshwright'
 
 Write-Host 'Publishing meshwright...' -ForegroundColor Cyan
 
-dotnet publish (Join-Path $root 'MeshwrightCli/MeshwrightCli.csproj') `
-    --configuration Release `
-    --runtime win-x64 `
-    --self-contained true `
-    -p:PublishSingleFile=true `
-    -p:PublishTrimmed=true `
-    -p:TrimMode=full `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -warnaserror `
-    --output $staging
+# Built as one array rather than a backtick-continued line so the optional -p:Version can be added
+# or left out without the call having two shapes. It has to be typed [string[]]: PowerShell unrolls a
+# one-element array back to a bare string, and splatting a string passes it one character at a time.
+[string[]]$publishArgs = @(
+    'publish'
+    (Join-Path $root 'MeshwrightCli/MeshwrightCli.csproj')
+    '--configuration', 'Release'
+    '--runtime', 'win-x64'
+    '--self-contained', 'true'
+    '-p:PublishSingleFile=true'
+    '-p:PublishTrimmed=true'
+    '-p:TrimMode=full'
+    '-p:IncludeNativeLibrariesForSelfExtract=true'
+    '-warnaserror'
+    '--output', $staging
+)
+
+if ($Version) { $publishArgs += "-p:Version=$Version" }
+
+dotnet @publishArgs
 
 if ($LASTEXITCODE -ne 0) { throw "publish failed with exit code $LASTEXITCODE" }
 

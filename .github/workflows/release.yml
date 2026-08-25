@@ -1,0 +1,68 @@
+# Cuts a release from a version tag.
+#
+# Attaches two things: the Compile Pal plugin folder as a zip, and the bare executable for anyone
+# using Meshwright from a command line or a build script. Both are the same self-contained build, so
+# neither needs .NET installed.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (for example 1.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # One version, from the tag when there is one and from the input otherwise, checked before
+      # anything is built so a typo fails in a second rather than after a publish.
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            '${{ github.event.inputs.version }}'
+          } else {
+            '${{ github.ref_name }}' -replace '^v', ''
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+            throw "not a version: '$version'. Expected something like 1.2.0"
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Releasing $version"
+
+      # A release that fails its own tests is worse than no release.
+      - name: Test
+        run: dotnet test Meshwright.slnx --configuration Release -warnaserror
+
+      - name: Package
+        shell: pwsh
+        run: ./build-plugin.ps1 -Zip -Version ${{ steps.version.outputs.version }}
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" `
+            "artifacts/Meshwright-plugin.zip" `
+            "artifacts/Meshwright/meshwright.exe" `
+            --title "Meshwright ${{ steps.version.outputs.version }}" `
+            --generate-notes
