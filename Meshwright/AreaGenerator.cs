@@ -248,7 +248,9 @@ namespace Meshwright
             {
                 result.Notes.Add($"merged {merged.Merges:N0} areas in {merged.Passes:N0} passes; " +
                                  $"left unmerged: {merged.NoPartner:N0} no partner presenting the same span, " +
-                                 $"{merged.HeightMismatch:N0} step at the seam, {merged.TooBig:N0} too big");
+                                 $"{merged.HeightMismatch:N0} step at the seam, " +
+                                 $"{merged.NotCoplanar:N0} gradient break at the seam, " +
+                                 $"{merged.TooBig:N0} too big");
             }
 
             if (squareUp)

@@ -67,6 +67,14 @@ namespace Meshwright
             /// there is a genuine step at the seam; size means the pair would exceed nav_area_max_size.
             /// </summary>
             public int NoPartner, HeightMismatch, TooBig;
+
+            /// <summary>
+            /// Refused because the two areas describe different planes, however well their heights
+            /// agreed at the seam. Counted apart from <see cref="HeightMismatch"/> because it is the
+            /// opposite shape of problem: the seam is not a step, it is a change of gradient, and the
+            /// merged quad would interpolate straight through the ground on one side of it.
+            /// </summary>
+            public int NotCoplanar;
         }
 
         /// <summary>
@@ -337,6 +345,12 @@ namespace Meshwright
                 return false;
             }
 
+            if (!NavGeometry.AreCoplanar(west, east))
+            {
+                result.NotCoplanar++;
+                return false;
+            }
+
             var a = NavGeometry.GetBounds(west);
             var b = NavGeometry.GetBounds(east);
 
@@ -364,6 +378,12 @@ namespace Meshwright
                 MathF.Abs(north.SeCorner[2] - south.NeZ) > EdgeHeightTolerance)
             {
                 result.HeightMismatch++;
+                return false;
+            }
+
+            if (!NavGeometry.AreCoplanar(north, south))
+            {
+                result.NotCoplanar++;
                 return false;
             }
 
