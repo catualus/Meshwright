@@ -185,7 +185,7 @@ namespace Meshwright
                 bool hadPartner = false;
 
                 if (byWestEdge.TryGetValue((Q(b.MaxX), Q(b.MinY), Q(b.MaxY)), out var eastward) &&
-                    TryTake(eastward, dead, area, out var east))
+                    TryTake(eastward, dead, area, alongX: true, out var east))
                 {
                     hadPartner = true;
 
@@ -199,7 +199,7 @@ namespace Meshwright
                 }
 
                 if (byNorthEdge.TryGetValue((Q(b.MaxY), Q(b.MinX), Q(b.MaxX)), out var southward) &&
-                    TryTake(southward, dead, area, out var south))
+                    TryTake(southward, dead, area, alongX: false, out var south))
                 {
                     hadPartner = true;
 
@@ -312,8 +312,28 @@ namespace Meshwright
             list.Add(area);
         }
 
+        /// <summary>
+        /// The first candidate on this edge that can still be taken - and that, right now, actually
+        /// presents the edge the index says it does.
+        ///
+        /// **The index is a snapshot and merging moves edges.** It is built once per pass, before any
+        /// merge happens, and an area that then absorbs a neighbour *perpendicular* to the seam being
+        /// considered grows across one of the two coordinates its key records. Its entry is stale from
+        /// that moment on, and nothing downstream re-reads it: <see cref="MergeAlongX"/> takes the
+        /// partner on trust, keeps the caller's own span, and deletes the partner - so whatever the
+        /// partner had grown into goes with it. Three 50x50 quads reproduce it exactly, with 7,500
+        /// square units of footprint going in and 5,000 coming out, and no measure on this side of the
+        /// tooling can see it: coverage, fit and shape all only look at areas that still exist.
+        ///
+        /// So the claim is re-read from the candidate as it stands rather than trusted, and a candidate
+        /// whose span has moved is skipped rather than refused outright - the rest of the list may hold
+        /// one that genuinely still abuts. Skipping loses nothing even when the whole list is stale:
+        /// <see cref="Merge"/> runs to a fixed point, so the next pass rebuilds the index and finds the
+        /// pair again under a key that is true. Falling through to no partner at all is also exactly
+        /// what <see cref="Result.NoPartner"/> already means - "found nothing presenting the same span".
+        /// </summary>
         private static bool TryTake(List<NavArea> candidates, HashSet<NavArea> dead, NavArea self,
-            out NavArea found)
+            bool alongX, out NavArea found)
         {
             foreach (var candidate in candidates)
             {
@@ -323,12 +343,35 @@ namespace Meshwright
                 if (candidate.AttributeFlags != self.AttributeFlags)
                     continue;
 
+                if (!SharesFullEdge(self, candidate, alongX))
+                    continue;
+
                 found = candidate;
                 return true;
             }
 
             found = null!;
             return false;
+        }
+
+        /// <summary>
+        /// Whether two areas, as they stand at this instant, meet along the whole of one edge -
+        /// <paramref name="first"/>'s east edge against <paramref name="second"/>'s west when
+        /// <paramref name="alongX"/>, its south against the other's north otherwise.
+        ///
+        /// Both halves are load-bearing and the second is the one the edge index cannot keep current.
+        /// Sharing the seam line is not enough: the merged quad keeps <paramref name="first"/>'s
+        /// perpendicular span, so unless the two spans match exactly the result claims ground on one
+        /// side of the seam and abandons it on the other.
+        /// </summary>
+        private static bool SharesFullEdge(NavArea first, NavArea second, bool alongX)
+        {
+            var a = NavGeometry.GetBounds(first);
+            var b = NavGeometry.GetBounds(second);
+
+            return alongX
+                ? Q(a.MaxX) == Q(b.MinX) && Q(a.MinY) == Q(b.MinY) && Q(a.MaxY) == Q(b.MaxY)
+                : Q(a.MaxY) == Q(b.MinY) && Q(a.MinX) == Q(b.MinX) && Q(a.MaxX) == Q(b.MaxX);
         }
 
         /// <summary>
