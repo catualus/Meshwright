@@ -2,6 +2,8 @@
 
 **Offline navigation mesh generation for Source engine maps.**
 
+[![CI](https://github.com/catualus/NavPal/actions/workflows/ci.yml/badge.svg)](https://github.com/catualus/NavPal/actions/workflows/ci.yml)
+
 Meshwright builds `.nav` files from a compiled `.bsp` without launching the game. It replaces typing
 `nav_generate` at the console: it runs as an ordinary program, uses every core on the machine, fits
 into a build script, and tells you what it did.
@@ -243,34 +245,34 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v2 | |
 |---|---|---|---|---|
 | | engine | Meshwright | engine | Meshwright |
-| Areas | 2,271 | 2,801 | 19,275 | 22,682 |
-| Connections | 11,446 | 14,803 | 85,083 | 102,654 |
-| Height error, mean | 1.0 | 1.3 | 2.9 | **1.2** |
-| Height error, median | 0.3 | 0.4 | 0.3 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 924 (4.8%) | **22 (0.1%)** |
-| Areas over open air | 3 | **0** | 19 | **0** |
+| Areas | 2,271 | 2,740 | 19,275 | 22,470 |
+| Connections | 11,446 | 14,594 | 85,083 | 101,582 |
+| Height error, mean | 1.0 | 1.0 | 2.9 | **0.6** |
+| Height error, median | 0.3 | **0.2** | 0.3 | **0.0** |
+| Areas floating above the floor | 1 | **0** | 924 (4.8%) | **14 (0.1%)** |
+| Areas over open air | 3 | **0** | 19 | **1** |
 
 The large map is where this separates. The engine leaves 924 areas sitting above the floor and 19
-hanging over nothing; Meshwright leaves 22 and none.
+hanging over nothing; Meshwright leaves 14 and one.
 
 ### What it covers
 
 | | gm_construct | rp_downtown_tits_v2 |
 |---|---|---|
-| Coverage of the engine's ground a player can reach | **97.9%** | **88.2%** |
-| Coverage of every engine area including stranded | 88.2% | 86.7% |
-| Areas on ground the engine's mesh does not have | 5.7% | 38.9% |
+| Coverage of the engine's ground a player can reach | **98.0%** | **90.1%** |
+| Coverage of every engine area including stranded | 88.4% | 88.7% |
+| Areas on ground the engine's mesh does not have | 4.9% | 39.4% |
 
 Score against reachable ground rather than every area. An engine mesh contains ground nothing can
 path to: gm_construct's own mesh strands 224 of its 2,271 areas on platforms whose nearest reachable
 neighbour is up to three thousand units directly below, and its own connection graph cannot reach
-them either. Counting those as misses is how the first column reads 88.2% instead of 97.9%.
+them either. Counting those as misses is how the first column reads 88.4% instead of 98.0%.
 `compare-areas -reachable <map.bsp>` does the filtering.
 
-88.2% on the large map is the honest number and the weakest result here. Of the areas missed, roughly
-half is ground the sampling flood never reached, a fifth was found and then dropped by the merge, and
-the rest is ground it judged unstandable or found no floor in. It is not the stranded-platform
-artefact that explains the gm_construct figure.
+90.1% on the large map is the honest number and the weakest result here. Of the ground missed, most is
+ground the sampling flood never reached; the rest is ground it judged unstandable, found no floor in,
+or that the clip pulled back out of geometry. It is not the stranded-platform artefact that explains
+the gm_construct figure. `build-areas -reference <known-good.nav>` breaks the misses down by cause.
 
 ### Speed
 
@@ -281,17 +283,18 @@ phases too and the two are doing the same work.
 | | time |
 |---|---|
 | `nav_generate`, one core, game blocked | about 80 minutes |
-| Meshwright, 16 threads | **243 seconds** |
+| Meshwright, 16 threads | **220 seconds** |
 
-Roughly twenty times faster on this machine, and the run can be cancelled, scripted, and given fewer
-cores if you want to keep using the machine.
+More than twenty times faster on this machine, and the run can be cancelled, scripted, and given
+fewer cores if you want to keep using the machine. Thread count changes the time and nothing else:
+the same map generated on 8 threads produces a byte-identical mesh.
 
 Beware any timing comparison that does not say what `nav_quicksave` was set to. It defaults to 1, and
 both `ComputeSniperSpots` and `ComputeSpotEncounters` return immediately when it is, so a stock
 `nav_generate` produces neither and finishes very much sooner than the figure above. Against that
 default the honest comparison is a Meshwright run with `-nosnipers -noencounters`.
 
-`gm_construct`, everything, is 10.9 seconds.
+`gm_construct`, everything, is 7.4 seconds.
 
 ---
 
@@ -320,12 +323,14 @@ mesh is more truthful and a bot will not walk into scenery, but it is larger and
 fewer, and refusing outright if the result would remove more than a third of the mesh.
 
 It is off by default on the evidence. Most unreachable ground is real ground the movement pass simply
-failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning removes 723
-areas and takes coverage of the engine's reachable ground from 88.2% to 86.8%. A stranded area costs
+failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning removes 662
+areas and takes coverage of the engine's reachable ground from 90.1% to 88.8%. A stranded area costs
 nothing at runtime, because nothing can path into it, where deleting one costs the map.
 
 Worth knowing that the engine does this too. Its own mesh for that map strands 1,032 of 19,275 areas,
-5.4%, that its own connection graph cannot reach. Meshwright strands 5.5%.
+5.4%, that its own connection graph cannot reach. Meshwright strands 8.1%, which is more than the
+engine and the weaker number of the two. Most of it is small: 293 of its 451 stranded groups are a
+single area.
 
 **Some collision questions use a line rather than a swept box.** Movement between samples is tested
 with a proper hull sweep against world brushes, brush entities and displacement terrain. "Is there
