@@ -66,6 +66,18 @@
     "Description": "Store the full visibility data instead of the engine's delta encoding. Roughly doubles the file size; mainly useful for debugging."
   },
   {
+    "Name": "Reuse the mesh between runs",
+    "Parameter": " -resume",
+    "Description": "Keep the finished mesh next to the map in a .mwresume file and reuse it on the next compile, so changing only a visibility or cover-spot setting does not rebuild the areas and connections. It rebuilds anyway whenever the map, the .nav it started from, those settings or Meshwright itself changed. Saves roughly a third of a run; visibility is the rest and is always recomputed.",
+    "Warning": "Writes an extra copy of the mesh beside the .bsp - a few hundred KB on a small map, tens of MB on a large one. Delete the .mwresume file to reclaim it."
+  },
+  {
+    "Name": "Extra content directory",
+    "Parameter": " -content",
+    "CanHaveValue": true,
+    "Description": "An extra folder to look for prop models in, on top of the game install Meshwright works out from the map's own location. You only need this if your models live somewhere unusual - a shared content drive, or a mod folder outside the game. Without a hull for a prop, Meshwright cannot collide against it and the mesh will float where that prop stands."
+  },
+  {
     "Name": "Thread limit",
     "Parameter": " -threads",
     "CanHaveValue": true,

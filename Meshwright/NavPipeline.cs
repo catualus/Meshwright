@@ -99,6 +99,29 @@ namespace Meshwright
 
             public float MaxViewDistance = VisibilityFilter.DefaultMaxViewDistance;
 
+            /// <summary>
+            /// Where to keep the mesh as it stands after the movement passes, so a later run can pick
+            /// up from there. Null - the default - neither reads nor writes one.
+            ///
+            /// See <see cref="NavResume"/> for what it does and does not save. In short: the passes it
+            /// skips are about a third of a run, visibility is the other two thirds and is always
+            /// recomputed, and every doubt about whether the cache still applies rebuilds instead.
+            /// </summary>
+            public string? ResumePath;
+
+            /// <summary>
+            /// The map and the seed mesh this run was given, used only to decide whether a resume cache
+            /// still applies. Ignored entirely when <see cref="ResumePath"/> is null.
+            ///
+            /// Paths rather than the loaded objects, because what the cache has to detect is the file
+            /// being *replaced* - recompiled, redownloaded, edited in game - and a BspFile in memory
+            /// says nothing about that.
+            /// </summary>
+            public string? BspPath;
+
+            /// <inheritdoc cref="BspPath"/>
+            public string? SeedNavPath;
+
             /// <summary>Where the running commentary goes. Null discards it.</summary>
             public Action<string>? Log;
 
@@ -122,6 +145,9 @@ namespace Meshwright
             public SniperSpotClassifier.Result? SniperSpots;
             public EncounterSpotBuilder.Result? Encounters;
             public NavIntegrity.Result Integrity;
+
+            /// <summary>True when the mesh came from a resume cache rather than being built.</summary>
+            public bool Resumed;
 
             /// <summary>Things the caller should see even if it is not reading the log - a missing
             /// vis lump, an option that could not be honoured.</summary>
@@ -227,13 +253,40 @@ namespace Meshwright
         public static Result Run(BspFile bsp, BspVisibility vis, NavFile nav, Options options)
         {
             var result = new Result();
+
+            // What this run created, as opposed to what it was handed. Clipping needs it and does not
+            // run until after the connection graph exists, several passes later, so it is carried here
+            // rather than kept inside the generate block.
+            uint firstGeneratedId = 0;
+
             var progress = options.Progress ?? NavProgress.None;
             var log = options.Log ?? (_ => { });
 
             // Only meaningful alongside area generation. Honoured without it, every later pass would
             // run over an empty mesh and the run would "succeed" with nothing in it, so this refuses
             // and says why rather than silently obeying.
-            if (options.FromScratch)
+            // Read before anything is built. Everything between here and the reachability check is
+            // what the cache holds, so the decision has to be made before the first of those passes
+            // rather than discovered part way through.
+            string fingerprint = options.ResumePath is null
+                ? string.Empty
+                : NavResume.Fingerprint(options.BspPath, options.SeedNavPath, options);
+
+            if (options.ResumePath is { } resumePath)
+            {
+                if (NavResume.TryLoad(resumePath, fingerprint, out var cached, out string why))
+                {
+                    nav.AdoptFrom(cached);
+                    result.Resumed = true;
+                    log($"Resume: {why} - {nav.Areas.Count:N0} areas, skipping to cover spots");
+                }
+                else
+                {
+                    log($"Resume: {why}; building the mesh");
+                }
+            }
+
+            if (!result.Resumed && options.FromScratch)
             {
                 if (options.GenerateAreas)
                 {
@@ -252,19 +305,20 @@ namespace Meshwright
 
             NavConcurrency.ThrowIfCancelled();
 
-            if (options.GenerateAreas)
+            if (options.GenerateAreas && !result.Resumed)
             {
                 progress.Enter(PhaseSampling);
                 var areas = AreaGenerator.Generate(nav, vis, bsp, progress: progress);
                 result.Areas = areas;
+                firstGeneratedId = areas.FirstGeneratedId;
 
-                log($"Areas: {areas.AreasAdded:N0} added, flooded from {areas.Seeds:N0} seeds " +
-                    $"({areas.Visited:N0} cells visited)");
+                log($"Areas: {areas.Added:N0} added, {areas.Total:N0} in the mesh, flooded from " +
+                    $"{areas.Seeds:N0} seeds ({areas.Visited:N0} cells visited)");
 
                 foreach (string note in areas.Notes)
                     log($"       {note}");
 
-                if (areas.AreasAdded > 0)
+                if (areas.Added > 0)
                 {
                     result.Warnings.Add(
                         "Generated areas are experimental and unverified in game - review before shipping.");
@@ -273,7 +327,7 @@ namespace Meshwright
 
             NavConcurrency.ThrowIfCancelled();
 
-            if (options.Ladders)
+            if (options.Ladders && !result.Resumed)
             {
                 progress.Enter(PhaseLadders);
                 RunLadders(nav, vis, bsp, result, log);
@@ -281,7 +335,7 @@ namespace Meshwright
 
             NavConcurrency.ThrowIfCancelled();
 
-            if (options.Movement)
+            if (options.Movement && !result.Resumed)
             {
                 progress.Enter(PhaseConnections);
                 var links = ConnectionBuilder.Build(nav, vis, progress);
@@ -305,9 +359,9 @@ namespace Meshwright
             NavConcurrency.ThrowIfCancelled();
 
             // After the connection graph exists, never before it - see AreaGenerator.ClipToGeometry.
-            if (options.GenerateAreas)
+            if (options.GenerateAreas && !result.Resumed)
             {
-                var trimmed = AreaGenerator.ClipToGeometry(nav, vis, progress);
+                var trimmed = AreaGenerator.ClipToGeometry(nav, vis, firstGeneratedId, progress);
                 result.Clipped = trimmed;
 
                 if (trimmed.Clipped > 0)
@@ -322,8 +376,30 @@ namespace Meshwright
 
             NavConcurrency.ThrowIfCancelled();
 
-            if (options.Movement)
+            if (options.Movement && !result.Resumed)
                 RunPostClipMovement(nav, vis, bsp, result, progress, log);
+
+            NavConcurrency.ThrowIfCancelled();
+
+            // After every pass that can add a connection, and before the two that are priced per area.
+            // Earlier would strand areas the corner patcher and the stitcher were about to join; later
+            // would mean tracing visibility for areas about to be deleted, which is the most expensive
+            // work in the pipeline spent on nothing.
+            if (options.Movement && !result.Resumed)
+            {
+                progress.Enter(PhaseReachability);
+                RunReachability(bsp, nav, options, result, log);
+            }
+
+            // The seam. Everything above decides what the mesh is; everything below only annotates it,
+            // so this is the last moment at which the cached answer is complete.
+            if (options.ResumePath is { } savePath && !result.Resumed)
+            {
+                if (NavResume.TrySave(savePath, fingerprint, nav, out string note))
+                    log($"Resume: mesh cached for the next run ({note})");
+                else
+                    log($"Resume: could not write the cache - {note}");
+            }
 
             NavConcurrency.ThrowIfCancelled();
 

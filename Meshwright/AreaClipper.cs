@@ -78,8 +78,19 @@ namespace Meshwright
             public int Discarded;
         }
 
+        /// <param name="firstGeneratedId">
+        /// The lowest id this run created; areas below it are left exactly as they are, both here and in
+        /// <see cref="DiscardSlivers"/>.
+        ///
+        /// This pass exists for one specific artefact of how areas are grown: a generated area runs one
+        /// sampling step past its outermost node, so where growth stopped at a wall the area reaches into
+        /// it. An area someone drew in game has no such overshoot - its edges are where they were put -
+        /// so pulling them back is not a repair but a change to somebody's work, and discarding one as a
+        /// sliver deletes a deliberately narrow area outright. Zero - the default - means every area is
+        /// treated as generated.
+        /// </param>
         public static Result Clip(NavFile nav, BspVisibility vis, float stepSize,
-            NavProgress? progress = null)
+            NavProgress? progress = null, uint firstGeneratedId = 0)
         {
             var result = new Result();
 
@@ -93,6 +104,10 @@ namespace Meshwright
             Parallel.ForEach(nav.Areas, NavConcurrency.Options, area =>
             {
                 progress?.Report(System.Threading.Interlocked.Increment(ref done) / total);
+
+                // Only what this run grew - see the parameter note.
+                if (area.Id < firstGeneratedId)
+                    return;
 
                 // Jump areas stand in for ground too steep to walk on, so they sit on the very face a
                 // horizontal probe is bound to hit. Clipping them against it would delete the thing
@@ -136,7 +151,7 @@ namespace Meshwright
 
             result.Clipped = clipped;
             result.Reclaimed = (float)reclaimed;
-            result.Discarded = DiscardSlivers(nav);
+            result.Discarded = DiscardSlivers(nav, firstGeneratedId);
             return result;
         }
 
@@ -148,12 +163,17 @@ namespace Meshwright
         /// is a dangling id, and the mesh format has no way to express that - it would simply be a link
         /// to whatever area happened to be loaded with that id next time, which is worse than the sliver.
         /// </summary>
-        private static int DiscardSlivers(NavFile nav)
+        private static int DiscardSlivers(NavFile nav, uint firstGeneratedId)
         {
             var doomed = new HashSet<uint>();
 
             foreach (var area in nav.Areas)
             {
+                // Nothing that was already in the mesh: a sliver here is an artefact of clipping, and
+                // areas this pass did not clip cannot have one.
+                if (area.Id < firstGeneratedId)
+                    continue;
+
                 // Jump areas are exempt for the same reason they are exempt from clipping: a steep face
                 // is legitimately narrow, and it stands in for a route rather than somewhere to stand.
                 if (((NavAttributes)area.AttributeFlags & NavAttributes.Jump) != 0)

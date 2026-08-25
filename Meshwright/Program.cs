@@ -221,6 +221,11 @@ namespace Meshwright
             Console.WriteLine("      -nosnipers -noencounters                        skip a spot grading");
             Console.WriteLine("      -maxviewdistance N   how far two areas can see each other (default 6000)");
             Console.WriteLine("      -nocompress      store full visibility instead of Valve's delta encoding");
+            Console.WriteLine("      -resume          keep the mesh after the movement passes in");
+            Console.WriteLine("                       <file.bsp>.mwresume and reuse it next time, so changing");
+            Console.WriteLine("                       only a visibility or spot option does not rebuild it.");
+            Console.WriteLine("                       Rebuilds anyway if the map, the seed mesh, those options");
+            Console.WriteLine("                       or the Meshwright build changed.");
             Console.WriteLine();
             Console.WriteLine("  build passes (each writes a new .nav; chain them in this order):");
             Console.WriteLine("  meshwright build-ladders    <file.bsp> <file.nav> [-o out.nav]");
@@ -312,6 +317,16 @@ namespace Meshwright
                 CompressVisibility = Off("-nocompress"),
                 MaxViewDistance = ReadViewDistance(args),
                 Log = line => Console.WriteLine(line),
+
+                BspPath = bspPath,
+                SeedNavPath = navPath,
+
+                // Off unless asked. It writes a second copy of the mesh next to the map - tens of
+                // megabytes on a large one - and doing that uninvited to somebody's maps folder is not
+                // a decision a compile step should make for them.
+                ResumePath = args.Contains("-resume", StringComparer.OrdinalIgnoreCase)
+                    ? NavResume.PathFor(bspPath)
+                    : null,
             };
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1501,16 +1516,17 @@ namespace Meshwright
 
             Console.WriteLine($"      flooded from {result.Seeds:N0} seeds, visited {result.Visited:N0} cells, " +
                               $"{result.Uncovered:N0} not covered by the mesh");
-            Console.WriteLine($"      added {result.AreasAdded:N0} areas in {sw.ElapsedMilliseconds:N0} ms " +
+            Console.WriteLine($"      added {result.Added:N0} areas ({result.Total:N0} in the mesh) " +
+                              $"in {sw.ElapsedMilliseconds:N0} ms " +
                               $"on {NavConcurrency.MaxThreads} threads");
 
             foreach (string note in result.Notes)
                 Console.WriteLine($"      note: {note}");
 
-            if (!args.Contains("-noconnect", StringComparer.OrdinalIgnoreCase) && result.AreasAdded > 0)
+            if (!args.Contains("-noconnect", StringComparer.OrdinalIgnoreCase) && result.Added > 0)
             {
                 using var connecting = new ConsoleProgress(new NavProgress.Step("Connecting areas", 1.0));
-                connecting.Progress.Enter("Connecting areas");
+                connecting.Progress.Enter(NavPipeline.PhaseConnections);
 
                 var links = ConnectionBuilder.Build(nav, vis, connecting.Progress);
                 connecting.Progress.Finish();
@@ -1528,9 +1544,9 @@ namespace Meshwright
                 }
             }
 
-            if (result.AreasAdded > 0)
+            if (result.Added > 0)
             {
-                var trimmed = AreaGenerator.ClipToGeometry(nav, vis);
+                var trimmed = AreaGenerator.ClipToGeometry(nav, vis, result.FirstGeneratedId);
                 if (trimmed.Clipped > 0)
                 {
                     Console.WriteLine($"      clipped {trimmed.Clipped:N0} areas back to geometry " +

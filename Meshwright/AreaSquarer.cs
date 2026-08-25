@@ -51,7 +51,17 @@ namespace Meshwright
             public int Created;
         }
 
-        public static Result SquareUp(NavFile nav)
+        /// <param name="firstGeneratedId">
+        /// The lowest id this run created; areas below it are passed through untouched. Splitting one
+        /// is not a tidy-up but a rewrite - the original is discarded and replaced by two areas with
+        /// fresh ids, and because there is no single successor to repoint to, every reference to it is
+        /// lost. On a mesh generated here that costs nothing, because the split happens before any
+        /// connection exists. On a mesh someone edited in game it costs the connections, hiding spots,
+        /// encounters and ladder links that were already on the area, and cuts a hand-drawn shape in
+        /// half for a reason that only applies to greedily grown rectangles. Zero - the default - means
+        /// every area is treated as generated, which is what a mesh built from scratch is.
+        /// </param>
+        public static Result SquareUp(NavFile nav, uint firstGeneratedId = 0)
         {
             var result = new Result();
 
@@ -63,6 +73,12 @@ namespace Meshwright
 
             foreach (var area in nav.Areas)
             {
+                if (area.Id < firstGeneratedId)
+                {
+                    output.Add(area);
+                    continue;
+                }
+
                 int before = output.Count;
                 Split(area, output, ref nextId, 0);
 

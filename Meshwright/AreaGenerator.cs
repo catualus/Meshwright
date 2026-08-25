@@ -72,7 +72,31 @@ namespace Meshwright
             public int Seeds;
             public int Visited;
             public int Uncovered;
-            public int AreasAdded;
+            /// <summary>
+            /// Areas this run created, and the size of the mesh afterwards.
+            ///
+            /// Two numbers because one was doing the work of both and getting it wrong. A single field
+            /// held <c>nav.Areas.Count</c> - the total - and every caller printed it as "added", so a
+            /// run over an existing 2,271-area mesh that found 1,540 new ones reported 3,811 added. The
+            /// distinction matters most exactly where the old number was least true: on a seeded run,
+            /// which is the normal way to use this.
+            /// </summary>
+            public int Added;
+
+            /// <inheritdoc cref="Added"/>
+            public int Total;
+
+            /// <summary>
+            /// The lowest id this run handed out. Everything at or above it was created here;
+            /// everything below was in the mesh before the run started.
+            ///
+            /// Carried on the result because the passes that need it do not all run inside
+            /// <see cref="Generate"/> - <see cref="ClipToGeometry"/> is deliberately deferred until
+            /// after the connection graph exists - and it is only knowable before the first new area is
+            /// made.
+            /// </summary>
+            public uint FirstGeneratedId;
+
             public readonly List<string> Notes = [];
         }
 
@@ -90,17 +114,33 @@ namespace Meshwright
         /// 1,600 connections overall - a whole sewer room among them, four same-height neighbours sitting
         /// a few units off its edge with nothing linking them.
         /// </summary>
+        /// <param name="firstGeneratedId">
+        /// <see cref="Result.FirstGeneratedId"/> from the <see cref="Generate"/> call this is finishing.
+        /// Required rather than defaulted, because a caller that forgets it does not get a worse mesh -
+        /// it gets somebody's hand-edited areas pulled about and their slivers deleted, silently.
+        /// </param>
         public static AreaClipper.Result ClipToGeometry(NavFile nav, BspVisibility vis,
-            NavProgress? progress = null)
+            uint firstGeneratedId, NavProgress? progress = null)
         {
-            progress?.Enter("Clipping areas to geometry");
-            return AreaClipper.Clip(nav, vis, StepSize, progress);
+            progress?.Enter(NavPipeline.PhaseClipping);
+            return AreaClipper.Clip(nav, vis, StepSize, progress, firstGeneratedId);
         }
 
         public static Result Generate(NavFile nav, BspVisibility vis, BspFile bsp, NavFile? reference = null,
             bool squareUp = true, NavProgress? progress = null)
         {
             var result = new Result();
+
+            // Established before the first early return, not alongside the areas it describes. Every
+            // pass downstream reads it to tell what this run made from what it was handed, and a run
+            // that bails out here has made nothing - so leaving it at zero would tell the clipper that
+            // the entire loaded mesh was fair game, on a map it could not even sample.
+            foreach (var existing in nav.Areas)
+                result.FirstGeneratedId = Math.Max(result.FirstGeneratedId, existing.Id + 1);
+
+            // Counted here rather than at the end, for the same reason FirstGeneratedId is: by the time
+            // the passes below have run there is no way to tell what was already present.
+            int existingAreas = nav.Areas.Count;
 
             if (!TryGetWorldBounds(bsp, out var mins, out var maxs))
             {
@@ -242,8 +282,12 @@ namespace Meshwright
             // leaves seams wherever a row happened to stop; merging closes them, and only then is
             // splitting long areas a tidy-up rather than pure fragmentation. Squaring up alone measured
             // worse than doing nothing.
-            progress?.Enter("Merging areas");
-            var merged = AreaMerger.Merge(nav, vis);
+            //
+            // Both are handed the id this run started at, and both only touch areas at or above it.
+            // Neither is a pass over "the mesh" - they are the second and third steps of turning a node
+            // grid into areas, and a mesh that was already there did not come from this node grid.
+            progress?.Enter(NavPipeline.PhaseMerging);
+            var merged = AreaMerger.Merge(nav, vis, result.FirstGeneratedId);
             if (merged.Merges > 0)
             {
                 result.Notes.Add($"merged {merged.Merges:N0} areas in {merged.Passes:N0} passes; " +
@@ -255,12 +299,13 @@ namespace Meshwright
 
             if (squareUp)
             {
-                var squared = AreaSquarer.SquareUp(nav);
+                var squared = AreaSquarer.SquareUp(nav, result.FirstGeneratedId);
                 if (squared.Split > 0)
                     result.Notes.Add($"split {squared.Split:N0} long areas into {squared.Split + squared.Created:N0}");
             }
 
-            result.AreasAdded = nav.Areas.Count;
+            result.Total = nav.Areas.Count;
+            result.Added = nav.Areas.Count - existingAreas;
 
             if (reference is not null)
                 Classify(reference, nav, world, visited, [.. ordered.Select(Key)], result);

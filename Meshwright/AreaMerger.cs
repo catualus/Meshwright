@@ -128,14 +128,19 @@ namespace Meshwright
         /// <summary>How far either side of the seam the crossing is tested.</summary>
         private const float Reach = NavConstants.GenerationStepSize / 2f;
 
-        public static Result Merge(NavFile nav, BspVisibility? vis = null)
+        /// <param name="firstGeneratedId">
+        /// The lowest id this run created. Areas below it were in the mesh before it started and are
+        /// left alone; see <see cref="CanMerge"/>. Zero - the default - means every area is fair game,
+        /// which is what a mesh built from scratch looks like and what a synthetic test mesh is.
+        /// </param>
+        public static Result Merge(NavFile nav, BspVisibility? vis = null, uint firstGeneratedId = 0)
         {
             var result = new Result();
 
             while (true)
             {
-                result.NoPartner = result.HeightMismatch = result.TooBig = 0;
-                int merged = MergePass(nav, result, vis);
+                result.NoPartner = result.HeightMismatch = result.TooBig = result.NotCoplanar = 0;
+                int merged = MergePass(nav, result, vis, firstGeneratedId);
                 result.Passes++;
                 result.Merges += merged;
 
@@ -148,7 +153,8 @@ namespace Meshwright
             return result;
         }
 
-        private static int MergePass(NavFile nav, Result result, BspVisibility? vis)
+        private static int MergePass(NavFile nav, Result result, BspVisibility? vis,
+            uint firstGeneratedId)
         {
             var dead = new HashSet<NavArea>();
 
@@ -159,7 +165,7 @@ namespace Meshwright
 
             foreach (var area in nav.Areas)
             {
-                if (!CanMerge(area)) continue;
+                if (!CanMerge(area, firstGeneratedId)) continue;
 
                 var b = NavGeometry.GetBounds(area);
                 Add(byWestEdge, (Q(b.MinX), Q(b.MinY), Q(b.MaxY)), area);
@@ -176,7 +182,7 @@ namespace Meshwright
 
             foreach (var area in nav.Areas)
             {
-                if (dead.Contains(area) || !CanMerge(area))
+                if (dead.Contains(area) || !CanMerge(area, firstGeneratedId))
                     continue;
 
                 var b = NavGeometry.GetBounds(area);
@@ -297,8 +303,29 @@ namespace Meshwright
             }
         }
 
-        private static bool CanMerge(NavArea area)
-            => ((NavAttributes)area.AttributeFlags & NavAttributes.NoMerge) == 0;
+        /// <summary>
+        /// Whether an area may take part in a merge at all - as the absorber or the absorbed, since
+        /// every candidate has to pass this before it reaches the edge index.
+        ///
+        /// **Only areas this run created.** Valve's <c>MergeGeneratedAreas</c> never faces the question:
+        /// <c>nav_generate</c> wipes the mesh before it builds, so every area their merge sees is one the
+        /// same run just made. Here the pass is handed whatever was loaded, and with <c>-generateareas</c>
+        /// that includes a mesh someone edited in game. Merging two hand-placed areas fuses ground a
+        /// person drew deliberately and retires one of the two ids, and neither the file nor any quality
+        /// measure here can tell that apart from a good merge - the mesh simply comes back subtly
+        /// different from the one that was edited.
+        ///
+        /// Decided on the id rather than on a flag because the id already carries the fact:
+        /// <see cref="NodeAreaBuilder"/> hands out ids from one past the highest already present, so
+        /// "created by this run" and "at or above that id" are the same set by construction, and there
+        /// is no extra state to keep in step through merging and splitting.
+        ///
+        /// It also makes a second run over the same mesh idempotent, which is the right behaviour and
+        /// was not the old one: what a previous run generated is, by then, simply part of the mesh.
+        /// </summary>
+        private static bool CanMerge(NavArea area, uint firstGeneratedId)
+            => area.Id >= firstGeneratedId
+               && ((NavAttributes)area.AttributeFlags & NavAttributes.NoMerge) == 0;
 
         /// <summary>Quantised so two edges meant to be the same line hash together.</summary>
         private static long Q(float v) => (long)MathF.Round(v / Epsilon);

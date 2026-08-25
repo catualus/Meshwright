@@ -54,6 +54,33 @@ namespace Meshwright
         ///
         /// A nav file is a few megabytes, so holding it whole costs nothing worth counting.
         /// </summary>
+        /// <summary>
+        /// Takes on another mesh's contents in place.
+        ///
+        /// Exists for <see cref="NavResume"/>. The pipeline is handed a NavFile by its caller and
+        /// mutates it, because the caller is the one that decides where the result is written; resuming
+        /// from a cache has to put the cached mesh into *that* instance rather than returning a
+        /// different one the caller would never see.
+        /// </summary>
+        public void AdoptFrom(NavFile other)
+        {
+            Version = other.Version;
+            SubVersion = other.SubVersion;
+            BspSize = other.BspSize;
+            IsAnalyzed = other.IsAnalyzed;
+            HasUnnamedAreas = other.HasUnnamedAreas;
+            TrailingData = other.TrailingData;
+
+            Places.Clear();
+            Places.AddRange(other.Places);
+
+            Areas.Clear();
+            Areas.AddRange(other.Areas);
+
+            Ladders.Clear();
+            Ladders.AddRange(other.Ladders);
+        }
+
         public static NavFile Load(string path)
         {
             using var stream = new MemoryStream(File.ReadAllBytes(path), writable: false);
