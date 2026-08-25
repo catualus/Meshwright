@@ -37,8 +37,8 @@ awkward to script and impossible on a build machine with no game installed.
 cancel.
 
 **It builds no ladders outside Left 4 Dead.** `CNavMesh::BuildLadders` is compiled out elsewhere, and
-even where it runs it only looks for `func_simpleladder` entities. Brush ladders — the ordinary kind —
-are invisible to it, so bots cannot use them.
+even where it runs it only looks for `func_simpleladder` entities. Ordinary brush ladders are
+invisible to it, so bots cannot use them.
 
 **It ignores lifts.** Elevator platforms get no connections, so a working lift is a dead end.
 
@@ -70,14 +70,14 @@ Meshwright addresses all five.
 2. Extract the `Meshwright` folder into Compile Pal's `Plugins` directory.
 3. Restart Compile Pal, press **+** on the process list, and add **Meshwright**.
 
-Nothing is compiled into Compile Pal and there is no fork to run — the step exists because the folder
+Nothing is compiled into Compile Pal and there is no fork to run. The step exists because the folder
 exists, and disappears if you delete it. It runs at order 8.5, after Compile Pal's own **NAV** step
 and after the BSP has been copied to your maps folder, so it operates on the map the game will load.
 Every option below has a corresponding checkbox.
 
 ### Standalone
 
-Download `meshwright.exe` from the releases page, or build it yourself — see
+Download `meshwright.exe` from the releases page, or build it yourself. See
 [Building from source](#building-from-source).
 
 ---
@@ -90,8 +90,8 @@ Download `meshwright.exe` from the releases page, or build it yourself — see
 meshwright generate map.bsp
 ```
 
-This finishes the `.nav` beside the BSP — ladders, movement connections, cover spots and visibility —
-and writes it back in place.
+This finishes the `.nav` beside the BSP and writes it back in place: ladders, movement connections,
+cover spots and visibility.
 
 To also find walkable ground the mesh is missing, or to build a mesh where there is none:
 
@@ -112,7 +112,7 @@ failures are reported as they happen, listed again at the end, and set a non-zer
 ### One pass at a time
 
 Each staged command writes a new file rather than editing in place, so you can inspect any stage and
-step back. Run them in this order — later passes read what earlier ones wrote.
+step back. Run them in this order, because later passes read what earlier ones wrote.
 
 ```bash
 meshwright build-areas      map.bsp map.nav          -o map.areas.nav
@@ -156,7 +156,7 @@ Available on `generate`; each has a Compile Pal checkbox.
 | `-nospots` | Skip hiding spots, sniper grading and encounter spots |
 | `-nosnipers` | Find cover spots but do not grade sniper positions |
 | `-noencounters` | Find cover spots but do not build encounter spots |
-| `-novisibility` | Skip area-to-area visibility — by far the slowest stage |
+| `-novisibility` | Skip area-to-area visibility, by far the slowest stage |
 | `-nocompress` | Store full visibility instead of Valve's delta encoding |
 | `-maxviewdistance N` | How far two areas can see each other. Default 6000 |
 | `-pruneunreachable` | Delete small groups of areas no player spawn can reach |
@@ -172,21 +172,21 @@ These apply to every command, not just `generate`:
 | `-content DIR` | Extra directory to resolve prop models from. May be repeated |
 
 `-content` matters more than it looks. Meshwright works out where the game's content lives from the
-map's own path — a `.bsp` sits in `<mod>/maps`, so the mod directory is two levels up. That covers the
+map's own path: a `.bsp` sits in `<mod>/maps`, so the mod directory is two levels up. That covers the
 normal case and nothing else: a BSP in a build server's output directory infers a mod directory that
 does not exist, so no model resolves, no prop is collided against, and the mesh floats over every one
 of them. The run still succeeds. Point `-content` at the mod directory and it resolves normally.
 
 You only need to name the mod directory, not each game it inherits from. Meshwright reads the mod's
-`gameinfo.txt` and mounts what its `SearchPaths` block declares — the same list, in the same order,
-that the engine uses — so a mod inheriting from a base game gets that game's content too.
+`gameinfo.txt` and mounts what its `SearchPaths` block declares, the same list, in the same order,
+that the engine uses, so a mod inheriting from a base game gets that game's content too.
 
 ```bash
 meshwright generate out/map.bsp -content "C:/steamapps/common/GarrysMod/garrysmod"
 ```
 
 `-resume` keeps the mesh as it stands after the movement passes in `<map>.bsp.mwresume`, and reuses it
-next time. That covers about a third of a run — area generation, ladders, connections, clipping,
+next time. That covers about a third of a run: area generation, ladders, connections, clipping,
 stairs and lifts. Visibility is the other two thirds and is always recomputed, so this makes tuning
 `-maxviewdistance` or adding visibility to a `-novisibility` run cheaper; it does not make a repeat
 build instant.
@@ -229,7 +229,60 @@ Run `meshwright` with no arguments for the full list.
 
 ## Results
 
-<!--RESULTS-->
+Two maps, both public, both scored against a mesh the game generated for the same map. Machine is an
+8-core Ryzen 7 6800H, 16 threads.
+
+`gm_construct` ships with Garry's Mod. `rp_downtown_tits_v2` is a large roleplay map, 19,275 areas in
+the engine's own mesh, and is the harder case by some distance.
+
+### Where the mesh sits
+
+The measure that shows up first in game is whether an area is on the ground. `meshwright fit` traces
+down from 25 points on every area and reports the gap.
+
+| | gm_construct | | rp_downtown_tits_v2 | |
+|---|---|---|---|---|
+| | engine | Meshwright | engine | Meshwright |
+| Areas | 2,271 | 2,801 | 19,275 | 22,682 |
+| Connections | 11,446 | 14,803 | 85,083 | 102,654 |
+| Height error, mean | 1.0 | 1.3 | 2.9 | **1.2** |
+| Height error, median | 0.3 | 0.4 | 0.3 | **0.0** |
+| Areas floating above the floor | 1 | **0** | 924 (4.8%) | **22 (0.1%)** |
+| Areas over open air | 3 | **0** | 19 | **0** |
+
+The large map is where this separates. The engine leaves 924 areas sitting above the floor and 19
+hanging over nothing; Meshwright leaves 22 and none.
+
+### What it covers
+
+| | gm_construct | rp_downtown_tits_v2 |
+|---|---|---|
+| Coverage of the engine's ground a player can reach | **97.9%** | **88.2%** |
+| Coverage of every engine area including stranded | 88.2% | 86.7% |
+| Areas on ground the engine's mesh does not have | 5.7% | 38.9% |
+
+Score against reachable ground rather than every area. An engine mesh contains ground nothing can
+path to: gm_construct's own mesh strands 224 of its 2,271 areas on platforms whose nearest reachable
+neighbour is up to three thousand units directly below, and its own connection graph cannot reach
+them either. Counting those as misses is how the first column reads 88.2% instead of 97.9%.
+`compare-areas -reachable <map.bsp>` does the filtering.
+
+88.2% on the large map is the honest number and the weakest result here. Of the areas missed, roughly
+half is ground the sampling flood never reached, a fifth was found and then dropped by the merge, and
+the rest is ground it judged unstandable or found no floor in. It is not the stranded-platform
+artefact that explains the gm_construct figure.
+
+### Speed
+
+| | engine | Meshwright, 8 threads |
+|---|---|---|
+| `rp_downtown_tits_v2`, mesh and movement | not comparable, see below | 17.4 s |
+| `gm_construct`, everything including visibility | | 10.9 s |
+
+The engine timing is left blank on purpose. A stock `nav_generate` skips sniper spots and encounter
+spots entirely, because `nav_quicksave` defaults to 1 and both phases return immediately when it is
+set, so the two are not doing the same work. What can be said without qualification is that
+`nav_generate` runs on one core and blocks the game while it does.
 
 ---
 
@@ -239,7 +292,7 @@ Worth knowing before you rely on it.
 
 **A prop whose model you do not have is invisible.** Collision comes from each model's `.phy`, found
 through the map's embedded pakfile, the loose game and addon directories, `.gma` workshop archives and
-then VPKs — the order the engine mounts them, taken from the mod's own `gameinfo.txt` where there is
+then VPKs, the order the engine mounts them, taken from the mod's own `gameinfo.txt` where there is
 one. Anything not found contributes nothing, and the mesh
 will float where those props are. `meshwright props <bsp>` reports the split; check it if a mesh looks
 wrong, because nothing else will tell you. If the content exists but the map is not inside the game
@@ -258,9 +311,12 @@ mesh is more truthful and a bot will not walk into scenery, but it is larger and
 fewer, and refusing outright if the result would remove more than a third of the mesh.
 
 It is off by default on the evidence. Most unreachable ground is real ground the movement pass simply
-failed to link — a sewer, a basement, a wing whose staircase was missed — and the engine walks it
-perfectly well. Deleting it measurably reduces coverage. A stranded area costs nothing at runtime,
-because nothing can path into it.
+failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning removes 723
+areas and takes coverage of the engine's reachable ground from 88.2% to 86.8%. A stranded area costs
+nothing at runtime, because nothing can path into it, where deleting one costs the map.
+
+Worth knowing that the engine does this too. Its own mesh for that map strands 1,032 of 19,275 areas,
+5.4%, that its own connection graph cannot reach. Meshwright strands 5.5%.
 
 **Some collision questions use a line rather than a swept box.** Movement between samples is tested
 with a proper hull sweep against world brushes, brush entities and displacement terrain. "Is there
@@ -270,7 +326,7 @@ than itself.
 
 **Stair marking is limited by area shape, not by the test.** Run over the engine's own areas the
 classifier reproduces the engine's verdicts. Run over a mesh generated here it finds fewer, because an
-area that runs off the end of a flight or picks up a neighbouring ramp is correctly rejected — the
+area that runs off the end of a flight or picks up a neighbouring ramp is correctly rejected. The
 shape is wrong, not the verdict.
 
 **Generated areas are marked experimental.** `-generateareas` warns on every run. Review the result
@@ -301,5 +357,5 @@ dotnet test
 GPL-3.0. See [LICENSE](LICENSE).
 
 Meshwright reimplements algorithms Valve documents in the public Source SDK 2013 and contains no Valve
-source code. Please read [NOTICE.md](NOTICE.md) before contributing — in particular, do not paste code
+source code. Please read [NOTICE.md](NOTICE.md) before contributing. In particular, do not paste code
 from the SDK or from any leaked or decompiled source.
