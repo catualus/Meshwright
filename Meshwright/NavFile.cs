@@ -331,9 +331,9 @@ namespace Meshwright
                 // BinaryReader over the MemoryStream Load already hands it is about as quick per field,
                 // and blocking it up only adds a seven-megabyte allocation and copy. The win here was
                 // buffering the file at all, not the shape of the loop over it.
-                area.VisibleAreas.Capacity = (int)visibleCount;
+                area.VisibleAreas.Capacity = visibleCount;
 
-                for (uint i = 0; i < visibleCount; i++)
+                for (int i = 0; i < visibleCount; i++)
                     area.VisibleAreas.Add(new VisibleArea { AreaId = r.ReadUInt32(), Attributes = r.ReadByte() });
 
                 area.InheritVisibilityFrom = r.ReadUInt32();
