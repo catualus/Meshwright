@@ -30,6 +30,13 @@ namespace Meshwright
         private const float Inset = 6f;
 
         /// <summary>
+        /// Where else along a shared edge to look for a way through, as a share of the distance from
+        /// the middle to the end. Ordered outward so the nearest opening wins, which keeps the
+        /// connection's own geometry as close to the middle as the wall allows.
+        /// </summary>
+        private static readonly float[] SeamSamples = [-0.5f, 0.5f, -0.8f, 0.8f, -1f, 1f];
+
+        /// <summary>
         /// Heights above each surface at which the crossing must be clear. Ankle height alone would let
         /// a connection through a waist-high railing; head height alone would let one through a low
         /// tunnel mouth that is actually solid at the floor.
@@ -240,6 +247,56 @@ namespace Meshwright
 
                         var refusal = TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ,
                             out bool startedSolid);
+
+                        // Failing at the middle of the seam is not the same as failing. A shared edge
+                        // is as long as the two areas have in common, and a doorway is a hole in a wall
+                        // somewhere along it - rarely in the exact centre. Testing the centre alone
+                        // asks whether the wall has a door in the middle, when the question is whether
+                        // it has one at all.
+                        //
+                        // Measured on rp_downtown_meowy: two rooms sharing a 118 unit edge with a 48
+                        // unit doorway at one end. Twelve of twenty-eight points across that edge are
+                        // open and the middle is not, so the crossing was refused and the rooms were
+                        // left unconnected.
+                        //
+                        // The centre is still tried first and is still what most crossings answer on,
+                        // so this only costs anything where the centre already said no.
+                        if (refusal != Refusal.Clear)
+                        {
+                            foreach (float share in SeamSamples)
+                            {
+                                // Kept a body's half width inside the overlap, so a sample never sits
+                                // where a walker could not fit anyway.
+                                float reach = MathF.Max(0f, overlap / 2f - NavConstants.HalfHumanWidth);
+                                if (reach <= 1f) break;
+
+                                float slide = reach * share;
+
+                                var (sfx, sfy) = EdgePoint(bounds, direction, centreA + slide, -Inset);
+                                var (stx, sty) = EdgePoint(NavGeometry.GetBounds(other),
+                                    NavGeometry.Opposite(direction), centreB + slide, -Inset);
+
+                                float sfz = NavGeometry.SurfaceZ(area, sfx, sfy);
+                                float stz = NavGeometry.SurfaceZ(other, stx, sty);
+
+                                if (!Reachable(stz - sfz))
+                                    continue;
+
+                                var again = TestCrossing(vis, area, other, sfx, sfy, sfz, stx, sty, stz,
+                                    out bool alsoSolid);
+
+                                if (again != Refusal.Clear)
+                                    continue;
+
+                                refusal = Refusal.Clear;
+                                startedSolid = alsoSolid;
+                                fromZ = sfz;
+                                toZ = stz;
+                                climb = stz - sfz;
+                                break;
+                            }
+                        }
+
                         if (refusal != Refusal.Clear)
                         {
                             local.Rejected++;
