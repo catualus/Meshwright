@@ -45,6 +45,12 @@ $out = Join-Path $root 'artifacts/Meshwright'
 # belong to.
 $source = Join-Path $root 'CompilePalPlugin/Meshwright'
 
+# The second step is metadata only. It runs the executable from the folder above rather than carrying
+# its own copy, so it costs a few hundred bytes instead of another twenty two megabytes, and the two
+# folders have to be installed together.
+$stampSource = Join-Path $root 'CompilePalPlugin/Meshwright Stamp'
+$stampOut = Join-Path $root 'artifacts/Meshwright Stamp'
+
 Write-Host 'Publishing meshwright...' -ForegroundColor Cyan
 
 # Built as one array rather than a backtick-continued line so the optional -p:Version can be added
@@ -81,6 +87,10 @@ Copy-Item (Join-Path $source 'parameters.json') $out
 Copy-Item (Join-Path $root 'LICENSE') $out
 Copy-Item (Join-Path $source 'README.md') $out -ErrorAction SilentlyContinue
 
+if (Test-Path $stampOut) { Remove-Item $stampOut -Recurse -Force }
+New-Item -ItemType Directory -Path $stampOut -Force | Out-Null
+Copy-Item (Join-Path $stampSource '*') $stampOut
+
 $size = (Get-ChildItem $out -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
 
 Write-Host ''
@@ -91,9 +101,10 @@ if ($Zip) {
     $archive = Join-Path $root 'artifacts/Meshwright-plugin.zip'
     if (Test-Path $archive) { Remove-Item $archive -Force }
 
-    # Compressing the folder itself, not its contents, so the zip contains a Meshwright/ directory -
-    # extracting it straight into Plugins/ then lands in the right place.
-    Compress-Archive -Path $out -DestinationPath $archive
+    # Compressing the folders themselves, not their contents, so the zip contains Meshwright/ and
+    # Meshwright Stamp/ directories - extracting it straight into Plugins/ then lands in the right
+    # place, with both steps installed together.
+    Compress-Archive -Path $out, $stampOut -DestinationPath $archive
     Write-Host "Archive written to $archive" -ForegroundColor Green
 }
 

@@ -322,7 +322,7 @@ namespace Meshwright
             Console.WriteLine("  inspection:");
             Console.WriteLine("  meshwright info    <file.nav>                  Summarise a nav mesh");
             Console.WriteLine("  meshwright verify  <file.nav>                  Round-trip and diff byte-for-byte");
-            Console.WriteLine("  meshwright stamp   <file.bsp> <file.nav>       Re-stamp the BSP size after the BSP changes");
+            Console.WriteLine("  meshwright stamp   <file.bsp> [file.nav]       Re-stamp the BSP size after the BSP changes");
             Console.WriteLine("  meshwright bsp     <file.bsp>                  Summarise BSP geometry lumps");
             Console.WriteLine("  meshwright ladders <file.bsp>                  List ladder brushes in a BSP");
             Console.WriteLine();
@@ -3968,11 +3968,17 @@ namespace Meshwright
         /// </summary>
         private static int Stamp(string[] args)
         {
-            if (args.Length < 3)
-                throw new ArgumentException("expected: stamp <file.bsp> <file.nav>");
+            if (args.Length < 2)
+                throw new ArgumentException("expected: stamp <file.bsp> [file.nav]");
 
             string bspPath = args[1];
-            string navPath = args[2];
+
+            // The mesh beside the BSP unless told otherwise, which is the same rule generate follows
+            // and what makes this a step that needs no configuring: a build that has just written both
+            // has them next to each other.
+            string navPath = args.Length > 2
+                ? args[2]
+                : Path.ChangeExtension(bspPath, ".nav");
 
             if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such BSP: {bspPath}");
             if (!File.Exists(navPath)) throw new FileNotFoundException($"no such nav: {navPath}");

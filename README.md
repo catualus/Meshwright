@@ -228,7 +228,7 @@ unhappy with.
 If anything rewrites the BSP after the mesh is built, re-stamp it as the last step of the build:
 
 ```bash
-meshwright stamp map.bsp map.nav
+meshwright stamp map.bsp
 ```
 
 A mesh records the size of the BSP it was built for, and the engine prints
@@ -237,6 +237,11 @@ content into the BSP, repacking it, or moving its entity lump out all change tha
 them run after the mesh is built, because a mesh has to be built while the entities are still there
 to read. The mesh is not stale in that case, only the stamp is. This rewrites the one field and
 nothing else.
+
+As a Compile Pal step this is automatic and has nothing to configure. The plugin zip contains two
+folders: `Meshwright`, which builds the mesh, and `Meshwright Stamp`, which runs after the entity
+lump step and re-stamps it. Install both. The second holds only metadata and runs the first one's
+executable, so it costs a few hundred bytes rather than a second copy of the tool.
 
 Run `meshwright` with no arguments for the full list.
 

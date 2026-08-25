@@ -1,0 +1,13 @@
+{
+  "Name": "Meshwright Stamp",
+  "Description": "Re-stamps the nav mesh with the BSP's final size. A mesh records the size of the map it was built for, and the engine warns that the mesh is out of date when the two disagree. Packing, repacking and moving the entity lump out all change that size after the mesh has been written, so the stamp goes stale even though the mesh is correct.",
+  "Warning": "",
+  "Path": "Plugins\\Meshwright\\meshwright.exe",
+  "Arguments": "stamp $mapCopyLocation$",
+  "BasisString": "",
+  "Order": 12,
+  "DoRun": true,
+  "ReadOutput": true,
+  "CheckExitCode": true,
+  "SupportsBSP": true
+}
