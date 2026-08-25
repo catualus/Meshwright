@@ -1201,7 +1201,7 @@ namespace Meshwright
             // The long one. On a large map this is minutes of raycasting, and it is the phase most
             // worth showing a bar for.
             var tracing = new ConsoleProgress(new NavProgress.Step("Tracing area visibility", 1.0));
-            tracing.Progress.Enter("Tracing area visibility");
+            tracing.Progress.Enter(NavPipeline.PhaseVisibility);
 
             var stats = filter.Run(tracer, tracing.Progress);
 
@@ -1232,7 +1232,7 @@ namespace Meshwright
             if (compress)
             {
                 var packing = new ConsoleProgress(new NavProgress.Step("Compressing visibility", 1.0));
-                packing.Progress.Enter("Compressing visibility");
+                packing.Progress.Enter(NavPipeline.PhaseCompress);
 
                 var compression = VisibilityCompressor.Apply(nav, visible, packing.Progress);
 
@@ -1587,7 +1587,7 @@ namespace Meshwright
                 new NavProgress.Step("Connecting areas", 0.65),
                 new NavProgress.Step("Marking stairs", 0.35));
 
-            moving.Progress.Enter("Connecting areas");
+            moving.Progress.Enter(NavPipeline.PhaseConnections);
             var links = ConnectionBuilder.Build(nav, vis, moving.Progress);
 
             Console.WriteLine($"      connections: {links.Steps:N0} steps, {links.JumpsUp:N0} jumps up, " +
@@ -1614,7 +1614,7 @@ namespace Meshwright
             // Stairs last of the three, as in CreateNavAreasFromNodes: the jump areas above are steep
             // stair-shaped fragments that exist only to be deleted, and testing them before the stitch
             // marks a pile of them.
-            moving.Progress.Enter("Marking stairs");
+            moving.Progress.Enter(NavPipeline.PhaseStairs);
             var stairs = StairMarker.Mark(nav, vis, moving.Progress);
 
             moving.Progress.Finish();
@@ -1781,7 +1781,7 @@ namespace Meshwright
                 new NavProgress.Step("Building areas", 0.15),
                 new NavProgress.Step("Merging areas", 0.05));
 
-            bar.Progress.Enter("Sampling walkable space");
+            bar.Progress.Enter(NavPipeline.PhaseSampling);
             var result = AreaGenerator.Generate(nav, vis, bsp, reference, progress: bar.Progress);
             bar.Progress.Finish();
             bar.Dispose();
@@ -1912,12 +1912,12 @@ namespace Meshwright
             var referenceIndex = new NavGeometry.Index(reference.Areas);
             var candidateIndex = new NavGeometry.Index(candidate.Areas);
 
-            int covered = CountCovered(reference.Areas, candidateIndex, Tolerance);
+            int covered = CountCovered(scored, candidateIndex, Tolerance);
             int extra = candidate.Areas.Count - CountCovered(candidate.Areas, referenceIndex, Tolerance);
 
             Console.WriteLine();
-            Console.WriteLine($"reference ground the candidate covers   {covered:N0} of {reference.Areas.Count:N0}  " +
-                              $"({100.0 * covered / Math.Max(1, reference.Areas.Count):F1}%)");
+            Console.WriteLine($"reference ground the candidate covers   {covered:N0} of {scored.Count:N0}  " +
+                              $"({100.0 * covered / Math.Max(1, scored.Count):F1}%)");
             Console.WriteLine($"candidate areas on ground the reference does not cover  {extra:N0}  " +
                               $"({100.0 * extra / Math.Max(1, candidate.Areas.Count):F1}%)");
 
@@ -3095,7 +3095,7 @@ namespace Meshwright
                 new NavProgress.Step("Grading sniper spots", snipers ? 0.5 : 0.0),
                 new NavProgress.Step("Finding encounter spots", encounters ? 0.4 : 0.0));
 
-            bar.Progress.Enter("Finding hiding spots");
+            bar.Progress.Enter(NavPipeline.PhaseHiding);
             var result = HidingSpotFinder.Find(nav, vis, bar.Progress);
 
             // Grading needs the spots to exist, so it cannot be folded into the pass above. It is also
@@ -3104,7 +3104,7 @@ namespace Meshwright
             SniperSpotClassifier.Result? graded = null;
             if (snipers)
             {
-                bar.Progress.Enter("Grading sniper spots");
+                bar.Progress.Enter(NavPipeline.PhaseSnipers);
                 graded = SniperSpotClassifier.Classify(nav, vis, bar.Progress);
             }
 
@@ -3113,7 +3113,7 @@ namespace Meshwright
             EncounterSpotBuilder.Result? met = null;
             if (encounters)
             {
-                bar.Progress.Enter("Finding encounter spots");
+                bar.Progress.Enter(NavPipeline.PhaseEncounters);
                 met = EncounterSpotBuilder.Build(nav, vis, bar.Progress);
             }
 

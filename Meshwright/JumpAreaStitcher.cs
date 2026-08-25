@@ -23,7 +23,6 @@ namespace Meshwright
         {
             public int JumpAreas;
             public int ConnectionsAdded;
-            public int Removed;
         }
 
         public static Result Stitch(NavFile nav)
@@ -98,7 +97,6 @@ namespace Meshwright
 
             // Drop the jump areas and every reference to them.
             nav.Areas.RemoveAll(a => jumpIds.Contains(a.Id));
-            result.Removed = jumpIds.Count;
 
             foreach (var area in nav.Areas)
             {

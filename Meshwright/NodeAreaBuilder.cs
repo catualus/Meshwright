@@ -76,7 +76,6 @@ namespace Meshwright
 
         public sealed class Result
         {
-            public int AreasCreated;
             public int NodesConsumed;
             public int Rejected;
         }
@@ -145,7 +144,6 @@ namespace Meshwright
                     }
 
                     nav.Areas.Add(area);
-                    result.AreasCreated++;
 
                     // claim every node the rectangle covers
                     for (int dx = 0; dx < width; dx++)

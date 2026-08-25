@@ -9,17 +9,16 @@ namespace Meshwright
     /// <summary>
     /// The whole nav build, in the one order it is allowed to happen in.
     ///
-    /// This exists because the ordering used to be written out by hand in two places - the command
-    /// line's <c>build-*</c> stages, and Compile Pal's own compile step - and they drifted. Not
-    /// subtly, either: the compile step never stitched jump areas, so every jump area a real compile
-    /// produced stayed in the mesh un-stitched and (because <see cref="AreaClipper"/> deliberately
-    /// skips them) un-clipped; it marked stairs before clipping rather than after, reporting 8 on
-    /// gm_construct against the command line's 17; it never ran <see cref="NavIntegrity"/>, so meshes
-    /// it wrote still carried the dangling ids the engine complains about at load; and it never graded
-    /// sniper spots or built encounters at all. Every one of those was a difference between two entry
-    /// points that are supposed to produce the same mesh.
+    /// This exists because the ordering was once written out by hand in more than one place and they
+    /// drifted. Not subtly, either: one of them never stitched jump areas, so every jump area a real
+    /// compile produced stayed in the mesh un-stitched and (because <see cref="AreaClipper"/>
+    /// deliberately skips them) un-clipped; it marked stairs before clipping rather than after,
+    /// reporting 8 on gm_construct against the other's 17; it never ran <see cref="NavIntegrity"/>, so
+    /// meshes it wrote still carried the dangling ids the engine complains about at load; and it never
+    /// graded sniper spots or built encounters at all. Every one of those was a difference between two
+    /// entry points that are supposed to produce the same mesh.
     ///
-    /// So the order lives here once and both callers drive it. The ordering constraints are not
+    /// So the order lives here once and every caller drives it. The ordering constraints are not
     /// arbitrary and each is load-bearing:
     ///
     /// <list type="bullet">
@@ -43,6 +42,10 @@ namespace Meshwright
     /// </summary>
     public static class NavPipeline
     {
+        // The one place a phase is named. Every Enter() in the project uses these rather than
+        // repeating the string, because a literal that stops matching does not fail: NavProgress
+        // appends an unrecognised phase to the plan with no weight, so the run still works and the bar
+        // silently misreports - which is the same shape of quiet drift this class exists to prevent.
         public const string PhaseSampling = "Sampling walkable space";
         public const string PhaseLinking = "Linking samples";
         public const string PhaseAreas = "Building areas";

@@ -3,10 +3,10 @@ namespace Meshwright.Cli
     /// <summary>
     /// The meshwright executable.
     ///
-    /// Everything real lives in the Meshwright library so Compile Pal can link it directly: a self-contained
-    /// application cannot reference a non-self-contained executable, and shipping a sibling meshwright.exe
-    /// alongside a single-file publish would mean carrying its runtime files too. This project exists
-    /// only to give the same code a command line.
+    /// A thin shell over the Meshwright library, which holds everything real. The split is what lets the
+    /// same code be a command line and a library at once: Compile Pal runs this executable as an
+    /// ordinary compile step, and anything embedding the passes references the library without dragging
+    /// an entry point along with them.
     /// </summary>
     internal static class Entry
     {

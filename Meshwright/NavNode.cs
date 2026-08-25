@@ -85,27 +85,6 @@ namespace Meshwright
             return node;
         }
 
-        /// <summary>The node at a grid position whose height is nearest a given one, within tolerance.</summary>
-        public NavNode? Find(int gx, int gy, float z, float tolerance = HeightGranularity)
-        {
-            if (!byCell.TryGetValue((gx, gy), out var list))
-                return null;
-
-            NavNode? best = null;
-            float bestDelta = tolerance;
-
-            foreach (var node in list)
-            {
-                float delta = MathF.Abs(node.Z - z);
-                if (delta > bestDelta) continue;
-
-                bestDelta = delta;
-                best = node;
-            }
-
-            return best;
-        }
-
         public IReadOnlyList<NavNode> At(int gx, int gy)
             => byCell.TryGetValue((gx, gy), out var list) ? list : [];
     }

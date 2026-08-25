@@ -61,9 +61,6 @@ namespace Meshwright
         /// <summary>A sample this close in height to an existing area's surface is already covered.</summary>
         private const float CoveredTolerance = 24f;
 
-        /// <summary>Smallest rectangle worth emitting, in grid cells.</summary>
-        private const int MinimumCells = 2;
-
         /// <summary>Ceiling on the flood, so a leak into the void cannot run away with the machine.</summary>
         private const int MaxVisited = 3_000_000;
 
@@ -269,11 +266,11 @@ namespace Meshwright
             if (crouchNodes > 0)
                 result.Notes.Add($"crouch: {crouchNodes:N0} nodes");
 
-            progress?.Enter("Linking samples");
+            progress?.Enter(NavPipeline.PhaseLinking);
             var (linksMade, linksRefused) = LinkNodes(grid, vis, progress);
             result.Notes.Add($"links {linksMade:N0} made, {linksRefused:N0} refused as blocked");
 
-            progress?.Enter("Building areas");
+            progress?.Enter(NavPipeline.PhaseAreas);
             var built = NodeAreaBuilder.Build(nav, grid, StepSize, progress);
             result.Notes.Add($"nodes {grid.Nodes.Count:N0}, consumed {built.NodesConsumed:N0}, " +
                              $"rejected {built.Rejected:N0}");
@@ -674,7 +671,6 @@ namespace Meshwright
             // A duplicate computation on a race is harmless - the answer is the same either way.
             private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int), Surface[]> surfaces = new();
             private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), Clearance> clearance = new();
-            private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int, int), bool> drops = new();
 
             public int Columns { get; } = (int)MathF.Ceiling((maxs.X - mins.X) / StepSize);
             public int Rows { get; } = (int)MathF.Ceiling((maxs.Y - mins.Y) / StepSize);

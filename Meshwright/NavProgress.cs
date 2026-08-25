@@ -74,8 +74,6 @@ namespace Meshwright
             }
         }
 
-        public bool IsActive => sink is not null;
-
         /// <summary>
         /// Moves to a phase, banking whatever came before it as done. A phase not in the plan is
         /// appended with no weight, so an unplanned pass shows its name without disturbing the bar.
