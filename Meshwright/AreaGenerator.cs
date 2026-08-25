@@ -317,6 +317,18 @@ namespace Meshwright
         /// fixes: ground the flood never reached is a movement-limit problem, ground it rejected is a
         /// walkability problem, and ground it accepted but did not emit is a merge problem. Guessing
         /// between them is how the earlier versions of this pass went wrong.
+        ///
+        /// Two things this deliberately does not claim. It runs before the clip, so the mesh it judges
+        /// is not quite the one that gets written - the clip pulls edges back and discards what is left
+        /// too narrow, and on rp_downtown_tits_v2 that is another 2,584 areas after this has spoken.
+        /// And the cell it looks up is the one the sampler rounds the point to, which can be up to half
+        /// a step away, so "accepted" means the ground near the point was walked rather than the point
+        /// itself.
+        ///
+        /// The last category used to read "dropped by the merge", which was a guess and a wrong one.
+        /// Nothing was being dropped: areas sat half a sampling step east and south of their own nodes,
+        /// so the reference point fell just outside an area that was otherwise right. Centring areas on
+        /// their nodes took that category from 348 to 2 on that map.
         /// </summary>
         private static void Classify(NavFile reference, NavFile generated, World world,
             System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), byte> visited,
@@ -378,7 +390,7 @@ namespace Meshwright
                 else if (!accepted.Contains(key))
                     Note("reached, but treated as already covered");
                 else
-                    Note("accepted, then dropped by the merge");
+                    Note("accepted, but no area ended up covering it");
             }
 
             foreach (var (reason, count) in reasons)
