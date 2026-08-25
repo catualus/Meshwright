@@ -40,7 +40,16 @@ namespace Meshwright
             if (jumpIds.Count == 0)
                 return result;
 
-            var byId = nav.Areas.ToDictionary(a => a.Id);
+            // Built by hand rather than with ToDictionary, which throws on a repeated key. Ids are
+            // supposed to be unique and NavIntegrity reports it when they are not, but that report
+            // happens at the end of the run and this is in the middle of it: a mesh carrying two areas
+            // with one id would fail here first, as an ArgumentException about a dictionary that says
+            // nothing about the mesh. First one wins, which is what every other lookup here would have
+            // done anyway.
+            var byId = new Dictionary<uint, NavArea>(nav.Areas.Count);
+
+            foreach (var area in nav.Areas)
+                byId.TryAdd(area.Id, area);
 
             // Who connects *into* each area, and from which direction. The mesh only stores outgoing
             // links, so bridging across an area needs this built up front.

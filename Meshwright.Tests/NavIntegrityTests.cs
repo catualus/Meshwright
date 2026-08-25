@@ -27,6 +27,126 @@ namespace Meshwright.Tests
             return area;
         }
 
+        private static HidingSpot Spot(uint id) => new() { Id = id };
+
+        private static SpotEncounter Encounter(uint from, uint to, params uint[] spots)
+        {
+            var e = new SpotEncounter { FromAreaId = from, ToAreaId = to };
+
+            foreach (uint spot in spots)
+                e.Spots.Add((spot, 128));
+
+            return e;
+        }
+
+        /// <summary>
+        /// An encounter names the two areas its path runs between, and the engine resolves both at
+        /// load exactly as it resolves a connection.
+        ///
+        /// This is the same dangling reference as the others and reaches a written file the same way.
+        /// A full generate rebuilds encounters from scratch, so it hides there, but -noencounters and
+        /// every staged build-* command write the mesh with whatever encounters were loaded, and by
+        /// then merging, squaring up or pruning may have retired one of the ids.
+        /// </summary>
+        [Fact]
+        public void AnEncounterNamingAnAreaThatIsNotThereIsRemoved()
+        {
+            var nav = new NavFile();
+            var area = Area(1, 0, 0);
+
+            area.Encounters.Add(Encounter(1, 2));    // 2 is gone
+            area.Encounters.Add(Encounter(3, 1));    // 3 is gone
+            area.Encounters.Add(Encounter(1, 1));    // both ends real
+
+            nav.Areas.Add(area);
+
+            var pruned = NavIntegrity.Prune(nav);
+
+            Assert.Equal(2, pruned.Encounters);
+            Assert.Single(area.Encounters);
+            Assert.Equal(1u, area.Encounters[0].ToAreaId);
+        }
+
+        /// <summary>
+        /// The spots listed inside an encounter are hiding spot ids, and those are global across the
+        /// mesh rather than per area.
+        ///
+        /// HidingSpotFinder clears every area's spots and reassigns ids from 1 on each run, so a run
+        /// that rebuilds spots without rebuilding encounters leaves every encounter pointing at
+        /// whatever now holds that number. Not a dangling id in that case but a wrong one, which is
+        /// worse; this at least removes the ones that resolve to nothing.
+        /// </summary>
+        [Fact]
+        public void AnEncounterSpotThatIsNotThereIsRemoved()
+        {
+            var nav = new NavFile();
+            var area = Area(1, 0, 0);
+
+            area.HidingSpots.Add(Spot(10));
+            area.Encounters.Add(Encounter(1, 1, 10, 77, 10));   // 77 never existed
+
+            nav.Areas.Add(area);
+
+            var pruned = NavIntegrity.Prune(nav);
+
+            Assert.Equal(1, pruned.EncounterSpots);
+            Assert.Equal(2, area.Encounters[0].Spots.Count);
+            Assert.All(area.Encounters[0].Spots, s => Assert.Equal(10u, s.SpotId));
+        }
+
+        /// <summary>A spot in another area still counts: the ids are global.</summary>
+        [Fact]
+        public void AnEncounterMaySeeASpotBelongingToAnotherArea()
+        {
+            var nav = new NavFile();
+
+            var here = Area(1, 0, 0);
+            var there = Area(2, 100, 0);
+
+            there.HidingSpots.Add(Spot(42));
+            here.Encounters.Add(Encounter(1, 2, 42));
+
+            nav.Areas.Add(here);
+            nav.Areas.Add(there);
+
+            var pruned = NavIntegrity.Prune(nav);
+
+            Assert.Equal(0, pruned.EncounterSpots);
+            Assert.Single(here.Encounters[0].Spots);
+        }
+
+        /// <summary>
+        /// Two areas sharing an id makes every reference to it ambiguous, and there is no repair that
+        /// is not a guess about which one was meant, so this reports rather than fixes.
+        ///
+        /// Worth detecting because the rest of the codebase assumes ids are unique and one place
+        /// asserts it the hard way: JumpAreaStitcher builds a dictionary keyed on id and would throw
+        /// on the second copy, surfacing as a bare error rather than as a statement about the mesh.
+        /// </summary>
+        [Fact]
+        public void TwoAreasSharingAnIdAreReported()
+        {
+            var nav = new NavFile();
+            nav.Areas.Add(Area(1, 0, 0));
+            nav.Areas.Add(Area(1, 100, 0));
+            nav.Areas.Add(Area(2, 200, 0));
+
+            var pruned = NavIntegrity.Prune(nav);
+
+            Assert.Equal(1, pruned.DuplicateIds);
+            Assert.Equal(3, nav.Areas.Count);
+        }
+
+        [Fact]
+        public void AMeshWithNoDuplicatesReportsNone()
+        {
+            var nav = new NavFile();
+            nav.Areas.Add(Area(1, 0, 0));
+            nav.Areas.Add(Area(2, 100, 0));
+
+            Assert.Equal(0, NavIntegrity.Prune(nav).DuplicateIds);
+        }
+
         [Fact]
         public void ALadderNamingAnAreaThatIsNotThereIsCleared()
         {

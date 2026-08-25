@@ -456,7 +456,24 @@ namespace Meshwright
                     $"{result.Integrity.Ladders:N0} ladder, " +
                     $"{result.Integrity.LadderEndpoints:N0} ladder endpoint, " +
                     $"{result.Integrity.Visibility:N0} visibility, " +
-                    $"{result.Integrity.Inherits:N0} inherit");
+                    $"{result.Integrity.Inherits:N0} inherit, " +
+                    $"{result.Integrity.Encounters:N0} encounter, " +
+                    $"{result.Integrity.EncounterSpots:N0} encounter spot");
+            }
+
+            // Reported rather than repaired, so it has to be said loudly enough to act on. Every
+            // reference to a duplicated id is ambiguous and the engine resolves it to whichever area
+            // it happened to load second, which is a mesh that behaves differently from the one the
+            // numbers here describe.
+            if (result.Integrity.DuplicateIds > 0)
+            {
+                string warning =
+                    $"{result.Integrity.DuplicateIds:N0} areas share an id with another area. Every " +
+                    "reference to those ids is ambiguous, and this cannot be repaired without guessing " +
+                    "which area was meant.";
+
+                result.Warnings.Add(warning);
+                log($"Integrity: {warning}");
             }
 
             return result;

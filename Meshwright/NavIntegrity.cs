@@ -28,11 +28,21 @@ namespace Meshwright
     {
         public readonly record struct Result(
             int Connections, int Ladders, int Visibility, int SelfConnections, int Duplicates,
-            int Inherits, int LadderEndpoints = 0)
+            int Inherits, int LadderEndpoints = 0, int Encounters = 0, int EncounterSpots = 0,
+            int DuplicateIds = 0)
         {
             public int Total =>
                 Connections + Ladders + Visibility + SelfConnections + Duplicates + Inherits
-                + LadderEndpoints;
+                + LadderEndpoints + Encounters + EncounterSpots;
+
+            /// <summary>
+            /// Areas sharing an id with another area, which is reported and not repaired.
+            ///
+            /// Deliberately outside <see cref="Total"/>, because everything counted there was fixed and
+            /// this was not. There is no repair that is not a guess: every reference to a duplicated id
+            /// was meant for one of the two, and renumbering picks one without knowing which.
+            /// </summary>
+            public int DuplicateIds { get; init; } = DuplicateIds;
         }
 
         public static Result Prune(NavFile nav)
@@ -45,8 +55,26 @@ namespace Meshwright
 
             foreach (var ladder in nav.Ladders) ladders.Add(ladder.Id);
 
+            // Hiding spot ids are global across the mesh rather than per area, so an encounter in one
+            // area legitimately names a spot belonging to another. Collected across all of them.
+            var spots = new HashSet<uint>();
+
+            foreach (var area in nav.Areas)
+                foreach (var spot in area.HidingSpots)
+                    spots.Add(spot.Id);
+
+            // Two areas answering to one id makes every reference to it ambiguous. Counted with a
+            // second pass over the ids rather than while building the set above, because "how many
+            // areas were not the first to claim their id" is the number worth reporting.
+            int duplicateIds = 0;
+            var claimed = new HashSet<uint>(nav.Areas.Count);
+
+            foreach (var area in nav.Areas)
+                if (!claimed.Add(area.Id)) duplicateIds++;
+
             int droppedConnections = 0, droppedLadders = 0, droppedVisibility = 0;
             int self = 0, duplicates = 0, droppedInherits = 0;
+            int droppedEncounters = 0, droppedEncounterSpots = 0;
 
             foreach (var area in nav.Areas)
             {
@@ -71,6 +99,46 @@ namespace Meshwright
 
                     list.RemoveRange(keep, list.Count - keep);
                 }
+
+                // An encounter is a path between two named areas with the covered spots seen along
+                // it. Both halves are references the engine resolves at load, and neither was swept.
+                //
+                // A full generate rebuilds encounters from nothing, which is why this never showed up
+                // there. Every other route to a written mesh keeps whatever was loaded: -noencounters,
+                // -nospots, and each of the staged build-* commands. By then merging, squaring up or
+                // pruning may have retired one of the ids.
+                int keptEncounters = 0;
+
+                for (int i = 0; i < area.Encounters.Count; i++)
+                {
+                    var encounter = area.Encounters[i];
+
+                    // Either end missing and the encounter describes a route between somewhere and
+                    // nothing, so the whole record goes rather than half of it.
+                    if (!areas.Contains(encounter.FromAreaId) || !areas.Contains(encounter.ToAreaId))
+                    {
+                        droppedEncounters++;
+                        continue;
+                    }
+
+                    int keptSpots = 0;
+
+                    for (int s = 0; s < encounter.Spots.Count; s++)
+                    {
+                        if (!spots.Contains(encounter.Spots[s].SpotId))
+                        {
+                            droppedEncounterSpots++;
+                            continue;
+                        }
+
+                        encounter.Spots[keptSpots++] = encounter.Spots[s];
+                    }
+
+                    encounter.Spots.RemoveRange(keptSpots, encounter.Spots.Count - keptSpots);
+                    area.Encounters[keptEncounters++] = encounter;
+                }
+
+                area.Encounters.RemoveRange(keptEncounters, area.Encounters.Count - keptEncounters);
 
                 foreach (var list in area.Ladders)
                 {
@@ -142,7 +210,8 @@ namespace Meshwright
             }
 
             return new Result(droppedConnections, droppedLadders, droppedVisibility, self, duplicates,
-                droppedInherits, droppedEndpoints);
+                droppedInherits, droppedEndpoints, droppedEncounters, droppedEncounterSpots,
+                duplicateIds);
         }
 
         private static int ClearIfMissing(HashSet<uint> areas, NavLadder ladder,
