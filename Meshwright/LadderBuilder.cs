@@ -342,10 +342,27 @@ namespace Meshwright
                 if (found < 0)
                     continue;
 
-                if (!IsReachable(vis, origin, point))
+                var area = nav.Areas[found];
+
+                // Crossed at the height of the floor being stepped onto, not at the height the ladder
+                // brush happens to stop at.
+                //
+                // A ladder brush does not have to reach the ground, and often does not: a climber can
+                // grab it from below, so mappers leave it short. Tracing the crossing at the brush's
+                // own bottom then runs the line through whatever is between it and the floor. On
+                // rp_downtown_tits_v2 every one of the nineteen ladders failed here - the floor beside
+                // them sits 60 units below the brush, the horizontal trace at brush height is blocked
+                // and the same trace at floor height is clear - so all nineteen were skipped as having
+                // no nav area at the base, while the area sat directly under the probe the whole time.
+                float floor = NavGeometry.SurfaceZ(area, point.X, point.Y);
+
+                var standing = new BspFile.Vector3(origin.X, origin.Y, floor);
+                var landing = new BspFile.Vector3(point.X, point.Y, floor);
+
+                if (!IsReachable(vis, standing, landing))
                     continue;
 
-                return nav.Areas[found];
+                return area;
             }
 
             return null;
