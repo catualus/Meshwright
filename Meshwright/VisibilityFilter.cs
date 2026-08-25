@@ -169,6 +169,21 @@ namespace Meshwright
             long pairsDone = 0;
             double totalPairs = Math.Max(1, stats.TotalPairs);
 
+            // Left on Parallel.For's own partitioning, having tried the alternative and measured it.
+            //
+            // The cost of this loop is triangular - row 0 tests every other area, the last row tests
+            // nothing - which looks exactly like the imbalance SniperSpotClassifier and
+            // EncounterSpotBuilder both had to fix by handing work out one item at a time. It is not
+            // the same situation. Those two are Parallel.ForEach over a collection, which partitions
+            // statically; this is Parallel.For over a range, and that hands chunks out dynamically,
+            // starting small and growing. The expensive early rows are spread across every worker
+            // before any of them takes a large chunk, so there is no tail left to fix.
+            //
+            // Measured on gm_construct at sixteen threads, six interleaved runs of each: chunks of one
+            // gave 3,186ms against 3,310ms at the minimum, and were slower in two of the six rounds.
+            // The distributions overlap completely, so that is noise rather than a gain. At one thread
+            // it is consistently about 2% worse, which is the per-row handout with nothing to balance.
+            // Scaling is already 7.7x on eight cores with SMT, so there was little left to recover.
             Parallel.For(0, count, NavConcurrency.Options, () => new Local(count), (i, _, local) =>
             {
                 int n = 0;

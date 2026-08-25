@@ -75,18 +75,23 @@ namespace Meshwright
             if (vertices.Count == 0)
                 return false;
 
-            mins = new BspFile.Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
-            maxs = new BspFile.Vector3(float.MinValue, float.MinValue, float.MinValue);
+            // Accumulated in locals and built once: BspFile.Vector3 is readonly, and a running min/max
+            // is the one shape that wants to write a component at a time.
+            float mnx = float.MaxValue, mny = float.MaxValue, mnz = float.MaxValue;
+            float mxx = float.MinValue, mxy = float.MinValue, mxz = float.MinValue;
 
             foreach (var v in vertices)
             {
-                mins.X = Math.Min(mins.X, v.X);
-                mins.Y = Math.Min(mins.Y, v.Y);
-                mins.Z = Math.Min(mins.Z, v.Z);
-                maxs.X = Math.Max(maxs.X, v.X);
-                maxs.Y = Math.Max(maxs.Y, v.Y);
-                maxs.Z = Math.Max(maxs.Z, v.Z);
+                mnx = Math.Min(mnx, v.X);
+                mny = Math.Min(mny, v.Y);
+                mnz = Math.Min(mnz, v.Z);
+                mxx = Math.Max(mxx, v.X);
+                mxy = Math.Max(mxy, v.Y);
+                mxz = Math.Max(mxz, v.Z);
             }
+
+            mins = new BspFile.Vector3(mnx, mny, mnz);
+            maxs = new BspFile.Vector3(mxx, mxy, mxz);
 
             return true;
         }

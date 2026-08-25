@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace Meshwright
 {
@@ -26,6 +28,29 @@ namespace Meshwright
         private int[] contents = [];               // one entry per triangle
         private BvhNode[] bvh = [];
         private int[] order = [];
+
+        /// <summary>
+        /// The same triangles again, as one array per component, with the two edges precomputed.
+        ///
+        /// This is the layout the nearest-hit trace wants and the interleaved one cannot give it. That
+        /// trace has to test every triangle in every leaf it reaches - it is looking for the closest
+        /// hit, so there is nothing to exit early for - which makes it the one query in this class that
+        /// is pure arithmetic over a known count, and the one worth doing eight at a time. Eight lanes
+        /// need eight triangles' worth of each component side by side; reading them out of
+        /// <see cref="vertices"/> would be a gather per lane and would cost more than the vector math
+        /// saves.
+        ///
+        /// The edges are stored rather than recomputed because Moller-Trumbore uses them and nothing
+        /// else does, so subtracting them once at build time removes six subtractions per triangle per
+        /// ray. The original vertices stay: the winning triangle's normal is read off them, which
+        /// happens once per trace rather than once per triangle, and reconstructing a vertex as
+        /// <c>v0 + e1</c> is not bit-identical to the vertex that was read from the file.
+        ///
+        /// Costs one more copy of the geometry - about 6MB on a map with 165,000 triangles.
+        /// </summary>
+        private float[] v0x = [], v0y = [], v0z = [];
+        private float[] e1x = [], e1y = [], e1z = [];
+        private float[] e2x = [], e2y = [], e2z = [];
 
         public int TriangleCount => vertices.Length / 3;
 
@@ -124,10 +149,73 @@ namespace Meshwright
             Build(nodes, 0, count);
             bvh = nodes.ToArray();
 
+            ApplyOrder(count);
+
             // Only the tree is needed to trace. The build scratch is several megabytes on a large map
             // and there is no reason to hold it for the life of the process.
             centreX = centreY = centreZ = keys = [];
             triangleBounds = [];
+        }
+
+        /// <summary>
+        /// Rearranges the triangles into the order the tree visits them, so a leaf's triangles are
+        /// contiguous and <see cref="order"/> stops existing.
+        ///
+        /// **The permutation was already being computed and then paid for on every query instead.** The
+        /// build sorts an index array; the trace then walked it, and each triangle in a leaf cost a load
+        /// of <c>order[i]</c> followed by two *dependent, scattered* loads - one into <c>contents</c>,
+        /// one into <c>vertices</c> at <c>order[i] * 3</c>. Neighbouring triangles in a leaf are
+        /// neighbours in the tree, not in memory, so each of those landed on its own cache line. Doing
+        /// the shuffle once here makes the leaf loop read straight down both arrays: one cache line of
+        /// vertices covers three triangles rather than a third of one.
+        ///
+        /// Not a change to the tree, only to where its triangles live. Node ranges already index the
+        /// order array positionally, so after the permutation <c>First</c> and <c>Count</c> address the
+        /// triangles directly and every trace returns exactly what it did before - which the round-trip
+        /// tests and the byte-for-byte mesh comparison both check.
+        /// </summary>
+        private void ApplyOrder(int count)
+        {
+            var sortedVertices = new BspFile.Vector3[count * 3];
+            var sortedContents = new int[count];
+
+            for (int i = 0; i < count; i++)
+            {
+                int from = order[i] * 3;
+                int to = i * 3;
+
+                sortedVertices[to] = vertices[from];
+                sortedVertices[to + 1] = vertices[from + 1];
+                sortedVertices[to + 2] = vertices[from + 2];
+
+                sortedContents[i] = contents[order[i]];
+            }
+
+            vertices = sortedVertices;
+            contents = sortedContents;
+            order = [];
+
+            BuildEdgeArrays(count);
+        }
+
+        /// <summary>Splits the permuted triangles into the per-component arrays the wide trace reads.</summary>
+        private void BuildEdgeArrays(int count)
+        {
+            v0x = new float[count]; v0y = new float[count]; v0z = new float[count];
+            e1x = new float[count]; e1y = new float[count]; e1z = new float[count];
+            e2x = new float[count]; e2y = new float[count]; e2z = new float[count];
+
+            for (int i = 0; i < count; i++)
+            {
+                var a = vertices[i * 3];
+                var b = vertices[i * 3 + 1];
+                var c = vertices[i * 3 + 2];
+
+                v0x[i] = a.X; v0y[i] = a.Y; v0z[i] = a.Z;
+
+                e1x[i] = b.X - a.X; e1y[i] = b.Y - a.Y; e1z[i] = b.Z - a.Z;
+                e2x[i] = c.X - a.X; e2y[i] = c.Y - a.Y; e2z[i] = c.Z - a.Z;
+            }
         }
 
         private int Build(List<BvhNode> nodes, int first, int count)
@@ -276,10 +364,10 @@ namespace Meshwright
 
                 for (int i = node.First; i < node.First + node.Count; i++)
                 {
-                    if ((contents[order[i]] & mask) == 0)
+                    if ((contents[i] & mask) == 0)
                         continue;
 
-                    int t = order[i] * 3;
+                    int t = i * 3;
                     if (SegmentHitsTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2]))
                         return true;
                 }
@@ -328,25 +416,208 @@ namespace Meshwright
                     continue;
                 }
 
-                for (int i = node.First; i < node.First + node.Count; i++)
+                int nearest = NearestInLeaf(a, b, mask, node.First, node.Count,
+                    found ? fraction : 1f, out float hit);
+
+                if (nearest >= 0)
                 {
-                    if ((contents[order[i]] & mask) == 0)
-                        continue;
-
-                    int t = order[i] * 3;
-                    if (!TryHitTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2], out float hit))
-                        continue;
-
-                    if (found && hit >= fraction)
-                        continue;
-
                     fraction = hit;
-                    normal = TriangleNormal(vertices[t], vertices[t + 1], vertices[t + 2]);
+                    normal = TriangleNormal(vertices[nearest * 3], vertices[nearest * 3 + 1],
+                        vertices[nearest * 3 + 2]);
                     found = true;
                 }
             }
 
             return found;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        /// <summary>
+        /// The nearest triangle in one leaf that the segment crosses closer than
+        /// <paramref name="best"/>, or -1.
+        ///
+        /// Eight at a time where the hardware allows it. This is the only query here that suits it: the
+        /// other two stop at the first blocker, so testing eight triangles when the first would have
+        /// answered is work thrown away, while a nearest-hit search has to look at all of them anyway.
+        /// Leaves hold eight triangles, which is one <see cref="Vector256{T}"/> exactly.
+        ///
+        /// The check is on <c>Vector256.IsHardwareAccelerated</c> rather than on AVX2 specifically, and
+        /// it resolves to a constant when the method is compiled, so the branch costs nothing and the
+        /// unused half is discarded. On hardware without it the scalar path below runs unchanged.
+        /// </summary>
+        private int NearestInLeaf(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
+            int first, int count, float best, out float hit)
+        {
+            return Vector256.IsHardwareAccelerated && count >= Vector256<float>.Count
+                ? NearestWide(a, b, mask, first, count, best, out hit)
+                : NearestScalar(a, b, mask, first, count, best, out hit);
+        }
+
+        private int NearestScalar(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
+            int first, int count, float best, out float hit)
+        {
+            int winner = -1;
+            hit = best;
+
+            for (int i = first; i < first + count; i++)
+            {
+                if ((contents[i] & mask) == 0)
+                    continue;
+
+                int t = i * 3;
+                if (!TryHitTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2], out float at))
+                    continue;
+
+                if (at >= hit)
+                    continue;
+
+                hit = at;
+                winner = i;
+            }
+
+            return winner;
+        }
+
+        /// <summary>
+        /// Moller-Trumbore over eight triangles at once.
+        ///
+        /// Every rejection the scalar version makes with a branch - degenerate determinant, barycentric
+        /// coordinate out of range, hit behind the start or past the end - becomes a lane mask here.
+        /// That is the point as much as the arithmetic width is: which triangles a leaf rejects is
+        /// data-dependent and unpredictable, so the scalar loop mispredicts constantly, where this has
+        /// no branches to miss.
+        ///
+        /// Rejected lanes are set to positive infinity so the same minimum-finding step handles them.
+        /// </summary>
+        private int NearestWide(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
+            int first, int count, float best, out float hit)
+        {
+            const float Epsilon = 1e-6f;
+            int lanes = Vector256<float>.Count;
+
+            var dx = Vector256.Create(b.X - a.X);
+            var dy = Vector256.Create(b.Y - a.Y);
+            var dz = Vector256.Create(b.Z - a.Z);
+
+            var ax = Vector256.Create(a.X);
+            var ay = Vector256.Create(a.Y);
+            var az = Vector256.Create(a.Z);
+
+            var epsilon = Vector256.Create(Epsilon);
+            var zero = Vector256<float>.Zero;
+            var one = Vector256<float>.One;
+            var maskLanes = Vector256.Create(mask);
+            var miss = Vector256.Create(float.PositiveInfinity);
+
+            int winner = -1;
+            hit = best;
+
+            Span<float> found = stackalloc float[Vector256<float>.Count];
+
+            int i = first;
+            int end = first + count;
+
+            for (; i + lanes <= end; i += lanes)
+            {
+                // Contents first: a triangle the caller is not asking about takes no further work.
+                var wanted = Vector256.LoadUnsafe(ref contents[i]) & maskLanes;
+                var live = ~Vector256.Equals(wanted, Vector256<int>.Zero).AsSingle();
+
+                if (live.Equals(zero))
+                    continue;
+
+                var v1x = Vector256.LoadUnsafe(ref e1x[i]);
+                var v1y = Vector256.LoadUnsafe(ref e1y[i]);
+                var v1z = Vector256.LoadUnsafe(ref e1z[i]);
+
+                var v2x = Vector256.LoadUnsafe(ref e2x[i]);
+                var v2y = Vector256.LoadUnsafe(ref e2y[i]);
+                var v2z = Vector256.LoadUnsafe(ref e2z[i]);
+
+                // p = d x e2
+                var px = dy * v2z - dz * v2y;
+                var py = dz * v2x - dx * v2z;
+                var pz = dx * v2y - dy * v2x;
+
+                var det = v1x * px + v1y * py + v1z * pz;
+
+                var live2 = live & ~Vector256.LessThan(Vector256.Abs(det), epsilon).AsSingle();
+                if (live2.Equals(zero))
+                    continue;
+
+                // A zero determinant would divide by zero; those lanes are already dead, but the
+                // division still runs, so give them something harmless to divide by.
+                var safe = Vector256.ConditionalSelect(live2, det, one);
+                var inverse = one / safe;
+
+                var tx = ax - Vector256.LoadUnsafe(ref v0x[i]);
+                var ty = ay - Vector256.LoadUnsafe(ref v0y[i]);
+                var tz = az - Vector256.LoadUnsafe(ref v0z[i]);
+
+                var u = (tx * px + ty * py + tz * pz) * inverse;
+
+                live2 &= ~Vector256.LessThan(u, zero).AsSingle();
+                live2 &= ~Vector256.GreaterThan(u, one).AsSingle();
+                if (live2.Equals(zero))
+                    continue;
+
+                // q = t x e1
+                var qx = ty * v1z - tz * v1y;
+                var qy = tz * v1x - tx * v1z;
+                var qz = tx * v1y - ty * v1x;
+
+                var v = (dx * qx + dy * qy + dz * qz) * inverse;
+
+                live2 &= ~Vector256.LessThan(v, zero).AsSingle();
+                live2 &= ~Vector256.GreaterThan(u + v, one).AsSingle();
+                if (live2.Equals(zero))
+                    continue;
+
+                var at = (v2x * qx + v2y * qy + v2z * qz) * inverse;
+
+                // The same bounds the scalar version applies: strictly inside the segment.
+                live2 &= Vector256.GreaterThan(at, epsilon).AsSingle();
+                live2 &= Vector256.LessThan(at, one).AsSingle();
+
+                var scored = Vector256.ConditionalSelect(live2, at, miss);
+
+                if (Vector256.Min(scored, miss).Equals(miss))
+                    continue;
+
+                scored.CopyTo(found);
+
+                // Lowest lane index wins a tie, which is the order the scalar loop would have taken
+                // them in - so the two paths agree on a segment that grazes two coincident triangles.
+                for (int lane = 0; lane < lanes; lane++)
+                {
+                    if (found[lane] >= hit)
+                        continue;
+
+                    hit = found[lane];
+                    winner = i + lane;
+                }
+            }
+
+            // Whatever is left over when a leaf is not a whole multiple of the width.
+            //
+            // Unreachable as things stand, and kept deliberately. A leaf holds at most LeafSize
+            // triangles and that is currently eight, which is exactly one vector - so a leaf either
+            // has fewer than eight and never gets here at all, or has exactly eight and leaves nothing
+            // over. Changing LeafSize to anything that is not a multiple of the vector width makes this
+            // live immediately, which is the situation worth being already correct for. Note that no
+            // test covers it while it cannot run: deleting the tail passes the whole suite.
+            if (i < end)
+            {
+                int tail = NearestScalar(a, b, mask, i, end - i, hit, out float tailHit);
+
+                if (tail >= 0)
+                {
+                    hit = tailHit;
+                    winner = tail;
+                }
+            }
+
+            return winner;
         }
 
         private static BspFile.Vector3 TriangleNormal(BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2)
@@ -432,10 +703,10 @@ namespace Meshwright
 
                 for (int i = node.First; i < node.First + node.Count; i++)
                 {
-                    if ((contents[order[i]] & mask) == 0)
+                    if ((contents[i] & mask) == 0)
                         continue;
 
-                    int t = order[i] * 3;
+                    int t = i * 3;
 
                     if (!SweepBoxAgainstTriangle(from, to, extent,
                             vertices[t], vertices[t + 1], vertices[t + 2],
@@ -600,14 +871,17 @@ namespace Meshwright
             return true;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static float Dot(BspFile.Vector3 a, BspFile.Vector3 b)
             => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool SegmentHitsTriangle(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2)
             => TryHitTriangle(a, b, v0, v1, v2, out _);
 
         /// <summary>Moller-Trumbore, bounded to the segment rather than an infinite ray.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool TryHitTriangle(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2, out float fraction)
         {
@@ -648,6 +922,7 @@ namespace Meshwright
             return true;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool SegmentHitsBox(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs)
         {
@@ -658,6 +933,7 @@ namespace Meshwright
                 && Slab(a.Z, b.Z - a.Z, mins.Z, maxs.Z, ref tMin, ref tMax);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool Slab(float origin, float delta, float min, float max, ref float tMin, ref float tMax)
         {
             if (MathF.Abs(delta) < 1e-6f)

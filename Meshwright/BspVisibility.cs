@@ -1079,11 +1079,17 @@ namespace Meshwright
         {
             while (num >= 0)
             {
-                var node = nodes[num];
+                // By reference, not by value. This is the hottest loop in the program - tens of millions
+                // of node visits per map - and reading these as locals copied a 12-byte node and a
+                // 20-byte plane on every one of them, to use four floats of the plane and three ints of
+                // the node. The arrays are never written during a trace.
+                ref readonly var node = ref nodes[num];
+
                 if ((uint)node.PlaneNum >= (uint)planes.Length)
                     return false;
 
-                var plane = planes[node.PlaneNum];
+                ref readonly var plane = ref planes[node.PlaneNum];
+
                 float d1 = plane.Normal.X * p1.X + plane.Normal.Y * p1.Y + plane.Normal.Z * p1.Z - plane.Distance;
                 float d2 = plane.Normal.X * p2.X + plane.Normal.Y * p2.Y + plane.Normal.Z * p2.Z - plane.Distance;
 
@@ -1398,11 +1404,17 @@ namespace Meshwright
         {
             while (num >= 0)
             {
-                var node = nodes[num];
+                // By reference, not by value. This is the hottest loop in the program - tens of millions
+                // of node visits per map - and reading these as locals copied a 12-byte node and a
+                // 20-byte plane on every one of them, to use four floats of the plane and three ints of
+                // the node. The arrays are never written during a trace.
+                ref readonly var node = ref nodes[num];
+
                 if ((uint)node.PlaneNum >= (uint)planes.Length)
                     return false;
 
-                var plane = planes[node.PlaneNum];
+                ref readonly var plane = ref planes[node.PlaneNum];
+
                 float d1 = plane.Normal.X * p1.X + plane.Normal.Y * p1.Y + plane.Normal.Z * p1.Z - plane.Distance;
                 float d2 = plane.Normal.X * p2.X + plane.Normal.Y * p2.Y + plane.Normal.Z * p2.Z - plane.Distance;
 
@@ -1444,11 +1456,17 @@ namespace Meshwright
         {
             while (num >= 0)
             {
-                var node = nodes[num];
+                // By reference, not by value. This is the hottest loop in the program - tens of millions
+                // of node visits per map - and reading these as locals copied a 12-byte node and a
+                // 20-byte plane on every one of them, to use four floats of the plane and three ints of
+                // the node. The arrays are never written during a trace.
+                ref readonly var node = ref nodes[num];
+
                 if ((uint)node.PlaneNum >= (uint)planes.Length)
                     return false;
 
-                var plane = planes[node.PlaneNum];
+                ref readonly var plane = ref planes[node.PlaneNum];
+
                 float d1 = plane.Normal.X * p1.X + plane.Normal.Y * p1.Y + plane.Normal.Z * p1.Z - plane.Distance;
                 float d2 = plane.Normal.X * p2.X + plane.Normal.Y * p2.Y + plane.Normal.Z * p2.Z - plane.Distance;
 

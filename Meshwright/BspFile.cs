@@ -193,8 +193,9 @@ namespace Meshwright
         /// </summary>
         public bool TryGetBrushBounds(Brush brush, out Vector3 mins, out Vector3 maxs)
         {
-            mins = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
-            maxs = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            // Accumulated in locals: Vector3 is readonly, and this builds its result one axis at a time.
+            float mnx = float.MaxValue, mny = float.MaxValue, mnz = float.MaxValue;
+            float mxx = float.MinValue, mxy = float.MinValue, mxz = float.MinValue;
 
             for (int i = 0; i < brush.NumSides; i++)
             {
@@ -208,21 +209,33 @@ namespace Meshwright
                 var n = plane.Normal;
 
                 // only axis-aligned planes contribute to an AABB
-                if (n.X > 0.999f) maxs.X = Math.Min(maxs.X == float.MinValue ? plane.Distance : maxs.X, plane.Distance);
-                else if (n.X < -0.999f) mins.X = Math.Max(mins.X == float.MaxValue ? -plane.Distance : mins.X, -plane.Distance);
-                else if (n.Y > 0.999f) maxs.Y = Math.Min(maxs.Y == float.MinValue ? plane.Distance : maxs.Y, plane.Distance);
-                else if (n.Y < -0.999f) mins.Y = Math.Max(mins.Y == float.MaxValue ? -plane.Distance : mins.Y, -plane.Distance);
-                else if (n.Z > 0.999f) maxs.Z = Math.Min(maxs.Z == float.MinValue ? plane.Distance : maxs.Z, plane.Distance);
-                else if (n.Z < -0.999f) mins.Z = Math.Max(mins.Z == float.MaxValue ? -plane.Distance : mins.Z, -plane.Distance);
+                if (n.X > 0.999f) mxx = Math.Min(mxx == float.MinValue ? plane.Distance : mxx, plane.Distance);
+                else if (n.X < -0.999f) mnx = Math.Max(mnx == float.MaxValue ? -plane.Distance : mnx, -plane.Distance);
+                else if (n.Y > 0.999f) mxy = Math.Min(mxy == float.MinValue ? plane.Distance : mxy, plane.Distance);
+                else if (n.Y < -0.999f) mny = Math.Max(mny == float.MaxValue ? -plane.Distance : mny, -plane.Distance);
+                else if (n.Z > 0.999f) mxz = Math.Min(mxz == float.MinValue ? plane.Distance : mxz, plane.Distance);
+                else if (n.Z < -0.999f) mnz = Math.Max(mnz == float.MaxValue ? -plane.Distance : mnz, -plane.Distance);
             }
 
-            return mins.X != float.MaxValue && mins.Y != float.MaxValue && mins.Z != float.MaxValue
-                && maxs.X != float.MinValue && maxs.Y != float.MinValue && maxs.Z != float.MinValue;
+            mins = new Vector3(mnx, mny, mnz);
+            maxs = new Vector3(mxx, mxy, mxz);
+
+            return mnx != float.MaxValue && mny != float.MaxValue && mnz != float.MaxValue
+                && mxx != float.MinValue && mxy != float.MinValue && mxz != float.MinValue;
         }
 
-        public struct Vector3
+        /// <summary>
+        /// Readonly so the compiler stops defending it.
+        ///
+        /// A mutable struct reached through a readonly reference - a <c>readonly</c> field, an <c>in</c>
+        /// parameter, a static - has to be copied before any member is touched, because the compiler
+        /// cannot prove the member will not write to it. This type is threaded through every trace in
+        /// the program and those copies were being made on the hottest paths there are. Marking it
+        /// readonly is free at the source level and removes them.
+        /// </summary>
+        public readonly struct Vector3
         {
-            public float X, Y, Z;
+            public readonly float X, Y, Z;
             public Vector3(float x, float y, float z) { X = x; Y = y; Z = z; }
             public override string ToString() => $"({X:F1} {Y:F1} {Z:F1})";
         }
