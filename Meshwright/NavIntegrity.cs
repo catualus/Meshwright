@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace Meshwright
@@ -27,10 +28,11 @@ namespace Meshwright
     {
         public readonly record struct Result(
             int Connections, int Ladders, int Visibility, int SelfConnections, int Duplicates,
-            int Inherits)
+            int Inherits, int LadderEndpoints = 0)
         {
             public int Total =>
-                Connections + Ladders + Visibility + SelfConnections + Duplicates + Inherits;
+                Connections + Ladders + Visibility + SelfConnections + Duplicates + Inherits
+                + LadderEndpoints;
         }
 
         public static Result Prune(NavFile nav)
@@ -117,8 +119,42 @@ namespace Meshwright
                 }
             }
 
+            // The other direction of the area/ladder relationship, and the one this pass walked past.
+            // It prunes an area's list of ladders; a ladder's own four top ids and its bottom id are
+            // references to areas in exactly the same sense and dangle in exactly the same way - a
+            // ladder built against an area that a later pass then discarded as a sliver, or as
+            // unreachable, keeps naming it. Zero is the format's "no area here", so clearing is the
+            // repair rather than deleting the ladder.
+            int droppedEndpoints = 0;
+
+            foreach (var ladder in nav.Ladders)
+            {
+                droppedEndpoints += ClearIfMissing(areas, ladder, static l => l.BottomAreaId,
+                    static (l, v) => l.BottomAreaId = v);
+                droppedEndpoints += ClearIfMissing(areas, ladder, static l => l.TopForwardAreaId,
+                    static (l, v) => l.TopForwardAreaId = v);
+                droppedEndpoints += ClearIfMissing(areas, ladder, static l => l.TopLeftAreaId,
+                    static (l, v) => l.TopLeftAreaId = v);
+                droppedEndpoints += ClearIfMissing(areas, ladder, static l => l.TopRightAreaId,
+                    static (l, v) => l.TopRightAreaId = v);
+                droppedEndpoints += ClearIfMissing(areas, ladder, static l => l.TopBehindAreaId,
+                    static (l, v) => l.TopBehindAreaId = v);
+            }
+
             return new Result(droppedConnections, droppedLadders, droppedVisibility, self, duplicates,
-                droppedInherits);
+                droppedInherits, droppedEndpoints);
+        }
+
+        private static int ClearIfMissing(HashSet<uint> areas, NavLadder ladder,
+            Func<NavLadder, uint> read, Action<NavLadder, uint> write)
+        {
+            uint id = read(ladder);
+
+            if (id == 0 || areas.Contains(id))
+                return 0;
+
+            write(ladder, 0);
+            return 1;
         }
 
         /// <summary>Prunes and prints what went, so a pass that is losing links cannot do it quietly.</summary>

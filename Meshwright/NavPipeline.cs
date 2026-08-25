@@ -29,6 +29,9 @@ namespace Meshwright
     /// <item>Stitching immediately after connecting, because the stitch needs to know what each jump
     /// area joined, which only the connection pass knows.</item>
     /// <item>Everything that reads an area's final shape - stairs, lifts, corners - after clipping.</item>
+    /// <item>The reachability prune after every pass that can add a connection, and before the two
+    /// that are priced per area - pruning earlier strands areas the corner patcher was about to join,
+    /// pruning later spends the most expensive work in the pipeline on areas being deleted.</item>
     /// <item>Spots after movement: an encounter is a list of covered spots along a path, so it needs
     /// both the connection graph and the cover flags.</item>
     /// <item>Visibility last, and the integrity sweep after that, immediately before the write.</item>
@@ -48,6 +51,7 @@ namespace Meshwright
         public const string PhaseConnections = "Connecting areas";
         public const string PhaseClipping = "Clipping areas to geometry";
         public const string PhaseStairs = "Marking stairs";
+        public const string PhaseReachability = "Checking reachability";
         public const string PhaseHiding = "Finding hiding spots";
         public const string PhaseSnipers = "Grading sniper spots";
         public const string PhaseEncounters = "Finding encounter spots";
@@ -67,6 +71,26 @@ namespace Meshwright
 
             public bool Ladders = true;
             public bool Movement = true;
+
+            /// <summary>
+            /// Delete the areas nothing can reach from a player spawn, once the connection graph exists.
+            ///
+            /// **Off by default, on the evidence.** The intuition is that unreachable generated mesh is
+            /// junk - the sampler does leave areas inside sealed voids, and it was one of those, linked
+            /// to the world by a drop through a floor, that prompted this. Scored against the meshes the
+            /// engine generates for the two maps there is a reference for, the intuition is wrong about
+            /// the majority. Pruning every unreachable area on rp_downtown_meowy removed 1,065 of them
+            /// and took coverage of the engine's own ground from 98.0% to 92.6%; capping it to groups of
+            /// eight or fewer still removed 457 and still cost 2.3 points. Nearly all of it is real
+            /// ground the movement pass failed to link, and the engine reaches it perfectly well.
+            ///
+            /// So the stranded count is *reported* on every run and acted on only when asked. Leaving a
+            /// stranded area in place costs nothing at runtime - nothing can path into it, which is what
+            /// stranded means - where deleting one costs the map. The bogus drop that made stranded mesh
+            /// visible in the first place is fixed where it was made, in
+            /// <see cref="ConnectionBuilder"/>.
+            /// </summary>
+            public bool PruneUnreachable;
             public bool Spots = true;
             public bool SniperSpots = true;
             public bool EncounterSpots = true;
@@ -93,6 +117,7 @@ namespace Meshwright
             public ElevatorConnector.Result? Elevators;
             public CornerPatcher.Result? Corners;
             public AreaConnectionFixer.Result? Fixup;
+            public NavReachability.PruneResult? Pruned;
             public HidingSpotFinder.Result? HidingSpots;
             public SniperSpotClassifier.Result? SniperSpots;
             public EncounterSpotBuilder.Result? Encounters;
@@ -129,6 +154,7 @@ namespace Meshwright
             if (options.Movement) steps.Add(new NavProgress.Step(PhaseConnections, 0.05));
             if (options.GenerateAreas) steps.Add(new NavProgress.Step(PhaseClipping, 0.02));
             if (options.Movement) steps.Add(new NavProgress.Step(PhaseStairs, 0.02));
+            if (options.Movement) steps.Add(new NavProgress.Step(PhaseReachability, 0.01));
 
             if (options.Spots)
             {
@@ -324,11 +350,85 @@ namespace Meshwright
                     $"{result.Integrity.SelfConnections:N0} self-links, " +
                     $"{result.Integrity.Duplicates:N0} duplicates, " +
                     $"{result.Integrity.Ladders:N0} ladder, " +
+                    $"{result.Integrity.LadderEndpoints:N0} ladder endpoint, " +
                     $"{result.Integrity.Visibility:N0} visibility, " +
                     $"{result.Integrity.Inherits:N0} inherit");
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Floods the finished connection graph from the map's player spawns and reports what it could
+        /// not get to - deleting it only when asked.
+        ///
+        /// Reported on every run rather than only when pruning, because this is the number that says
+        /// whether the mesh is any good. Area counts and coverage both look healthy on a mesh whose far
+        /// half no bot can enter, and until this ran as part of a normal build the only way to find that
+        /// out was to know to run a diagnostic afterwards.
+        /// </summary>
+        private static void RunReachability(BspFile bsp, NavFile nav, Options options, Result result,
+            Action<string> log)
+        {
+            int before = nav.Areas.Count;
+            var spawns = AreaGenerator.SpawnPositions(bsp).ToList();
+
+            if (!options.PruneUnreachable)
+            {
+                var analysis = NavReachability.Analyse(nav, spawns);
+
+                if (analysis.Seeds == 0)
+                {
+                    log("Reachability: no player spawn resolved to an area; nothing to flood from");
+                    return;
+                }
+
+                if (analysis.Unreachable == 0)
+                {
+                    log($"Reachability: all {before:N0} areas reachable from a player spawn");
+                    return;
+                }
+
+                log($"Reachability: {analysis.Unreachable:N0} of {before:N0} areas " +
+                    $"({100.0 * analysis.Unreachable / Math.Max(1, before):F1}%) cannot be reached from " +
+                    $"a player spawn, in {analysis.Islands.Count:N0} groups " +
+                    $"(largest {analysis.Islands[0].Size:N0})");
+
+                log("              kept - most stranded ground is real and merely unlinked. " +
+                    "`reachable` shows where; -pruneunreachable deletes the small groups.");
+                return;
+            }
+
+            var pruned = NavReachability.PruneUnreachable(nav, spawns);
+            result.Pruned = pruned;
+
+            if (pruned.Refused)
+            {
+                string warning = $"Unreachable areas kept: {pruned.Note}.";
+                result.Warnings.Add(warning);
+                log($"Reachability: {warning}");
+                return;
+            }
+
+            if (pruned.Removed == 0)
+            {
+                log(pruned.Note is null
+                    ? $"Reachability: all {before:N0} areas reachable from a player spawn"
+                    : $"Reachability: {pruned.Note}");
+                return;
+            }
+
+            log($"Reachability: removed {pruned.Removed:N0} of {before:N0} areas nothing can reach " +
+                $"({pruned.Islands:N0} groups in all, largest {pruned.LargestIsland:N0})");
+
+            // Reported even when pruning is on. A large stranded group is real ground the movement pass
+            // failed to link, which is a defect worth seeing rather than one worth deleting, and a
+            // silent prune would hide exactly the cases it correctly declines to touch.
+            if (pruned.Stranded > 0)
+            {
+                log($"              {pruned.Stranded:N0} left in place as structure rather than stray " +
+                    "samples - run `reachable` to see where");
+            }
         }
 
         private static void RunLadders(NavFile nav, BspVisibility vis, BspFile bsp, Result result,

@@ -164,6 +164,8 @@ namespace Meshwright
             Console.WriteLine("      -generateareas   add walkable ground the mesh is missing");
             Console.WriteLine("      -scratch         discard the mesh first (needs -generateareas)");
             Console.WriteLine("      -noladders -nomovement -nospots -novisibility   skip a stage");
+            Console.WriteLine("      -pruneunreachable    delete small groups of areas no player spawn");
+            Console.WriteLine("                           can reach; reported either way");
             Console.WriteLine("      -nosnipers -noencounters                        skip a spot grading");
             Console.WriteLine("      -maxviewdistance N   how far two areas can see each other (default 6000)");
             Console.WriteLine("      -nocompress      store full visibility instead of Valve's delta encoding");
@@ -249,6 +251,8 @@ namespace Meshwright
                 FromScratch = !Off("-scratch"),
                 Ladders = Off("-noladders"),
                 Movement = Off("-nomovement"),
+
+                PruneUnreachable = !Off("-pruneunreachable"),
                 Spots = Off("-nospots"),
                 SniperSpots = Off("-nosnipers"),
                 EncounterSpots = Off("-noencounters"),

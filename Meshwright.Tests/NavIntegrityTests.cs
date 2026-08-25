@@ -28,6 +28,32 @@ namespace Meshwright.Tests
         }
 
         [Fact]
+        public void ALadderNamingAnAreaThatIsNotThereIsCleared()
+        {
+            // The other direction of the area/ladder relationship. An area's list of ladders was
+            // already swept; a ladder's five area ids were not, so a ladder built against an area a
+            // later pass then discarded kept naming it - the same dangling reference, and the engine
+            // refuses it at load the same way.
+            var nav = new NavFile();
+            nav.Areas.Add(Area(1, 0, 0));
+
+            nav.Ladders.Add(new NavLadder
+            {
+                Id = 1,
+                BottomAreaId = 1,       // real
+                TopForwardAreaId = 77,  // gone
+                TopLeftAreaId = 78,     // gone
+            });
+
+            var pruned = NavIntegrity.Prune(nav);
+
+            Assert.Equal(2, pruned.LadderEndpoints);
+            Assert.Equal(1u, nav.Ladders[0].BottomAreaId);
+            Assert.Equal(0u, nav.Ladders[0].TopForwardAreaId);
+            Assert.Equal(0u, nav.Ladders[0].TopLeftAreaId);
+        }
+
+        [Fact]
         public void AConnectionToAnAreaThatIsNotThereIsRemoved()
         {
             var nav = new NavFile();

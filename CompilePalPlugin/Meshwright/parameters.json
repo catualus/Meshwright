@@ -28,6 +28,12 @@
     "Description": "Don't mark stairs or add step, jump, drop and lift connections."
   },
   {
+    "Name": "Delete unreachable areas",
+    "Parameter": " -pruneunreachable",
+    "Description": "Delete small groups of areas no player spawn can walk to - the stray samples the generator leaves inside sealed geometry, such as the nodraw top of a brush under a walkway. Off by default: measured against the mesh the game generates for the same map, most unreachable ground is real ground that simply did not get linked, and deleting it loses more than it cleans up. The count is reported either way.",
+    "Warning": "Destructive. Removes areas from the mesh; large stranded groups are always left alone."
+  },
+  {
     "Name": "Skip cover spots",
     "Parameter": " -nospots",
     "Description": "Skip finding hiding spots, grading sniper spots and building encounter spots. The game computes hiding spots during its own nav_generate, so a mesh without them is missing something it expects to find."
