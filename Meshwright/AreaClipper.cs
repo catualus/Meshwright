@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Meshwright
@@ -161,7 +162,7 @@ namespace Meshwright
 
             result.Clipped = clipped;
             result.Reclaimed = (float)reclaimed;
-            result.Discarded = DiscardSlivers(nav, firstGeneratedId);
+            result.Discarded = DiscardSlivers(nav, vis, firstGeneratedId);
             return result;
         }
 
@@ -173,7 +174,149 @@ namespace Meshwright
         /// is a dangling id, and the mesh format has no way to express that - it would simply be a link
         /// to whatever area happened to be loaded with that id next time, which is worse than the sliver.
         /// </summary>
-        private static int DiscardSlivers(NavFile nav, uint firstGeneratedId)
+        /// <summary>
+        /// Whether an area is somewhere a body could actually stand: clear of geometry at knee height,
+        /// and with real floor under it where it claims one.
+        ///
+        /// Both halves earn their place. Without the solid test, sparing thresholds brought back the
+        /// buried slivers this pass exists to remove and took the footprint inside solid from 0.25% to
+        /// 0.72%. Without the floor test it kept slivers left hanging off a ledge by the clip, which
+        /// cost nothing on the solid measure and took mean height error from 0.6 to 1.5 with a worst
+        /// case of 426 units.
+        /// </summary>
+        private static bool Standable(BspVisibility vis, NavArea area)
+        {
+            var b = NavGeometry.GetBounds(area);
+
+            for (int i = 1; i <= 3; i++)
+            {
+                for (int j = 1; j <= 3; j++)
+                {
+                    float x = b.MinX + b.Width * i / 4f;
+                    float y = b.MinY + b.Depth * j / 4f;
+                    float claimed = NavGeometry.SurfaceZ(area, x, y);
+
+                    if (vis.IsPointSolid(x, y, claimed + NavConstants.StepHeight, BspVisibility.GenerationMask))
+                        return false;
+
+                    if (!StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
+                            NavConstants.StepHeight * 2f, out _))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Takes back out of the doomed set anything that is the only way between two of its
+        /// neighbours.
+        ///
+        /// This pass deletes an area and every connection naming it, and it runs after the connection
+        /// graph has been built, so a narrow area that happens to be a route is a cut in that graph
+        /// rather than a tidy-up. A door threshold is exactly that shape: the ground in a doorway is as
+        /// deep as the wall is thick, so it clips down to a few units and reads as a sliver, while
+        /// being the only thing joining the two rooms.
+        ///
+        /// Measured on rp_downtown_meowy, one doorway came out as an area 82 by 4 units connected to
+        /// the room on each side. Discarding it left the two rooms with no path between them at all,
+        /// which is how "some doors do not get connected" looked from in game: the doorway was walkable,
+        /// the areas either side were both present, and nothing joined them.
+        ///
+        /// The test is deliberately local rather than a full articulation-point search. An area is
+        /// spared when two of its surviving neighbours are not themselves directly connected, which is
+        /// what a corridor looks like and what a sliver pinned against a wall does not: that one either
+        /// touches a single neighbour, or touches neighbours that already abut each other and can route
+        /// around it.
+        /// </summary>
+        private static void Spare(NavFile nav, BspVisibility vis, HashSet<uint> doomed)
+        {
+            var neighbours = new Dictionary<uint, HashSet<uint>>(nav.Areas.Count);
+
+            foreach (var area in nav.Areas)
+                neighbours[area.Id] = [];
+
+            foreach (var area in nav.Areas)
+            {
+                foreach (var list in area.Connections)
+                {
+                    foreach (uint to in list)
+                    {
+                        if (!neighbours.TryGetValue(to, out var back))
+                            continue;
+
+                        neighbours[area.Id].Add(to);
+                        back.Add(area.Id);
+                    }
+                }
+            }
+
+            var byId = new Dictionary<uint, NavArea>(nav.Areas.Count);
+
+            foreach (var area in nav.Areas)
+                byId.TryAdd(area.Id, area);
+
+            var spared = new List<uint>();
+
+            foreach (uint id in doomed)
+            {
+                // A route goes in one side and out the other. A sliver pinned against a wall has the
+                // wall on one side of it, so whatever it touches, it does not touch it on both.
+                //
+                // Without this the rule was far too generous: on rp_downtown_meowy it kept 973 areas
+                // and took the footprint sitting inside solid from 0.25% to 0.72%, which is most of
+                // what this whole pass exists to prevent. Requiring opposite sides is what separates a
+                // threshold from a sliver that merely happens to touch two things.
+                if (!byId.TryGetValue(id, out var self))
+                    continue;
+
+                bool northSouth = self.Connections[NavGeometry.North].Count > 0
+                               && self.Connections[NavGeometry.South].Count > 0;
+                bool eastWest = self.Connections[NavGeometry.East].Count > 0
+                             && self.Connections[NavGeometry.West].Count > 0;
+
+                if (!northSouth && !eastWest)
+                    continue;
+
+                // And it has to be somewhere a body could actually be. Narrow was only ever a proxy
+                // for buried, and it is a poor one: this pass leaves a four unit sliver wherever an
+                // area was almost entirely inside geometry, and those are what it is meant to remove,
+                // but the same four units in a doorway is a floor. Asking the geometry directly
+                // separates them, where every rule based on shape alone kept hundreds of buried
+                // slivers along with the thresholds.
+                if (!Standable(vis, self))
+                    continue;
+
+                // Only neighbours that will still be there afterwards can carry the route.
+                var living = neighbours[id].Where(n => !doomed.Contains(n)).ToList();
+                if (living.Count < 2)
+                    continue;
+
+                bool joinsApart = false;
+
+                for (int i = 0; i < living.Count && !joinsApart; i++)
+                {
+                    for (int j = i + 1; j < living.Count; j++)
+                    {
+                        if (neighbours[living[i]].Contains(living[j]))
+                            continue;
+
+                        joinsApart = true;
+                        break;
+                    }
+                }
+
+                if (joinsApart)
+                    spared.Add(id);
+            }
+
+            foreach (uint id in spared)
+                doomed.Remove(id);
+        }
+
+        private static int DiscardSlivers(NavFile nav, BspVisibility vis, uint firstGeneratedId)
         {
             var doomed = new HashSet<uint>();
 
@@ -193,6 +336,11 @@ namespace Meshwright
                 if (b.Width < MinimumUsableWidth || b.Depth < MinimumUsableWidth)
                     doomed.Add(area.Id);
             }
+
+            if (doomed.Count == 0)
+                return 0;
+
+            Spare(nav, vis, doomed);
 
             if (doomed.Count == 0)
                 return 0;
