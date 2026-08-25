@@ -180,13 +180,27 @@ namespace Meshwright
                 }
             }
 
-            /// <summary>The area containing a point whose surface is nearest a reference height.</summary>
+            /// <summary>
+            /// The area containing a point whose surface is nearest a reference height.
+            ///
+            /// Reads one cell's list directly instead of going through <see cref="Overlapping"/>, which
+            /// allocates a HashSet per call to de-duplicate areas that straddle a cell boundary. A point
+            /// falls in exactly one cell and an area appears in a cell's list once, so there is nothing
+            /// to de-duplicate and nothing to allocate.
+            ///
+            /// That matters because of where this is called from: the sampling flood asks it for every
+            /// cell it accepts, to decide whether the mesh already covers that ground, on every core at
+            /// once.
+            /// </summary>
             public int FindAt(float x, float y, float referenceZ, float tolerance)
             {
+                if (!cells.TryGetValue((Cell(x), Cell(y)), out var list))
+                    return -1;
+
                 int best = -1;
                 float bestDelta = float.MaxValue;
 
-                foreach (int i in Overlapping(x, y, x, y))
+                foreach (int i in list)
                 {
                     if (!Contains(areas[i], x, y))
                         continue;

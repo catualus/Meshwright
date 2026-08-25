@@ -343,6 +343,17 @@ namespace Meshwright
         /// multi-cluster area be tested against another area with one bit test per target cluster
         /// instead of a full cross product. Null when there is no vis data or no cluster resolved.
         /// </summary>
+        /// <summary>
+        /// The union of the PVS rows for a set of clusters.
+        ///
+        /// Allocates a row per call and is called once per area while the visibility filter is built,
+        /// which looks worth memoising on the cluster set: neighbouring areas share one constantly, and
+        /// on a large map this is about twenty megabytes of short-lived arrays.
+        ///
+        /// Measured before writing it, and it is not worth having. Building the filter and running the
+        /// whole pair funnel over a 19,577-area map takes around 300ms, against 162 seconds for the
+        /// trace those pairs feed. The entire stage is 0.2% of the pass and this is a fraction of that.
+        /// </summary>
         public byte[]? MergeVisible(short[] clusters)
         {
             if (pvs is null || clusters.Length == 0)

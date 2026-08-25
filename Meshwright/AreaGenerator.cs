@@ -356,10 +356,10 @@ namespace Meshwright
                 }
 
                 float? floor = null;
-                foreach (float z in world.FloorsIn(cell.Gx, cell.Gy))
+                foreach (var surface in world.FloorsIn(cell.Gx, cell.Gy))
                 {
-                    if (MathF.Abs(z - cz) > 48f) continue;
-                    floor = z;
+                    if (MathF.Abs(surface.Position.Z - cz) > 48f) continue;
+                    floor = surface.Position.Z;
                     break;
                 }
 
@@ -585,8 +585,9 @@ namespace Meshwright
                 int gx = cell.Gx + dgx;
                 int gy = cell.Gy + dgy;
 
-                foreach (float z in world.FloorsIn(gx, gy))
+                foreach (var surface in world.FloorsIn(gx, gy))
                 {
+                    float z = surface.Position.Z;
                     float climb = z - cell.Z;
                     if (climb > NavConstants.JumpCrouchHeight || climb < -NavConstants.DeathDrop)
                         continue;
@@ -636,8 +637,10 @@ namespace Meshwright
             float ceiling = from + NavConstants.StepHeight;
             float floor = candidate + NavConstants.StepHeight;
 
-            foreach (float other in world.FloorsIn(gx, gy))
+            foreach (var surface in world.FloorsIn(gx, gy))
             {
+                float other = surface.Position.Z;
+
                 if (other > floor && other <= ceiling)
                     return true;
             }
@@ -684,16 +687,19 @@ namespace Meshwright
                 return gx >= 0 && gy >= 0 && gx < Columns && gy < Rows;
             }
 
-            public float[] FloorsIn(int gx, int gy)
-            {
-                var surfaces = SurfacesIn(gx, gy);
-                var heights = new float[surfaces.Length];
-
-                for (int i = 0; i < surfaces.Length; i++)
-                    heights[i] = surfaces[i].Position.Z;
-
-                return heights;
-            }
+        /// <summary>
+        /// The floor heights in a column, read straight off the cached surfaces.
+        ///
+        /// This used to copy them into a fresh float[] on every call, and it is called eight times per
+        /// cell the flood expands: four in <see cref="Neighbours"/> and four more in
+        /// <see cref="Shadowed"/>, for the same four columns. The surfaces themselves are already
+        /// cached, so the array was pure garbage generated at the busiest point in the sampler, on
+        /// every core at once.
+        ///
+        /// Returning the cached array and letting callers read Position.Z costs nothing and allocates
+        /// nothing. The array is the cache's own, so it must not be written to; every caller only reads.
+        /// </summary>
+        public Surface[] FloorsIn(int gx, int gy) => SurfacesIn(gx, gy);
 
             /// <summary>
             /// Every floor in a column with the normal of each, resolved in the same pass that finds it.
@@ -960,11 +966,11 @@ namespace Meshwright
 
             bool foundFloor = false;
             float floorZ = start.Z;
-            foreach (float z in world.FloorsIn(startCell.Gx, startCell.Gy))
+            foreach (var surface in world.FloorsIn(startCell.Gx, startCell.Gy))
             {
-                if (MathF.Abs(z - start.Z) > 48f) continue;
+                if (MathF.Abs(surface.Position.Z - start.Z) > 48f) continue;
                 foundFloor = true;
-                floorZ = z;
+                floorZ = surface.Position.Z;
                 break;
             }
 
