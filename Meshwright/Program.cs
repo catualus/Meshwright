@@ -595,6 +595,9 @@ namespace Meshwright
                 return 1;
             }
 
+            // What was handed in, so an empty result can be told from an empty input below.
+            int loadedAreas = nav.Areas.Count;
+
             // Set unconditionally, not only when creating a mesh. This is what the engine checks a
             // .nav's stored size against to decide whether it is stale for the BSP it is loading, and
             // nothing else in the pipeline revisits it - so finishing an existing mesh without touching
@@ -610,6 +613,26 @@ namespace Meshwright
 
             foreach (string warning in result.Warnings)
                 Console.WriteLine($"warn  {warning}");
+
+            // Refused rather than written.
+            //
+            // An empty mesh is never a result anybody wanted, and writing one over a mesh that had
+            // areas in it is destroying the only copy. The way to reach here is not exotic:
+            // -generateareas -scratch discards the loaded mesh and then floods from player spawns, so
+            // on a map that has none - a background map, an arena, anything not built for players to
+            // spawn in - the flood starts nowhere and the run finishes successfully with nothing.
+            //
+            // Left as an error with a non-zero exit rather than a warning, because a warning does not
+            // stop the write and the write is the damage. Deleting the .nav is one command away if
+            // that is genuinely what is wanted.
+            if (nav.Areas.Count == 0 && loadedAreas > 0)
+            {
+                Console.Error.WriteLine(
+                    $"error: this run produced a mesh with no areas, and {Path.GetFileName(outPath)} " +
+                    $"currently has {loadedAreas:N0}. Refusing to overwrite it with nothing.");
+
+                return 1;
+            }
 
             // Through a temp file: a half-written nav is worse than the old one, and writing in place
             // over the mesh being finished means a crash mid-save destroys the input as well as the

@@ -323,6 +323,25 @@ namespace Meshwright
                     result.Warnings.Add(
                         "Generated areas are experimental and unverified in game - review before shipping.");
                 }
+                else
+                {
+                    // A run that generated nothing at all is reported as a warning rather than left to
+                    // a line of the log, because it does not look like a failure anywhere else: the
+                    // pipeline continues, every later pass succeeds over an empty or unchanged mesh, a
+                    // valid .nav is written, and the exit code is zero. In a batch it scrolls past
+                    // entirely.
+                    //
+                    // The seed count separates the two causes, which want different fixes. No seeds at
+                    // all means the flood had nowhere to start - the map has no player spawns and there
+                    // was no existing mesh to spread out from - and no amount of tuning changes that.
+                    // Seeds but no new areas means the flood ran and found nothing the mesh did not
+                    // already cover, which on a finished map is the correct answer.
+                    result.Warnings.Add(areas.Seeds == 0
+                        ? "Nothing was generated: the flood had no seeds. The map has no player spawns, " +
+                          "and there was no existing mesh, ladder or lift to start from."
+                        : $"Nothing was generated: the flood reached {areas.Visited:N0} cells from " +
+                          $"{areas.Seeds:N0} seeds and found no ground the mesh does not already cover.");
+                }
             }
 
             NavConcurrency.ThrowIfCancelled();
@@ -417,6 +436,12 @@ namespace Meshwright
             // a chance to leave an id pointing at something that no longer exists, and nothing on this
             // side of the tooling can see one: it survives a byte-for-byte round trip and passes every
             // quality measure here. The engine notices, loudly, at load.
+            if (nav.Areas.Count == 0)
+            {
+                result.Warnings.Add(
+                    "The finished mesh has no areas in it. Nothing can path anywhere on this map.");
+            }
+
             result.Integrity = NavIntegrity.Prune(nav);
 
             if (result.Integrity.Total > 0)
