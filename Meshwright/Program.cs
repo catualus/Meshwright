@@ -20,6 +20,8 @@ namespace Meshwright
                 return 1;
             }
 
+            using var interrupt = HandleCtrlC();
+
             try
             {
                 // Global, not per-command: every pass in every subcommand reads NavConcurrency.MaxThreads
@@ -73,11 +75,84 @@ namespace Meshwright
                     _ => UnknownCommand(args[0]),
                 };
             }
+            catch (OperationCanceledException)
+            {
+                // Not an error. The passes stop where they are and nothing is written, which is the
+                // whole point of asking - a half-finished mesh would be worse than the one already
+                // there. 130 is the conventional exit code for a run ended by an interrupt, and it is
+                // non-zero, so a host checking exit codes correctly reads this as "did not finish".
+                Console.Error.WriteLine("cancelled.");
+                return 130;
+            }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"error: {ex.Message}");
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// Makes Ctrl+C stop the run rather than kill the process.
+        ///
+        /// **The machinery for this already existed and nothing switched it on.** Every parallel pass
+        /// already takes its <see cref="System.Threading.CancellationToken"/> from
+        /// <see cref="NavConcurrency"/>, and <see cref="NavPipeline"/> already checks between passes -
+        /// eleven call sites in all, every one of them reading a token that no code anywhere ever
+        /// cancelled. Ctrl+C therefore did what it does to any program that ignores it: killed the
+        /// process outright, part way through whatever it was doing, leaving the temporary file
+        /// <see cref="Generate"/> writes through behind on disk.
+        ///
+        /// That matters most on the pass it is least convenient to lose. Visibility is around two
+        /// thirds of a run and takes minutes on a large map, so "I gave it the wrong view distance" or
+        /// "I meant to pass -novisibility" currently costs the whole run and cannot be interrupted
+        /// cleanly.
+        ///
+        /// The second press is deliberately left to the runtime. Someone pressing it again is saying
+        /// the graceful stop is not happening fast enough, and the honest answer to that is to stop
+        /// immediately rather than to keep asking them to wait.
+        /// </summary>
+        private static IDisposable HandleCtrlC()
+        {
+            var source = new System.Threading.CancellationTokenSource();
+            NavConcurrency.CancellationToken = source.Token;
+
+            ConsoleCancelEventHandler handler = (_, e) =>
+            {
+                if (source.IsCancellationRequested)
+                    return;     // second press: let it terminate the process
+
+                e.Cancel = true;
+                Console.Error.WriteLine();
+                Console.Error.WriteLine("      stopping - finishing the current step. Press Ctrl+C again to quit now.");
+
+                source.Cancel();
+            };
+
+            Console.CancelKeyPress += handler;
+
+            return new Unsubscribe(() =>
+            {
+                Console.CancelKeyPress -= handler;
+                NavConcurrency.CancellationToken = System.Threading.CancellationToken.None;
+                source.Dispose();
+            });
+        }
+
+        private sealed class Unsubscribe(Action onDispose) : IDisposable
+        {
+            public void Dispose() => onDispose();
+        }
+
+        /// <summary>
+        /// Removes a file, swallowing the failure. Only for cleaning up after an error that is already
+        /// on its way out - a leftover temporary is a nuisance, and failing to remove one is not worth
+        /// replacing the real exception with.
+        /// </summary>
+        private static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         /// <summary>
@@ -376,9 +451,22 @@ namespace Meshwright
             // Through a temp file: a half-written nav is worse than the old one, and writing in place
             // over the mesh being finished means a crash mid-save destroys the input as well as the
             // output.
+            //
+            // Cleaned up on the way out, however that happens. A run interrupted mid-save used to leave
+            // the partial file sitting next to the real mesh, where it is both confusing and - on a
+            // large analysed map - tens of megabytes of rubbish nothing will ever delete.
             string temporary = outPath + ".tmp";
-            nav.Save(temporary);
-            File.Move(temporary, outPath, overwrite: true);
+
+            try
+            {
+                nav.Save(temporary);
+                File.Move(temporary, outPath, overwrite: true);
+            }
+            catch
+            {
+                TryDelete(temporary);
+                throw;
+            }
 
             sw.Stop();
 

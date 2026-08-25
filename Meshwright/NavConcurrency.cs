@@ -33,12 +33,18 @@ namespace Meshwright
         }
 
         /// <summary>
-        /// The token every `Parallel.For`/`Parallel.ForEach` pass polls between iterations. Defaults to
-        /// <see cref="CancellationToken.None"/>, so nothing here behaves differently unless a caller
-        /// (currently <c>MeshwrightProcess.Run</c>, the CompilePal compile step) opts in. Without this, a
-        /// pass that has already started - the visibility trace can run several minutes on a large map -
-        /// ran to completion regardless of an outer cancellation request, since the only place that was
-        /// ever checked was between whole passes, not inside one.
+        /// The token every `Parallel.For`/`Parallel.ForEach` pass polls between iterations, and that
+        /// <see cref="ThrowIfCancelled"/> checks at the seams between passes.
+        ///
+        /// Defaults to <see cref="CancellationToken.None"/>, so a library caller that wants no
+        /// cancellation gets none and pays nothing. The command line sets it from Ctrl+C; a host
+        /// embedding this sets it from whatever its own cancel button raises.
+        ///
+        /// Both halves are needed and neither is sufficient. Checking only between passes cannot
+        /// interrupt the visibility trace, which is two thirds of a run and minutes long on a large map;
+        /// checking only inside the parallel loops leaves the sequential seams - loading, merging,
+        /// writing - unresponsive. <see cref="Options"/> carries the token into every parallel pass
+        /// automatically, so a pass gets the inner half simply by using it.
         /// </summary>
         public static CancellationToken CancellationToken { get; set; } = CancellationToken.None;
 
@@ -53,8 +59,9 @@ namespace Meshwright
         /// The between-passes check, for the sequential seams the parallel loops above do not cover.
         ///
         /// <see cref="NavPipeline"/> calls this between every pass. It reads the same token the parallel
-        /// options carry, so a host that sets one gets both halves of cancellation - inside a long pass
-        /// and between them - rather than having to remember to check the token itself at every seam.
+        /// options carry, so a caller that sets one gets both halves of cancellation - inside a long
+        /// pass and between them - rather than having to remember to check the token itself at every
+        /// seam.
         /// </summary>
         public static void ThrowIfCancelled() => CancellationToken.ThrowIfCancellationRequested();
     }
