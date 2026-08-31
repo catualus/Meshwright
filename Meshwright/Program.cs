@@ -335,6 +335,7 @@ namespace Meshwright
             Console.WriteLine("  meshwright vis-count        <file.nav> <id> [id...]        Resolved visible counts");
             Console.WriteLine("  meshwright sample-rays      <file.bsp> <file.nav> <n> [seed]  Sight lines + verdicts");
             Console.WriteLine("  meshwright probe            <file.bsp> x1 y1 z1 x2 y2 z2   Trace one segment");
+            Console.WriteLine("  meshwright floors           <file.bsp> x y                Every surface in one column");
             Console.WriteLine("  meshwright stairs           <file.bsp> <file.nav>          Score stair detection");
             Console.WriteLine("  meshwright diff-connections <before.nav> <after.nav> <n>   Added links as endpoints");
             Console.WriteLine("  meshwright compare-areas    <reference.nav> <candidate.nav> [-reachable <map.bsp>]");
@@ -2058,8 +2059,13 @@ namespace Meshwright
                     : alsoFound ? $"DISAGREES (line finder says {viaLine:F1})"
                                 : "DISAGREES (line finder finds nothing here)";
 
+                // Nodraw is reported rather than folded into "walkable", because the two are separate
+                // verdicts on the same surface and a column full of "walkable false" would hide which
+                // one applied: the slope test is about shape, this is about whether the surface is
+                // meant to be there at all.
                 Console.WriteLine($"  z {s.Z,9:F1}  normal ({s.Normal.X,6:F2} {s.Normal.Y,6:F2} " +
-                                  $"{s.Normal.Z,6:F2})  walkable {s.Normal.Z >= NavConstants.SlopeLimit,-5}  {agreement}");
+                                  $"{s.Normal.Z,6:F2})  walkable {s.Normal.Z >= NavConstants.SlopeLimit,-5}  " +
+                                  $"{(s.Nodraw ? "NODRAW" : "drawn "),-6}  {agreement}");
             }
 
             return 0;

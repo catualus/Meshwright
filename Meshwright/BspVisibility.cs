@@ -92,7 +92,7 @@ namespace Meshwright
 
         public static BspVisibility Load(string path, BspFile bsp)
         {
-            var vis = new BspVisibility { planes = bsp.Planes };
+            var vis = new BspVisibility { planes = bsp.Planes, texInfos = bsp.TexInfos };
 
             using var stream = File.OpenRead(path);
             using var r = new BinaryReader(stream);
@@ -130,6 +130,13 @@ namespace Meshwright
 
         private BspFile.Brush[] brushes = [];
         private BspFile.BrushSide[] brushSides = [];
+
+        /// <summary>
+        /// Surface flags per texinfo, so a trace can report what the face it landed on is made of and
+        /// not merely where it is. Empty for a visibility set built by <see cref="FromGeometry"/>, which
+        /// is what makes <see cref="SurfaceFlagsOf"/> answer nothing rather than crash there.
+        /// </summary>
+        private BspFile.TexInfo[] texInfos = [];
 
         private void ReadLeafBrushes(BinaryReader r, (int Offset, int Length, int Version) lump, BspFile bsp)
         {
@@ -459,6 +466,16 @@ namespace Meshwright
         /// </summary>
         public const int GroundMask = GenerationMask & ~ContentsMonsterClip;
 
+        /// <summary>
+        /// <c>SURF_NODRAW</c> from bspflags.h - a face the renderer skips.
+        ///
+        /// A texinfo flag rather than a brush content, which is why nothing here could see it before:
+        /// contents describe a volume and every nodraw brush is <c>CONTENTS_SOLID</c> like any other, so
+        /// a mask can no more exclude nodraw than it can exclude brick. The flag lives on the *face*,
+        /// and a trace has to report which face it hit for the question to be answerable at all.
+        /// </summary>
+        public const int SurfNodraw = 0x0080;
+
         /// <summary>Brush entities that block sight. Null until <see cref="AttachModels"/> is called.</summary>
         private BspModels? entityModels;
 
@@ -495,8 +512,9 @@ namespace Meshwright
         /// same affordability reason as brush entities - by that point the ray has already survived
         /// every piece of world and entity geometry in its path.
         ///
-        /// Static props are not modelled: nothing here reads the static prop lump, so a prop that
-        /// blocks a doorway in game is invisible to this.
+        /// Static props are traced last of all, against the collision hulls read from each model's
+        /// `.phy`. A prop whose model could not be found contributes nothing and is invisible to this;
+        /// `meshwright props` reports how many there are.
         /// </summary>
         public bool IsLineClear(BspFile.Vector3 a, BspFile.Vector3 b) => IsLineClear(a, b, MaskBlockLos);
 
@@ -643,10 +661,24 @@ namespace Meshwright
         /// </summary>
         public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
             out BspFile.Vector3 point, out BspFile.Vector3 normal, out bool onDisplacement)
+            => TryTraceSurface(a, b, mask, out point, out normal, out onDisplacement, out _);
+
+        /// <summary>
+        /// Same trace, also reporting the surface flags of the face that stopped it - see
+        /// <see cref="SurfNodraw"/> for the one this exists to answer.
+        ///
+        /// Only brush faces carry flags. A displacement or a static prop reports zero, which is correct
+        /// rather than merely convenient: both are rendered geometry by construction, so "no flags" and
+        /// "an ordinary drawn face" are the same answer for them.
+        /// </summary>
+        public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
+            out BspFile.Vector3 point, out BspFile.Vector3 normal, out bool onDisplacement,
+            out int surfaceFlags)
         {
             point = b;
             normal = new BspFile.Vector3(0, 0, 1);
             onDisplacement = false;
+            surfaceFlags = 0;
 
             float best = float.MaxValue;
             bool found = false;
@@ -658,6 +690,7 @@ namespace Meshwright
                 {
                     best = world.Fraction;
                     normal = world.Normal;
+                    surfaceFlags = world.SurfaceFlags;
                     found = true;
                 }
             }
@@ -691,6 +724,7 @@ namespace Meshwright
 
                     best = entity.Fraction;
                     normal = entity.Normal;
+                    surfaceFlags = entity.SurfaceFlags;
                     found = true;
                     onDisplacement = false;
                 }
@@ -702,6 +736,7 @@ namespace Meshwright
             {
                 best = dispFraction;
                 normal = dispNormal;
+                surfaceFlags = 0;
                 found = true;
                 onDisplacement = true;
             }
@@ -715,6 +750,7 @@ namespace Meshwright
             {
                 best = propFraction;
                 normal = propNormal;
+                surfaceFlags = 0;
                 found = true;
                 onDisplacement = false;
             }
@@ -780,7 +816,8 @@ namespace Meshwright
         /// skipped the tree would not have caught it.
         /// </summary>
         internal static BspVisibility FromGeometry(BspFile.Plane[] planes, Node[] nodes, Leaf[] leafs,
-            BspFile.Brush[] brushes, BspFile.BrushSide[] brushSides, int[]?[] leafBrushes)
+            BspFile.Brush[] brushes, BspFile.BrushSide[] brushSides, int[]?[] leafBrushes,
+            BspFile.TexInfo[]? texInfos = null)
             => new()
             {
                 planes = planes,
@@ -789,6 +826,7 @@ namespace Meshwright
                 brushes = brushes,
                 brushSides = brushSides,
                 leafBrushes = leafBrushes,
+                texInfos = texInfos ?? [],
             };
 
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
@@ -1080,8 +1118,19 @@ namespace Meshwright
             return found;
         }
 
-        /// <summary>A surface found in a column: how high it is and which way it faces.</summary>
-        public readonly record struct FloorSample(float Z, BspFile.Vector3 Normal);
+        /// <summary>A surface found in a column: how high it is, which way it faces, what it is made of.</summary>
+        public readonly record struct FloorSample(float Z, BspFile.Vector3 Normal, int SurfaceFlags)
+        {
+            /// <summary>
+            /// Whether the face is one the renderer skips.
+            ///
+            /// A floor nobody can see is nearly always a floor nobody is meant to stand on: the top of a
+            /// brush sealed under a walkway, the inside of a structure, the base of a cavity. It is
+            /// still solid, and must still stop a trace and shadow the floors beneath it - this says
+            /// only that it is not ground.
+            /// </summary>
+            public bool Nodraw => (SurfaceFlags & SurfNodraw) != 0;
+        }
 
         /// <summary>Whether a point is inside brush contents matching the mask.</summary>
         public bool IsPointSolid(float x, float y, float z, int mask)
@@ -1119,10 +1168,11 @@ namespace Meshwright
                 var from = new BspFile.Vector3(x, y, cursor);
                 var to = new BspFile.Vector3(x, y, bottomZ);
 
-                if (!TryTraceSurface(from, to, GroundMask, out var point, out var normal))
+                if (!TryTraceSurface(from, to, GroundMask, out var point, out var normal, out _,
+                        out int flags))
                     break;
 
-                into[count++] = new FloorSample(point.Z, normal);
+                into[count++] = new FloorSample(point.Z, normal, flags);
 
                 // Descend through whatever was just landed on. Stepping a fixed amount below the face
                 // is not enough on its own - a floor slab is usually thicker than any fixed step worth
@@ -1139,7 +1189,20 @@ namespace Meshwright
         {
             public float Fraction;
             public BspFile.Vector3 Normal;
+
+            /// <summary>
+            /// Surface flags of the face the segment entered through, or zero when the face is not
+            /// known - a BSP split plane rather than a brush side, a leaf with no brush list, a
+            /// displacement, a prop. Zero therefore means "an ordinary drawn surface as far as this can
+            /// tell", which is the reading every consumer wants: an unknown face must not be treated as
+            /// nodraw and thrown away.
+            /// </summary>
+            public int SurfaceFlags;
         }
+
+        /// <summary>Surface flags for a brush side, or zero if it names no usable texinfo.</summary>
+        private int SurfaceFlagsOf(BspFile.BrushSide side)
+            => (uint)side.TexInfo < (uint)texInfos.Length ? texInfos[side.TexInfo].Flags : 0;
 
         /// <summary>
         /// Walks the tree front to back recording where the segment first enters blocking contents and
@@ -1204,6 +1267,7 @@ namespace Meshwright
                     hit.Fraction = mid;
                     hit.Normal = new BspFile.Vector3(
                         sign * plane.Normal.X, sign * plane.Normal.Y, sign * plane.Normal.Z);
+                    hit.SurfaceFlags = 0;
                     return true;
                 }
 
@@ -1225,6 +1289,7 @@ namespace Meshwright
             {
                 hit.Fraction = startFraction;
                 hit.Normal = new BspFile.Vector3(0, 0, 1);
+                hit.SurfaceFlags = 0;
                 return true;
             }
 
@@ -1298,6 +1363,7 @@ namespace Meshwright
             bool found = false;
             float best = float.MaxValue;
             var bestNormal = new BspFile.Vector3(0, 0, 1);
+            int bestFlags = 0;
 
             foreach (int index in list)
             {
@@ -1309,6 +1375,7 @@ namespace Meshwright
                 float exit = 1f;
                 bool startsOutside = false;
                 var enterNormal = new BspFile.Vector3(0, 0, 1);
+                int enterFlags = 0;
 
                 for (int i = 0; i < brush.NumSides; i++)
                 {
@@ -1332,7 +1399,11 @@ namespace Meshwright
 
                     if (d1 > d2)
                     {
-                        if (f > enter) { enter = f; enterNormal = plane.Normal; }
+                        // The entering side is the one the surface normal already comes from, so its
+                        // texinfo is the face that was actually crossed rather than any face of the
+                        // brush. Read here for the same reason the normal is: this is the only point
+                        // that knows which side won.
+                        if (f > enter) { enter = f; enterNormal = plane.Normal; enterFlags = SurfaceFlagsOf(side); }
                     }
                     else if (f < exit)
                     {
@@ -1351,6 +1422,7 @@ namespace Meshwright
 
                     best = 0f;
                     bestNormal = new BspFile.Vector3(0, 0, 1);
+                    bestFlags = 0;
                     found = true;
                     continue;
                 }
@@ -1370,6 +1442,7 @@ namespace Meshwright
 
                 best = enter;
                 bestNormal = enterNormal;
+                bestFlags = enterFlags;
                 found = true;
             }
 
@@ -1378,6 +1451,7 @@ namespace Meshwright
 
             hit.Fraction = best;
             hit.Normal = bestNormal;
+            hit.SurfaceFlags = bestFlags;
             return true;
         }
 

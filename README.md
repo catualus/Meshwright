@@ -328,6 +328,15 @@ A missing hull is left missing rather than replaced with the model's bounding bo
 measured worse: the models that lack a `.phy` are typically bushes, tree cards and skybox props, and a
 box around those deletes the ground beside them.
 
+**Ground is not built on `nodraw`.** A face the renderer skips is treated as solid but not as
+somewhere to stand, which is stricter than the engine. `nav_generate` builds on nodraw as readily as
+on brick and gets away with it, because its flood starts at a player spawn and has no way into the
+places nodraw floors are - mappers use it exactly where nothing will be seen, which is mostly where
+nothing can stand. The sampler here reaches further, so it needs the guard explicitly. The cost falls
+where a nodraw floor is visibly covered by something that could not be resolved, an unfound prop model
+above all; `meshwright props <bsp>` reports that case and `meshwright floors <bsp> x y` shows which
+surfaces in a column are nodraw.
+
 **Generated meshes are more fragmented than the engine's.** Props are solid here, so an area cannot
 grow across one and ends at it instead, and slivers too narrow to walk are discarded. The mesh is
 more truthful and a bot will not walk into scenery, but it is larger and more broken up.

@@ -481,6 +481,28 @@ namespace Meshwright
         private static (int, int, int) Key(Cell c) => (c.Gx, c.Gy, (int)MathF.Round(c.Z / 8f));
 
         /// <summary>
+        /// One expansion of the flood from one cell, for tests.
+        ///
+        /// The flood's rules are the whole of what decides where a mesh may exist, and until this
+        /// existed none of them could be exercised without a real BSP on disk. <see cref="Generate"/>
+        /// needs a <see cref="BspFile"/> for bounds, spawns, ladders and lifts, none of which the
+        /// question "may the sampler step from here to there" depends on. This is the smallest seam that
+        /// asks it directly, and deliberately goes through <see cref="Neighbours"/> and the real
+        /// <see cref="World"/> rather than reimplementing either.
+        /// </summary>
+        internal static List<(int Gx, int Gy, float Z)> SampleNeighbours(BspVisibility vis,
+            BspFile.Vector3 mins, BspFile.Vector3 maxs, int gx, int gy, float z)
+        {
+            var world = new World(vis, mins, maxs);
+            var found = new List<(int, int, float)>();
+
+            foreach (var cell in Neighbours(world, new Cell(gx, gy, z)))
+                found.Add((cell.Gx, cell.Gy, cell.Z));
+
+            return found;
+        }
+
+        /// <summary>
         /// Where the flood starts.
         ///
         /// The existing mesh is included so the fill can spread off its edges and travel across it.
@@ -631,6 +653,41 @@ namespace Meshwright
                     if (Shadowed(world, gx, gy, z, cell.Z))
                         continue;
 
+                    // And that a body can actually be dragged from here to there.
+                    //
+                    // Everything above this line reasons about the destination column alone: is there a
+                    // floor, is it in reach, is there room to stand, is another floor of the same column
+                    // in the way. None of it consults the space between the two samples, so the flood
+                    // was free to walk through anything standing in it. A wall thinner than the 25 unit
+                    // sampling step has both of its sides in adjacent columns and nothing at all in
+                    // between, which is most of the walls on a map - so the flood stepped straight
+                    // through them into whatever they were holding back.
+                    //
+                    // That is how mesh ends up sealed inside the world. A cavity is only ever closed
+                    // laterally: the nodraw top of a brush under a suspended walkway, the void behind a
+                    // facade, the inside of a hollow structure all have ordinary standable ground with
+                    // ordinary standing headroom above it, so ClearanceAt passes them without hesitation
+                    // and the checks above have nothing to object to. Once one cell of such a place is
+                    // accepted the flood spreads through the whole of it, because inside the cavity the
+                    // sampling really is continuous.
+                    //
+                    // Valve's SampleStep sweeps the generation hull from the node it is standing on to
+                    // each candidate before accepting it, and this is that sweep. Traversability.CanStep
+                    // already existed here for exactly this question - it is what decides whether two
+                    // accepted nodes may share an area - and was simply never asked during the flood,
+                    // which is the pass where being wrong costs a node rather than a link.
+                    //
+                    // Drops survive it. The sweep runs flat at the height of the *higher* of the two
+                    // surfaces, so stepping off a ledge sweeps through the air above the fall and is
+                    // clear; what it refuses is a sideways step to ground that is underneath something,
+                    // which is the shape of every sealed floor and of no legitimate walk.
+                    //
+                    // Left until last on purpose. It is the only test here that costs a trace - the
+                    // three above it are cached column lookups - so it is only paid for candidates that
+                    // have already survived them.
+                    if (!world.CanReach(cell, gx, gy, z))
+                        continue;
+
                     yield return new Cell(gx, gy, z);
                 }
             }
@@ -699,6 +756,22 @@ namespace Meshwright
                 return gx >= 0 && gy >= 0 && gx < Columns && gy < Rows;
             }
 
+            /// <summary>The world position of a sampled cell.</summary>
+            public BspFile.Vector3 PositionOf(int gx, int gy, float z)
+                => new(mins.X + gx * StepSize, mins.Y + gy * StepSize, z);
+
+            /// <summary>
+            /// Whether a walker could get from one sampled cell to a floor in the column beside it,
+            /// swept as a body rather than inferred from the two ends.
+            ///
+            /// Deliberately uncached, unlike the column lookups around it. A cell is expanded once - the
+            /// visited set sees to that - so each directed edge is asked about exactly once, and a cache
+            /// keyed on a pair of cells would cost more to maintain than the single sweep it saves.
+            /// </summary>
+            public bool CanReach(Cell from, int gx, int gy, float z)
+                => Traversability.CanStep(vis,
+                    PositionOf(from.Gx, from.Gy, from.Z), PositionOf(gx, gy, z));
+
         /// <summary>
         /// The floor heights in a column, read straight off the cached surfaces.
         ///
@@ -734,8 +807,9 @@ namespace Meshwright
                 return surfaces.GetOrAdd((gx, gy), FindSurfaces(x, y).ToArray());
             }
 
-            /// <summary>A sampled floor: where it is and which way it faces.</summary>
-            public readonly record struct Surface(BspFile.Vector3 Position, BspFile.Vector3 Normal);
+            /// <summary>A sampled floor: where it is, which way it faces, and whether it is drawn.</summary>
+            public readonly record struct Surface(
+                BspFile.Vector3 Position, BspFile.Vector3 Normal, bool Nodraw);
 
             /// <summary>
             /// Every floor surface in a column, top down - a road grate over a sewer being the case
@@ -754,7 +828,7 @@ namespace Meshwright
                 for (int i = 0; i < count; i++)
                 {
                     found.Add(new Surface(
-                        new BspFile.Vector3(x, y, samples[i].Z), samples[i].Normal));
+                        new BspFile.Vector3(x, y, samples[i].Z), samples[i].Normal, samples[i].Nodraw));
                 }
 
                 return found;
@@ -859,6 +933,28 @@ namespace Meshwright
                 {
                     if (MathF.Abs(surface.Position.Z - z) > NavNodeGrid.HeightGranularity)
                         continue;
+
+                    // A face the renderer skips is not ground, whatever its normal says.
+                    //
+                    // Nodraw is a texinfo flag rather than a brush content, so it cannot be masked out
+                    // of a trace: every nodraw brush is CONTENTS_SOLID like any other, and until the
+                    // tracer began reporting which face it landed on there was no way to ask. It has to
+                    // stay solid - it shadows the floors under it, it blocks the sweeps around it, a
+                    // walker cannot pass through it - and this rejects it only as somewhere to stand.
+                    //
+                    // Stricter than the engine, deliberately. nav_generate builds on nodraw as readily
+                    // as on brick, and gets away with it because its flood starts at a player spawn and
+                    // has no way into the places nodraw floors are: mappers use it precisely where
+                    // nothing will ever be seen, which is the same set of places nothing can ever stand.
+                    // The sampler here reaches further - it seeds from ladder tops and lift stops as
+                    // well - so it needs the guard the engine's own reachability gave it for free.
+                    //
+                    // The cost is a real one and worth stating: where a mapper has nodraw-ed a floor
+                    // that something else visibly covers - a prop, a func_brush - and that cover cannot
+                    // be resolved (an unfound prop model, say), this now discards ground the map really
+                    // has. `meshwright props` reports exactly that case.
+                    if (surface.Nodraw)
+                        return false;
 
                     return surface.Normal.Z >= NavConstants.SlopeLimit;
                 }

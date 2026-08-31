@@ -23,6 +23,27 @@ namespace Meshwright
         /// <summary>How far apart two edges may sit and still count as touching.</summary>
         private const float EdgeGap = 40f;
 
+        /// <summary>
+        /// How far a candidate's near edge may sit *behind* the edge being crossed - that is, how much
+        /// the two footprints may overlap in plan view and still be treated as abutting.
+        ///
+        /// <see cref="SharedEdge"/> compared the two faces with an absolute difference, which is
+        /// symmetric and therefore said yes to a candidate lying up to <see cref="EdgeGap"/> units back
+        /// underneath the area being left. That is not a shared edge at all; it is one area sitting over
+        /// another, which is the ordinary arrangement wherever a walkway, a deck or an upper storey
+        /// covers ground below it. The crossing then tested runs *backwards*, from a point inside the
+        /// upper area to a point still underneath it, and every test in <see cref="TestCrossing"/>
+        /// answers a question about the wrong piece of space: the horizontal clearance lines run through
+        /// the open air above the deck, and <see cref="HasGroundBetween"/> finds the deck itself and
+        /// approves of it. Only <see cref="CanFallTo"/> stands between that and a drop connection
+        /// recorded straight down through a floor, and it was never meant to carry the whole weight.
+        ///
+        /// Six units rather than none, because two areas that ought to abut exactly do not always: the
+        /// squarer, the merger and hand editing all leave seams a unit or two out, and refusing those
+        /// would cost ordinary connections to buy nothing. Anything past that is one area over another.
+        /// </summary>
+        private const float MaxOverlap = Inset;
+
         /// <summary>Shared edge shorter than this is a corner clip, not a doorway worth linking.</summary>
         private const float MinimumOverlap = 16f;
 
@@ -139,7 +160,8 @@ namespace Meshwright
                 if (!SharedEdge(bounds, other, direction, out float centreA, out float centreB,
                         out float overlap))
                 {
-                    log.Add($"{name}: edges do not face each other within {EdgeGap:F0} units");
+                    log.Add($"{name}: edges do not face each other - more than {EdgeGap:F0} units " +
+                            $"apart, more than {MaxOverlap:F0} units overlapped, or no shared span");
                     continue;
                 }
 
@@ -327,7 +349,13 @@ namespace Meshwright
                 _ => b.MinX,
             };
 
-            if (MathF.Abs(faceA - faceB) > EdgeGap)
+            // Signed along the direction of travel, not as an absolute difference. North and West run
+            // towards decreasing coordinates, so their forward gap is the other subtraction.
+            float gap = direction is NavGeometry.North or NavGeometry.West
+                ? faceA - faceB
+                : faceB - faceA;
+
+            if (gap > EdgeGap || gap < -MaxOverlap)
                 return false;
 
             // and they must overlap along the perpendicular axis
@@ -631,7 +659,19 @@ namespace Meshwright
             }
 
             // Where along the run the first sample sits: clear of the upper area's own edge.
-            float first = run > 0.01f ? MathF.Min((Inset + 2f) / run, 1f) : 1f;
+            //
+            // If there is no room for it - the landing point is no further out than the edge being
+            // stepped off - then there is no fall to test. The landing is underneath the upper area
+            // rather than beyond it, and a walker cannot step off an edge it has not passed.
+            //
+            // This used to clamp instead, at which point every sample in the loop below collapsed onto
+            // the landing point and the sweep became the single column in the wrong place that the
+            // comment above says it exists to replace. Clamping is the wrong answer to "the run is too
+            // short to sample": the run being too short *is* the refusal.
+            if (run <= Inset + 2f)
+                return false;
+
+            float first = (Inset + 2f) / run;
 
             for (int i = 0; i < FallSamples; i++)
             {
