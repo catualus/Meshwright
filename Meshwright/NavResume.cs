@@ -41,7 +41,7 @@ namespace Meshwright
         /// fingerprint: that invalidates caches because the *mesh* would differ, this one because the
         /// file could not be read at all.
         /// </summary>
-        private const uint FormatVersion = 1;
+        private const uint FormatVersion = 2;
 
         /// <summary>Where the cache for a given map lives.</summary>
         public static string PathFor(string bspPath) => bspPath + ".mwresume";
@@ -94,6 +94,69 @@ namespace Meshwright
         /// carrying a deliberately preserved timestamp, would not be noticed. That does not happen by
         /// accident, and the remedy - delete the cache file, or leave the flag off - is at hand.
         /// </summary>
+        /// <summary>
+        /// Records the mesh a cached run finished by writing, so the next run can recognise that file
+        /// as its own output rather than as a changed seed. See the seed-aware <c>TryLoad</c>.
+        ///
+        /// Patched in place: two fixed-width fields straight after the header, so recording it costs
+        /// sixteen bytes rather than rewriting a cache that can be tens of megabytes. Best effort - if
+        /// it fails, the next run rebuilds, which is what it did before this existed.
+        /// </summary>
+        public static void MarkProduced(string cachePath, string producedPath)
+        {
+            try
+            {
+                if (!File.Exists(cachePath) || !File.Exists(producedPath))
+                    return;
+
+                var produced = new FileInfo(producedPath);
+
+                using var stream = new FileStream(cachePath, FileMode.Open, FileAccess.ReadWrite);
+                using var r = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+
+                if (r.ReadUInt32() != Magic || r.ReadUInt32() != FormatVersion)
+                    return;
+
+                using var w = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+                w.Write(produced.Length);
+                w.Write(produced.LastWriteTimeUtc.Ticks);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or EndOfStreamException)
+            {
+                // Best effort, as above.
+            }
+        }
+
+        private static bool IsOwnOutput(string? seedPath, long length, long ticks)
+        {
+            if (seedPath is null || length == 0 || !File.Exists(seedPath))
+                return false;
+
+            var info = new FileInfo(seedPath);
+            return info.Length == length && info.LastWriteTimeUtc.Ticks == ticks;
+        }
+
+        /// <summary>Whether two fingerprints agree on every line but the seed's.</summary>
+        private static bool SameExceptSeed(string stored, string current)
+        {
+            var was = stored.Split('\n');
+            var now = current.Split('\n');
+
+            if (was.Length != now.Length)
+                return false;
+
+            for (int i = 0; i < was.Length; i++)
+            {
+                if (was[i] == now[i]) continue;
+                if (was[i].StartsWith("seed=", StringComparison.Ordinal) &&
+                    now[i].StartsWith("seed=", StringComparison.Ordinal)) continue;
+
+                return false;
+            }
+
+            return true;
+        }
+
         private static string Stamp(string? path)
         {
             if (path is null || !File.Exists(path))
@@ -111,6 +174,24 @@ namespace Meshwright
         /// as long as it always did, and nothing says why.
         /// </summary>
         public static bool TryLoad(string path, string fingerprint, out NavFile nav, out string reason)
+            => TryLoad(path, fingerprint, null, out nav, out reason);
+
+        /// <summary>
+        /// Same, also accepting a cache whose only difference is the seed mesh - provided the seed on
+        /// disk now is the very file the cached run went on to write.
+        ///
+        /// That is the ordinary case and the one the plain fingerprint could never match. Finishing a
+        /// mesh in place - the default, and what Compile Pal does - overwrites the seed with the
+        /// result, so the next run sees a .nav with a new size and time, reads "seed changed", and
+        /// rebuilds from scratch every time. The cache could only ever be reused with -scratch or -o,
+        /// which is not how anyone runs it.
+        ///
+        /// Recognising the file by the size and time recorded straight after writing it, rather than
+        /// relaxing the seed check, keeps the cache failing closed: a .nav edited, regenerated in game
+        /// or replaced by anything else since then has a different stamp and still rebuilds.
+        /// </summary>
+        public static bool TryLoad(string path, string fingerprint, string? seedPath,
+            out NavFile nav, out string reason)
         {
             nav = new NavFile();
 
@@ -131,9 +212,12 @@ namespace Meshwright
                     return false;
                 }
 
+                long producedLength = r.ReadInt64();
+                long producedTicks = r.ReadInt64();
                 string stored = r.ReadString();
 
-                if (stored != fingerprint)
+                if (stored != fingerprint &&
+                    !(IsOwnOutput(seedPath, producedLength, producedTicks) && SameExceptSeed(stored, fingerprint)))
                 {
                     reason = $"{Changed(stored, fingerprint)} changed";
                     return false;
@@ -188,6 +272,12 @@ namespace Meshwright
                     {
                         w.Write(Magic);
                         w.Write(FormatVersion);
+
+                        // What this run goes on to write, filled in by MarkProduced once it has. Zero
+                        // until then, which no real file matches.
+                        w.Write(0L);
+                        w.Write(0L);
+
                         w.Write(fingerprint);
                         nav.Write(w);
                     }

@@ -191,6 +191,82 @@ namespace Meshwright.Tests
             Assert.False(NavResume.TryLoad(cache, print, out _, out _));
         }
 
+        /// <summary>
+        /// Finishing a mesh in place overwrites the seed with the result, so the next run's seed stamp
+        /// always differs from the one the cache was built against. Recorded as the cache's own output,
+        /// it is recognised rather than read as a changed seed - which was the only way -resume could
+        /// ever hit in the default mode, and the one Compile Pal uses.
+        /// </summary>
+        [Fact]
+        public void TheCachesOwnOutputIsNotAChangedSeed()
+        {
+            string bsp = File_("map.bsp");
+            string nav = File_("map.nav", "seed");
+            string cache = NavResume.PathFor(bsp);
+
+            Assert.True(NavResume.TrySave(cache, NavResume.Fingerprint(bsp, nav, Options()), Mesh(7), out _));
+
+            File_("map.nav", "the finished mesh, written over the seed");
+            NavResume.MarkProduced(cache, nav);
+
+            string next = NavResume.Fingerprint(bsp, nav, Options());
+
+            Assert.True(NavResume.TryLoad(cache, next, nav, out var back, out _));
+            Assert.Equal(7u, back.Areas[0].Id);
+        }
+
+        /// <summary>The same overwrite, never recorded: the seed really is unknown, so it rebuilds.</summary>
+        [Fact]
+        public void AnUnrecordedSeedChangeStillRebuilds()
+        {
+            string bsp = File_("map.bsp");
+            string nav = File_("map.nav", "seed");
+            string cache = NavResume.PathFor(bsp);
+
+            Assert.True(NavResume.TrySave(cache, NavResume.Fingerprint(bsp, nav, Options()), Mesh(), out _));
+
+            File_("map.nav", "replaced by something else entirely");
+
+            Assert.False(NavResume.TryLoad(cache, NavResume.Fingerprint(bsp, nav, Options()), nav, out _, out _));
+        }
+
+        /// <summary>
+        /// Recorded, then edited afterwards - regenerated in game, hand-edited, replaced. The stamp no
+        /// longer matches what the cached run wrote, so it is a new seed and must rebuild.
+        /// </summary>
+        [Fact]
+        public void AnOutputEditedSinceItWasWrittenRebuilds()
+        {
+            string bsp = File_("map.bsp");
+            string nav = File_("map.nav", "seed");
+            string cache = NavResume.PathFor(bsp);
+
+            Assert.True(NavResume.TrySave(cache, NavResume.Fingerprint(bsp, nav, Options()), Mesh(), out _));
+
+            File_("map.nav", "the finished mesh");
+            NavResume.MarkProduced(cache, nav);
+            File_("map.nav", "the finished mesh, then edited by hand");
+
+            Assert.False(NavResume.TryLoad(cache, NavResume.Fingerprint(bsp, nav, Options()), nav, out _, out _));
+        }
+
+        /// <summary>Recognising the seed excuses the seed line and nothing else.</summary>
+        [Fact]
+        public void OwnOutputDoesNotExcuseAChangedMap()
+        {
+            string bsp = File_("map.bsp");
+            string nav = File_("map.nav", "seed");
+            string cache = NavResume.PathFor(bsp);
+
+            Assert.True(NavResume.TrySave(cache, NavResume.Fingerprint(bsp, nav, Options()), Mesh(), out _));
+
+            File_("map.nav", "the finished mesh");
+            NavResume.MarkProduced(cache, nav);
+            File_("map.bsp", "recompiled, and longer than before");
+
+            Assert.False(NavResume.TryLoad(cache, NavResume.Fingerprint(bsp, nav, Options()), nav, out _, out _));
+        }
+
         [Fact]
         public void JunkIsIgnoredRatherThanThrown()
         {

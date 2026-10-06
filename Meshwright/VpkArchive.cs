@@ -110,7 +110,12 @@ namespace Meshwright
                             ? $"{name}.{extension}"
                             : $"{folder}/{name}.{extension}";
 
-                        entries[full] = new Entry(archiveIndex, entryOffset, (int)entryLength, preload);
+                        // A length past int range is not a file anything here could hold, and cast
+                        // straight to int it went negative, slipped under the bounds check in TryRead
+                        // and threw from the array allocation - out of a parallel model load, failing
+                        // the whole run over one entry. Left out, it is one model that does not resolve.
+                        if (entryLength <= int.MaxValue - preloadBytes)
+                            entries[full] = new Entry(archiveIndex, entryOffset, (int)entryLength, preload);
 
                         if (stream.Position > headerEnd + treeSize) return entries.Count > 0;
                     }

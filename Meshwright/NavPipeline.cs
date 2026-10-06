@@ -152,6 +152,9 @@ namespace Meshwright
             /// <summary>True when the mesh came from a resume cache rather than being built.</summary>
             public bool Resumed;
 
+            /// <summary>True when this run wrote a fresh resume cache.</summary>
+            public bool Cached;
+
             /// <summary>Things the caller should see even if it is not reading the log - a missing
             /// vis lump, an option that could not be honoured.</summary>
             public readonly List<string> Warnings = [];
@@ -277,7 +280,7 @@ namespace Meshwright
 
             if (options.ResumePath is { } resumePath)
             {
-                if (NavResume.TryLoad(resumePath, fingerprint, out var cached, out string why))
+                if (NavResume.TryLoad(resumePath, fingerprint, options.SeedNavPath, out var cached, out string why))
                 {
                     nav.AdoptFrom(cached);
                     result.Resumed = true;
@@ -418,7 +421,10 @@ namespace Meshwright
             if (options.ResumePath is { } savePath && !result.Resumed)
             {
                 if (NavResume.TrySave(savePath, fingerprint, nav, out string note))
+                {
+                    result.Cached = true;
                     log($"Resume: mesh cached for the next run ({note})");
+                }
                 else
                     log($"Resume: could not write the cache - {note}");
             }
@@ -675,6 +681,18 @@ namespace Meshwright
         private static void RunVisibility(NavFile nav, BspVisibility vis, Options options, Result result,
             NavProgress progress, Action<string> log)
         {
+            // Skipped outright rather than computed and dropped. It is two thirds of a run, and none
+            // of it could be written - see NavFile.CanStoreVisibility.
+            if (!nav.CanStoreVisibility)
+            {
+                string warning = $"This .nav is version {nav.Version}, which has no room for visibility " +
+                                 "(that arrived in version 16), so visibility was skipped and the mesh is " +
+                                 "not marked analysed. Run nav_analyze in game to analyse it.";
+                result.Warnings.Add(warning);
+                log($"Visibility: {warning}");
+                return;
+            }
+
             if (!vis.HasVisibilityData)
             {
                 string warning = "The BSP has no vis data, so nothing can be culled before tracing. " +

@@ -247,6 +247,12 @@ Run `meshwright` with no arguments for the full list.
 
 ## Results
 
+> **These figures predate the September 2026 sampling fix and need remeasuring.** Since they were taken,
+> the area flood sweeps a body between samples, so it no longer walks through thin walls into sealed
+> space. Ground on `nodraw` faces is no longer built on, and drop connections into an area lying
+> underneath another are refused. All three change area counts, coverage and unreachable totals, and
+> the new figures have not been measured yet.
+
 Two maps, both public, both scored against a mesh the game generated for the same map. Machine is an
 8-core Ryzen 7 6800H, 16 threads.
 
