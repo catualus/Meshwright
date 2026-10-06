@@ -75,6 +75,8 @@
     "Name": "Extra content directory",
     "Parameter": " -content",
     "CanHaveValue": true,
+    "ValueIsFolder": true,
+    "CanBeUsedMoreThanOnce": true,
     "Description": "An extra folder to look for prop models in, on top of the game install Meshwright works out from the map's own location. You only need this if your models live somewhere unusual - a shared content drive, or a mod folder outside the game. Without a hull for a prop, Meshwright cannot collide against it and the mesh will float where that prop stands."
   },
   {

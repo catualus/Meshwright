@@ -83,15 +83,45 @@ namespace Meshwright
                 // whole point of asking - a half-finished mesh would be worse than the one already
                 // there. 130 is the conventional exit code for a run ended by an interrupt, and it is
                 // non-zero, so a host checking exit codes correctly reads this as "did not finish".
-                Console.Error.WriteLine("cancelled.");
+                Fail("cancelled.");
                 return 130;
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"error: {ex.Message}");
+                Fail(IsExpected(ex) ? $"error: {ex.Message}" : $"error: {ex}");
                 return 1;
             }
         }
+
+        /// <summary>
+        /// Writes a failure where whoever is running this will actually see it.
+        ///
+        /// Errors went to stderr only, which is right at a terminal and invisible under Compile Pal:
+        /// its compile steps read standard output and nothing else, so a failed run there said only
+        /// "failed with exit code 1. The reason it gives is in its output above" with no reason
+        /// anywhere above. A host that has stdout redirected is reading stdout, so that is where the
+        /// message goes - unless the host says it reads stderr too, through
+        /// <c>COMPILE_PAL_READS_STDERR</c>, in which case stderr keeps it and it is not shown twice.
+        /// At a terminal nothing changes.
+        /// </summary>
+        private static void Fail(string message)
+        {
+            bool hostReadsStdoutOnly = Console.IsOutputRedirected &&
+                Environment.GetEnvironmentVariable("COMPILE_PAL_READS_STDERR") != "1";
+
+            (hostReadsStdoutOnly ? Console.Out : Console.Error).WriteLine(message);
+        }
+
+        /// <summary>
+        /// Whether an exception is one of the ways a run is told it was asked something wrong - a
+        /// missing file, a bad flag, a file that is not what it claims - and so is fully described by
+        /// its message. Anything else is a bug here, and a bug reported as "Object reference not set
+        /// to an instance of an object" with no location is one nobody can act on, so those get the
+        /// type and the stack.
+        /// </summary>
+        private static bool IsExpected(Exception ex) =>
+            ex is ArgumentException or IOException or InvalidDataException or UnauthorizedAccessException
+                or NotSupportedException;
 
         /// <summary>
         /// Makes Ctrl+C stop the run rather than kill the process.
@@ -448,7 +478,7 @@ namespace Meshwright
                 {
                     // Reported here and again in the summary. A pack left running unattended is
                     // exactly the case where a failure scrolled past an hour ago needs repeating.
-                    Console.Error.WriteLine($"        failed: {ex.Message}");
+                    Fail($"        failed: {ex.Message}");
                     failed.Add((name, ex.Message));
                 }
 
@@ -592,7 +622,7 @@ namespace Meshwright
                 // A configuration mistake rather than a failure, and worth saying plainly: without
                 // -generateareas there is nothing here to finish, and every pass would run over an
                 // empty mesh and report success.
-                Console.Error.WriteLine(
+                Fail(
                     $"error: no nav mesh at {navPath}, and -generateareas was not given. " +
                     "Generate one in game (nav_generate), or pass -generateareas to build one here.");
                 return 1;
@@ -630,7 +660,7 @@ namespace Meshwright
             // that is genuinely what is wanted.
             if (nav.Areas.Count == 0 && loadedAreas > 0)
             {
-                Console.Error.WriteLine(
+                Fail(
                     $"error: this run produced a mesh with no areas, and {Path.GetFileName(outPath)} " +
                     $"currently has {loadedAreas:N0}. Refusing to overwrite it with nothing.");
 
@@ -655,6 +685,15 @@ namespace Meshwright
             {
                 TryDelete(temporary);
                 throw;
+            }
+
+            // Only when the output replaced the seed. Written to a different file, the seed is untouched
+            // and the ordinary fingerprint already matches next time; and only when the cache on disk
+            // describes this run's mesh, so a stale cache from some earlier run is never vouched for.
+            if (options.ResumePath is { } resumePath && (result.Cached || result.Resumed) &&
+                string.Equals(Path.GetFullPath(outPath), Path.GetFullPath(navPath), StringComparison.OrdinalIgnoreCase))
+            {
+                NavResume.MarkProduced(resumePath, outPath);
             }
 
             sw.Stop();
@@ -1194,6 +1233,13 @@ namespace Meshwright
 
             Console.WriteLine($"bsp   {Path.GetFileName(bspPath)}");
             Console.WriteLine($"nav   {Path.GetFileName(navPath)}: {nav.Areas.Count:N0} areas");
+
+            if (!nav.CanStoreVisibility)
+            {
+                Fail($"error: {Path.GetFileName(navPath)} is version {nav.Version}, which has no room for " +
+                     "visibility (that arrived in version 16). Run nav_analyze in game instead.");
+                return 1;
+            }
 
             if (!vis.HasVisibilityData)
                 Console.WriteLine("warn  BSP has no vis data; the PVS stage will not cull anything");
@@ -3708,7 +3754,7 @@ namespace Meshwright
 
         private static int UnknownCommand(string command)
         {
-            Console.Error.WriteLine($"error: unknown command '{command}'");
+            Fail($"error: unknown command '{command}'");
             Usage();
             return 1;
         }

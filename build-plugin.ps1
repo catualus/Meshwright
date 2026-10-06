@@ -70,13 +70,47 @@ dotnet @publishArgs
 
 if ($LASTEXITCODE -ne 0) { throw "publish failed with exit code $LASTEXITCODE" }
 
-if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+# Emptied in place rather than deleted and recreated.
+#
+# The folder is often not just build output: pointing Compile Pal's Plugins/Meshwright at it with a
+# junction is the obvious way to test a build, and Compile Pal builds that predate keeping step state
+# in their own settings save whether the step is ticked, and where it sits in the order, into the
+# plugin's own meta.json. Deleting the folder
+# and copying the repo's meta.json back threw that away on every build, so the step unticked itself.
+#
+# So the files are cleared but the folder stays, and those two answers are carried over from the
+# meta.json being replaced. Text substitution rather than a JSON round trip so the shipped file keeps
+# its own formatting.
+$kept = @{}
+$installedMeta = Join-Path $out 'meta.json'
+
+if (Test-Path $installedMeta) {
+    try {
+        $previous = Get-Content $installedMeta -Raw | ConvertFrom-Json
+        foreach ($field in 'DoRun', 'Order') {
+            if ($null -ne $previous.$field) { $kept[$field] = $previous.$field }
+        }
+    }
+    catch {
+        Write-Warning "Could not read the existing meta.json, so its DoRun/Order are not carried over: $_"
+    }
+}
+
+if (Test-Path $out) { Get-ChildItem $out -Force | Remove-Item -Recurse -Force }
 New-Item -ItemType Directory -Path $out -Force | Out-Null
 
 Copy-Item (Join-Path $staging 'meshwright.exe') $out
 
 # Not the .pdb: it is larger than the executable and a plugin folder is something people copy around.
-Copy-Item (Join-Path $source 'meta.json') $out
+$meta = Get-Content (Join-Path $source 'meta.json') -Raw
+
+foreach ($field in $kept.Keys) {
+    $value = if ($kept[$field] -is [bool]) { "$($kept[$field])".ToLowerInvariant() }
+             else { [string]::Format([cultureinfo]::InvariantCulture, '{0}', $kept[$field]) }
+    $meta = $meta -replace "(`"$field`"\s*:\s*)[^,\r\n}]+", "`${1}$value"
+}
+
+Set-Content -Path $installedMeta -Value $meta -NoNewline -Encoding utf8
 Copy-Item (Join-Path $source 'parameters.json') $out
 Copy-Item (Join-Path $root 'LICENSE') $out
 Copy-Item (Join-Path $source 'README.md') $out -ErrorAction SilentlyContinue

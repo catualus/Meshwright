@@ -43,6 +43,17 @@ namespace Meshwright
         public byte[] TrailingData { get; set; } = [];
 
         /// <summary>
+        /// Whether this file's version has anywhere to put area-to-area visibility.
+        ///
+        /// A mesh is written back at the version it was read at, so an engine that only reads that
+        /// version can still load it - and before version 16 the format has no visibility block.
+        /// Computing visibility for one of these and setting <see cref="IsAnalyzed"/> wrote a file
+        /// that claimed to be analysed while carrying none of it, which tells the engine there is
+        /// nothing left for nav_analyze to do.
+        /// </summary>
+        public bool CanStoreVisibility => Version >= 16;
+
+        /// <summary>
         /// Reads a mesh from disk.
         ///
         /// The file is pulled into memory in one go and parsed from there, rather than read field by

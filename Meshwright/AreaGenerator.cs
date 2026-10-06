@@ -267,7 +267,7 @@ namespace Meshwright
                 result.Notes.Add($"crouch: {crouchNodes:N0} nodes");
 
             progress?.Enter(NavPipeline.PhaseLinking);
-            var (linksMade, linksRefused) = LinkNodes(grid, vis, progress);
+            var (linksMade, linksRefused) = LinkNodes(grid, vis, world, progress);
             result.Notes.Add($"links {linksMade:N0} made, {linksRefused:N0} refused as blocked");
 
             progress?.Enter(NavPipeline.PhaseAreas);
@@ -419,7 +419,7 @@ namespace Meshwright
         /// behind it, and how a doorway came to be swallowed by the room on either side instead of
         /// narrowing to the opening.
         /// </summary>
-        private static (int Made, int Refused) LinkNodes(NavNodeGrid grid, BspVisibility vis,
+        private static (int Made, int Refused) LinkNodes(NavNodeGrid grid, BspVisibility vis, World world,
             NavProgress? progress)
         {
             int made = 0, refused = 0, done = 0;
@@ -454,7 +454,11 @@ namespace Meshwright
                         float cost = MathF.Abs(climb);
                         if (cost >= bestClimb) continue;
 
-                        if (!Traversability.CanStep(vis, node.Position, candidate.Position))
+                        // The flood swept this exact step already, from this exact node, if it took it -
+                        // and the sweep is deterministic, so asking again can only give the same answer
+                        // at the same cost. Only the steps the flood never took are swept here.
+                        if (!world.Passed(node.Gx, node.Gy, node.Z, dx, dy, candidate.Z) &&
+                            !Traversability.CanStep(vis, node.Position, candidate.Position))
                         {
                             Interlocked.Increment(ref refused);
                             continue;
@@ -611,6 +615,8 @@ namespace Meshwright
         /// </summary>
         private static IEnumerable<Cell> Neighbours(World world, Cell cell)
         {
+            List<(int Dx, int Dy, float Z)>? passed = null;
+
             // Four-way only. Diagonal movement was tried and made no difference whatsoever - identical
             // visited count, byte-identical output - because anywhere a diagonal step reaches, the two
             // orthogonal steps already reached. Not worth the extra work per cell.
@@ -688,9 +694,17 @@ namespace Meshwright
                     if (!world.CanReach(cell, gx, gy, z))
                         continue;
 
+                    (passed ??= []).Add((dgx, dgy, z));
+
                     yield return new Cell(gx, gy, z);
                 }
             }
+
+            // Kept so LinkNodes need not sweep the same steps again. Recorded once the cell has been
+            // fully expanded, which the flood always does; a caller that stops early only loses the
+            // saving, never the answer, since LinkNodes sweeps anything not recorded.
+            if (passed is not null)
+                world.RecordPassages(cell, passed);
         }
 
         /// <summary>
@@ -771,6 +785,39 @@ namespace Meshwright
             public bool CanReach(Cell from, int gx, int gy, float z)
                 => Traversability.CanStep(vis,
                     PositionOf(from.Gx, from.Gy, from.Z), PositionOf(gx, gy, z));
+
+            /// <summary>
+            /// Steps out of each expanded cell that passed <see cref="CanReach"/>, by grid offset and
+            /// the exact destination height. One entry per cell the flood expanded - the visited set
+            /// guarantees that is once - and usually one step per direction.
+            /// </summary>
+            private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), (float FromZ, (int Dx, int Dy, float Z)[] Steps)> passages = new();
+
+            public void RecordPassages(Cell from, List<(int Dx, int Dy, float Z)> steps)
+                => passages[Key(from)] = (from.Z, [.. steps]);
+
+            /// <summary>
+            /// Whether the flood already swept exactly this step and found it clear.
+            ///
+            /// Both ends compared exactly, not by the quantised cell key. The key rounds heights to
+            /// eight units, so the cell the flood expanded under a key need not be the node now asking:
+            /// a seed is expanded at its raw height - a ladder top, a lift stop - and a node can sit on a
+            /// floor a few units from it. Matching on the key alone reused a sweep made from a
+            /// different height, and changed which links were made. Exact heights are safe to compare
+            /// because both sides come from the same cached column of surfaces; anything that does not
+            /// match is simply swept again.
+            /// </summary>
+            public bool Passed(int gx, int gy, float z, int dx, int dy, float toZ)
+            {
+                if (!passages.TryGetValue(Key(new Cell(gx, gy, z)), out var entry) || entry.FromZ != z)
+                    return false;
+
+                foreach (var step in entry.Steps)
+                    if (step.Dx == dx && step.Dy == dy && step.Z == toZ)
+                        return true;
+
+                return false;
+            }
 
         /// <summary>
         /// The floor heights in a column, read straight off the cached surfaces.
