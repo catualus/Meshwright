@@ -82,6 +82,12 @@ Every option below has a corresponding checkbox.
 Download `meshwright.exe` from the releases page, or build it yourself. See
 [Building from source](#building-from-source).
 
+### On Linux
+
+The release is a Windows executable and runs under Wine, alongside Compile Pal and the Source
+compile tools. Tested with Wine 9.0: `generate` builds, writes and reloads a mesh, both standalone
+and as a Compile Pal step.
+
 ---
 
 ## Usage
