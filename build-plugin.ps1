@@ -18,6 +18,15 @@
     last part is the check to repeat if a dependency is ever added, because trimming away something
     reached only by reflection fails at run time on the one map that needs it, not at build time.
 
+    Compressed, which is what lets it run under Wine - and takes it from 21 MB to 15 MB. An
+    uncompressed single-file bundle has the runtime map System.Private.CoreLib.dll straight out of
+    the executable at an offset inside it, and Wine refuses that mapping: "Failed to load
+    System.Private.CoreLib.dll ... Incorrect alignment (0x8007046C)", before any of Meshwright runs.
+    A compressed bundle is unpacked into memory instead, so there is nothing to map. Measured on
+    Windows the cost is noise - 0.44 s to start against 0.41 s - and nothing is written to disk, which
+    is what IncludeAllContentForSelfExtract (the other way round it) would have done. Shipwright is
+    built the same way and already ran under Wine for that reason.
+
 .PARAMETER Zip
     Also write artifacts/Meshwright-plugin.zip, which is the form to attach to a release.
 
@@ -60,6 +69,8 @@ Write-Host 'Publishing meshwright...' -ForegroundColor Cyan
     '-p:PublishTrimmed=true'
     '-p:TrimMode=full'
     '-p:IncludeNativeLibrariesForSelfExtract=true'
+    # Needed to run under Wine at all - see the header.
+    '-p:EnableCompressionInSingleFile=true'
     '-warnaserror'
     '--output', $staging
 )
