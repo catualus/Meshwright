@@ -16,11 +16,12 @@ namespace Meshwright
     /// A single static setting rather than threading a value through every call: every pass already
     /// takes an optional collaborator (progress, a reference mesh) as a late parameter, and this is
     /// process-wide configuration in the same spirit as an environment variable, not per-call state.
+    ///
+    /// Stored in <see cref="SourceKitConcurrency"/>, so the content readers Meshwright shares with the
+    /// other tools - which open VPKs and GMAs in parallel - obey the same `-threads` and Ctrl+C.
     /// </summary>
     public static class NavConcurrency
     {
-        private static int maxThreads = Environment.ProcessorCount;
-
         /// <summary>
         /// The thread ceiling for every `Parallel.For`/`Parallel.ForEach` pass. Defaults to every core.
         /// Clamped to at least 1 - a value of 0 or below would mean "no threads", which is not a request
@@ -28,8 +29,8 @@ namespace Meshwright
         /// </summary>
         public static int MaxThreads
         {
-            get => maxThreads;
-            set => maxThreads = Math.Max(1, value);
+            get => SourceKitConcurrency.MaxThreads;
+            set => SourceKitConcurrency.MaxThreads = value;
         }
 
         /// <summary>
@@ -46,14 +47,18 @@ namespace Meshwright
         /// writing - unresponsive. <see cref="Options"/> carries the token into every parallel pass
         /// automatically, so a pass gets the inner half simply by using it.
         /// </summary>
-        public static CancellationToken CancellationToken { get; set; } = CancellationToken.None;
+        public static CancellationToken CancellationToken
+        {
+            get => SourceKitConcurrency.CancellationToken;
+            set => SourceKitConcurrency.CancellationToken = value;
+        }
 
         /// <summary>
         /// Fresh <see cref="ParallelOptions"/> reflecting the current setting. Read at the start of each
         /// pass rather than cached, so a change takes effect on the next pass without needing every call
         /// site to notice a mutation to shared, possibly-in-use options.
         /// </summary>
-        public static ParallelOptions Options => new() { MaxDegreeOfParallelism = maxThreads, CancellationToken = CancellationToken };
+        public static ParallelOptions Options => SourceKitConcurrency.Options;
 
         /// <summary>
         /// The between-passes check, for the sequential seams the parallel loops above do not cover.

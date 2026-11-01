@@ -12,8 +12,15 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <!-- The BSP and game-content readers live in SourceKit, shared with Viswright and Compile Pal, and
+         checked out as a submodule. Set SourceKitRoot to build against another copy. -->
+    <SourceKitRoot Condition="'$(SourceKitRoot)' == ''">$(MSBuildThisFileDirectory)..\external\SourceKit\</SourceKitRoot>
+  </PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="SharpCompress" Version="0.50.4" />
+    <ProjectReference Include="$(SourceKitRoot)SourceKit\SourceKit.csproj" />
+    <Using Include="SourceKit" />
   </ItemGroup>
 
   <ItemGroup>

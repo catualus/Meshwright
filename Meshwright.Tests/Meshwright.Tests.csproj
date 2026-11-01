@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Meshwright\Meshwright.csproj" />
+    <Using Include="SourceKit" />
   </ItemGroup>
 
 </Project>
