@@ -8,9 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +28,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       # setup-dotnet v6 needs runner 2.327.1 or newer, which the GitHub hosted runners are well past.
       # It matters only if this is ever pointed at a self hosted runner.

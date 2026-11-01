@@ -391,7 +391,13 @@ before shipping it.
 
 ## Building from source
 
-Requires the .NET 10 SDK.
+Requires the .NET 10 SDK. The BSP and game-content readers come from
+[SourceKit](https://github.com/catualus/SourceKit), a submodule in `external/SourceKit`, so clone
+with submodules (or run `git submodule update --init` in an existing clone).
+
+```bash
+git clone --recurse-submodules https://github.com/catualus/NavPal.git
+```
 
 ```bash
 dotnet build -c Release
