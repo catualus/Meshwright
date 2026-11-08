@@ -518,7 +518,7 @@ namespace Meshwright
             // Player spawns, which is what the engine itself floods from. These are the only seeds that
             // do not presuppose a mesh, so they are what lets this run against an empty one.
             int spawns = 0;
-            foreach (var origin in SpawnPoints(bsp))
+            foreach (var origin in SpawnPositions(bsp))
             {
                 if (world.TryCell(origin.X, origin.Y, origin.Z, out var spawn))
                 {
@@ -568,26 +568,25 @@ namespace Meshwright
         /// <summary>
         /// Where players enter the map. A spawn is guaranteed to be somewhere a person can stand, which
         /// makes it the one seed that needs nothing to already exist.
+        ///
+        /// Everything that wants the map's spawns comes through here - the flood's seeds, the
+        /// reachability check, and the commands that score against what a spawn can reach - so they
+        /// all agree on what a spawn is.
         /// </summary>
-        public static IEnumerable<BspFile.Vector3> SpawnPositions(BspFile bsp) => SpawnPoints(bsp);
+        public static IEnumerable<BspFile.Vector3> SpawnPositions(BspFile bsp) => SpawnPositions(bsp.EntityLump);
 
-        private static IEnumerable<BspFile.Vector3> SpawnPoints(BspFile bsp)
+        /// <inheritdoc cref="SpawnPositions(BspFile)"/>
+        internal static IEnumerable<BspFile.Vector3> SpawnPositions(string entityLump)
         {
-            foreach (System.Text.RegularExpressions.Match block in
-                     System.Text.RegularExpressions.Regex.Matches(bsp.EntityLump, @"\{(.*?)\}",
-                         System.Text.RegularExpressions.RegexOptions.Singleline))
+            foreach (var entity in BspEntities.Parse(entityLump))
             {
-                string body = block.Groups[1].Value;
-
-                var classname = System.Text.RegularExpressions.Regex.Match(body, "\"classname\"\\s*\"([^\"]*)\"");
-                if (!classname.Success || !classname.Groups[1].Value.StartsWith("info_player", StringComparison.OrdinalIgnoreCase))
+                if (!entity.TryGetValue("classname", out string? classname) || !IsSpawnClass(classname))
                     continue;
 
-                var origin = System.Text.RegularExpressions.Regex.Match(body, "\"origin\"\\s*\"([^\"]*)\"");
-                if (!origin.Success)
+                if (!entity.TryGetValue("origin", out string? origin))
                     continue;
 
-                var parts = origin.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var parts = origin.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 3) continue;
 
                 var c = System.Globalization.CultureInfo.InvariantCulture;
@@ -599,6 +598,40 @@ namespace Meshwright
                 }
             }
         }
+
+        /// <summary>
+        /// Whether Garry's Mod spawns players at entities of this class.
+        ///
+        /// The list is the base gamemode's own: the table GM:PlayerSelectSpawn starts from
+        /// (gamemodes/base/gamemode/player.lua), plus the classes gmod_player_start registers for the
+        /// other Source games' maps it can load (entities/gmod_player_start.lua). Matching only the
+        /// info_player_ prefix, as this once did, missed gmod_player_start - GMod's own - and Insurgency,
+        /// Age of Chivalry, Dystopia and DIPRIP maps entirely, so a map spawning players only through
+        /// one of those gave a from-scratch run nothing to flood from and reachability no spawn on any
+        /// run.
+        ///
+        /// info_survivor_position is left out because GMod leaves it out: Left 4 Dead's c1m4_atrium has
+        /// one in a box under the map. The info_player_ prefix still counts on its own, as it always
+        /// has here, for any other game's spawn class that follows the convention.
+        /// </summary>
+        internal static bool IsSpawnClass(string classname) =>
+            SpawnClasses.Contains(classname) ||
+            classname.StartsWith("info_player_", StringComparison.OrdinalIgnoreCase);
+
+        private static readonly HashSet<string> SpawnClasses = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "info_player_start", "info_player_combine", "info_player_rebel", "gmod_player_start",
+            "info_player_teamspawn", "info_player_blue", "info_player_red", "info_player_coop",
+            "info_player_deathmatch", "info_player_zombiemaster", "info_spawnpoint",
+            "info_player_counterterrorist", "info_player_terrorist", "info_player_allies",
+            "info_player_axis", "info_player_knight", "info_player_pirate", "info_player_viking",
+            "info_survivor_rescue", "info_player_human", "info_player_zombie",
+            "diprip_start_team_red", "diprip_start_team_blue", "info_player_fof",
+            "info_player_desperado", "info_player_vigilante", "info_player_attacker",
+            "info_player_defender", "info_player_usa", "info_player_vc", "info_zombie_spawn",
+            "info_deathmatch_spawn", "info_coop_spawn", "ins_spawnpoint", "dys_spawn_point",
+            "aoc_spawnpoint", "info_ff_teamspawn",
+        };
 
         private static IEnumerable<(float, float)> Offsets(float d)
         {
