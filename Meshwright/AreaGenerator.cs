@@ -526,6 +526,19 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// How much room the sampler finds at one cell, for tests - the same seam as
+        /// <see cref="SampleNeighbours"/>, for the question of whether a player fits there at all.
+        /// Several heights are asked of one world, in order, so its cache sits between them as it
+        /// does in the flood.
+        /// </summary>
+        internal static Clearance[] SampleClearance(BspVisibility vis,
+            BspFile.Vector3 mins, BspFile.Vector3 maxs, int gx, int gy, params float[] heights)
+        {
+            var world = new World(vis, mins, maxs);
+            return [.. heights.Select(z => world.ClearanceAt(gx, gy, z))];
+        }
+
+        /// <summary>
         /// A place the flood starts from, and whether it was set down on a standable floor of its own
         /// column - only then is the cell itself ground the mesh may cover.
         /// </summary>
@@ -1278,13 +1291,27 @@ namespace Meshwright
                 // the map that motivated it made the coverage loss the more visible problem in practice.
                 const int MaxMismatch = 2;
 
+                // Each probe starts under a crouching player's head, not a standing one's. The answer only
+                // counts for a sample with crouching room and no more - ClearanceAt settles standing
+                // ground on the normal alone - so the ceiling over it sits somewhere between 55 and 71
+                // units up, and a probe started at 71 began inside it. It then found the
+                // ceiling's own solid as the "floor", 60-odd units above the sample, on all four sides,
+                // and every crouch-only sample came back as broken ground: gm_construct made no crouch
+                // area at all against 13 in the engine's mesh. Started just under 55, the probes find
+                // the floor beside the sample as they were meant to. gm_construct then gets 7 crouch
+                // areas, every one of them at the two places the engine marks crouch, and covers 98.4%
+                // of the engine's reachable ground rather than 98.1%, with no more ground the engine
+                // does not have. rp_downtown_tits_v25 goes from 40 crouch areas to 193, under low
+                // ceilings, stairs and props.
+                const float ProbeTop = NavConstants.HumanCrouchHeight - 1f;
+
                 int missing = 0;
                 int mismatched = 0;
 
                 foreach (var (dx, dy) in Offsets(Reach))
                 {
-                    if (!StairMarker.TryFindFloor(vis, x + dx, y + dy, z + RequiredHeadroom,
-                            RequiredHeadroom + Tolerance * 2f, out float nz))
+                    if (!StairMarker.TryFindFloor(vis, x + dx, y + dy, z + ProbeTop,
+                            ProbeTop + Tolerance * 2f, out float nz))
                     {
                         missing++;
                         continue;
