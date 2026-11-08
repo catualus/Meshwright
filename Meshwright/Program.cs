@@ -784,7 +784,7 @@ namespace Meshwright
             // The tracer is what stops a ladder wiring itself to whatever happens to be nearest through
             // a wall; without it the probe only knows about distance.
             var (bsp, vis) = LoadBsp(bspPath);
-            var brushes = LadderFinder.Find(bsp);
+            var brushes = LadderFinder.Find(bsp, vis);
             var nav = NavFile.Load(navPath);
 
             Console.WriteLine($"bsp   {Path.GetFileName(bspPath)}: {brushes.Count:N0} ladder brushes");
@@ -919,17 +919,23 @@ namespace Meshwright
         private static int FindLadders(string[] args)
         {
             string path = RequireBsp(args);
-            var bsp = BspFile.Load(path);
 
-            var found = LadderFinder.Find(bsp);
+            // The traced world as well as the lumps: whether two stacked pieces are one ladder depends
+            // on whether there is a floor where they meet, and the listing should show the ladders the
+            // build will make.
+            var (bsp, vis) = LoadBsp(path);
+
+            var found = LadderFinder.Find(bsp, vis);
 
             int angled = found.Count(l => l.IsAngled);
-            Console.WriteLine($"{Path.GetFileName(path)}: {found.Count:N0} ladder brushes ({angled} angled)");
+            Console.WriteLine($"{Path.GetFileName(path)}: {found.Count:N0} ladders ({angled} angled)");
 
             foreach (var l in found)
             {
+                string kind = !l.AxisKnown ? " func_useableladder" : l.Pieces > 1 ? $" {l.Pieces} pieces" : "";
+
                 Console.WriteLine($"  bottom={l.Bottom} top={l.Top} h={l.Height,5:F0} w={l.Width,3:F0} " +
-                                  $"axis={l.AxisName}{(l.IsAngled ? " ANGLED" : "")}");
+                                  $"axis={(l.AxisKnown ? l.AxisName : "?")}{(l.IsAngled ? " ANGLED" : "")}{kind}");
             }
 
             return 0;

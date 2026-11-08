@@ -192,9 +192,9 @@ namespace Meshwright
                 steps.Add(new NavProgress.Step(PhaseMerging, 0.01));
             }
 
-            if (options.Ladders) steps.Add(new NavProgress.Step(PhaseLadders, 0.01));
             if (options.Movement) steps.Add(new NavProgress.Step(PhaseConnections, 0.05));
             if (options.GenerateAreas) steps.Add(new NavProgress.Step(PhaseClipping, 0.02));
+            if (options.Ladders) steps.Add(new NavProgress.Step(PhaseLadders, 0.01));
             if (options.Movement) steps.Add(new NavProgress.Step(PhaseStairs, 0.02));
             if (options.Movement) steps.Add(new NavProgress.Step(PhaseReachability, 0.01));
 
@@ -371,14 +371,6 @@ namespace Meshwright
 
             NavConcurrency.ThrowIfCancelled();
 
-            if (options.Ladders && !result.Resumed)
-            {
-                progress.Enter(PhaseLadders);
-                RunLadders(nav, vis, bsp, result, log);
-            }
-
-            NavConcurrency.ThrowIfCancelled();
-
             if (options.Movement && !result.Resumed)
             {
                 progress.Enter(PhaseConnections);
@@ -416,6 +408,22 @@ namespace Meshwright
                             ? $", discarded {trimmed.Discarded:N0} left too narrow to walk"
                             : ""));
                 }
+            }
+
+            NavConcurrency.ThrowIfCancelled();
+
+            // Once every pass that deletes areas has run, so nothing a ladder ends on is deleted after
+            // it is wired. Ladders used to be built straight after generation, before the jump-area
+            // stitch and the clip, and both delete areas without looking at ladders: an end on a jump
+            // area or on an area clipped down to a sliver was left pointing at nothing, and the clip's
+            // cleanup scrubbed ladder ids out of the areas' ladder lists using *area* ids, so on a fresh
+            // run - where both count from 1 - discarding area 3 cut every link to ladder 3. Built here,
+            // the probes also read the areas' final shapes, after the clip has pulled them back from the
+            // wall a ladder stands against.
+            if (options.Ladders && !result.Resumed)
+            {
+                progress.Enter(PhaseLadders);
+                RunLadders(nav, vis, bsp, result, log);
             }
 
             NavConcurrency.ThrowIfCancelled();
@@ -668,7 +676,7 @@ namespace Meshwright
         private static void RunLadders(NavFile nav, BspVisibility vis, BspFile bsp, Result result,
             Action<string> log)
         {
-            var brushes = LadderFinder.Find(bsp);
+            var brushes = LadderFinder.Find(bsp, vis);
 
             if (brushes.Count == 0)
             {
@@ -680,8 +688,17 @@ namespace Meshwright
             var built = LadderBuilder.Build(nav, brushes, vis);
             result.Ladders = built;
 
-            log($"Ladders: {built.LaddersAdded:N0} added from {brushes.Count:N0} brushes " +
+            log($"Ladders: {built.LaddersAdded:N0} added from {brushes.Count:N0} found " +
                 $"({built.BottomConnected:N0} bottom, {built.TopConnected:N0} top connections)");
+
+            int stacked = brushes.Sum(b => b.Pieces > 1 ? b.Pieces : 0);
+            int useable = brushes.Count(b => !b.AxisKnown);
+
+            if (stacked > 0 || useable > 0)
+            {
+                log($"         {stacked:N0} stacked brushes joined into " +
+                    $"{brushes.Count(b => b.Pieces > 1):N0} ladders, {useable:N0} from func_useableladder");
+            }
 
             if (built.Unresolved > 0)
                 log($"         {built.Unresolved:N0} skipped - no nav area at the base");

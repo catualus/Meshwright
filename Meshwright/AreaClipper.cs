@@ -348,14 +348,17 @@ namespace Meshwright
 
             nav.Areas.RemoveAll(a => doomed.Contains(a.Id));
 
+            // Connections only. An area's ladder lists hold *ladder* ids, and this used to scrub them
+            // with the doomed area ids too - so on a fresh run, where both count from 1, discarding area
+            // 3 cut every area's link to ladder 3. The ladder ends that name a doomed area are the
+            // reference that actually goes stale, and those are what get cleared.
             foreach (var area in nav.Areas)
             {
                 foreach (var list in area.Connections)
                     list.RemoveAll(doomed.Contains);
-
-                foreach (var list in area.Ladders)
-                    list.RemoveAll(doomed.Contains);
             }
+
+            NavIntegrity.ForgetLadderEnds(nav, doomed);
 
             return doomed.Count;
         }

@@ -49,6 +49,12 @@ namespace Meshwright
         /// </summary>
         private static readonly float[] TopProbeDistances = [20f, 36f, 52f];
 
+        /// <summary>
+        /// The base probe for a func_useableladder, which starts from where the climber stands rather
+        /// than from the ladder's face, so the floor straight underneath is the first place to look.
+        /// </summary>
+        private static readonly float[] UseableProbeDistances = [0f, 20f, 36f, 52f, 72f];
+
         /// <summary>Nominal probe distance, used where a single representative offset is needed.</summary>
         private const float ProbeDistance = 20f;
 
@@ -56,15 +62,37 @@ namespace Meshwright
         /// Vertical slack when matching the ladder's base to the floor. Generous, because ladder
         /// brushes are sunk into geometry and the standing surface can sit well above the brush bottom.
         /// </summary>
-        private const float BottomHeightTolerance = 72f;
+        internal const float BottomHeightTolerance = 72f;
 
         /// <summary>
-        /// Vertical slack for areas at the top of a ladder. Deliberately tight - roughly Source's
-        /// StepHeight - because the climber steps directly off onto these. With a loose tolerance,
-        /// areas on other levels nearby get linked: at 72 units this connected two extra areas on
-        /// gm_construct that Valve's own ladder leaves unconnected.
+        /// How far above the top of the ladder its top area may be: a step. The climber's feet come
+        /// level with the top of the brush, and from there they can step up that far onto a ledge.
         /// </summary>
-        private const float TopHeightTolerance = 24f;
+        internal const float TopLandingAbove = NavConstants.StepHeight;
+
+        /// <summary>
+        /// How far below the top of the ladder its top area may be: a player's height.
+        ///
+        /// This was a symmetric 24 units, roughly a step, on the grounds that the climber steps
+        /// directly off onto the top area. But a ladder brush is routinely carried on above the floor it
+        /// leads to, so a climber can get their body over the lip, and the landing then sits well under
+        /// the top of the brush - 44 units on one of rp_downtown_tits' ladders, 63 on a sewer ladder
+        /// there that comes up through a hole in a floor - and within a step of the top, neither could
+        /// ever have a top area.
+        ///
+        /// A player's height is the bound the geometry itself gives. Standing on a floor less than that
+        /// below the top, a player still has the ladder beside them, so they could have stepped off onto
+        /// it; a floor further down has the ladder carrying on over their head, and is somewhere the
+        /// ladder passes rather than where it ends. The engine's own ConnectGeneratedLadder looks
+        /// further still - from a step-size above the top to 120 below that.
+        ///
+        /// What made the old loose tolerance attach tops to the wrong floor is handled separately. It
+        /// was 72 in both directions, so it reached the storey above the ladder; this reaches only a
+        /// step up. In each direction the area taken is the highest in the window, as the engine's
+        /// GetNavArea picks the area immediately beneath a point, so a landing wins over the storey
+        /// below it. And nothing at the height of the ladder's base can be a top.
+        /// </summary>
+        internal const float TopLandingBelow = NavConstants.HumanHeight;
 
         public sealed class Result
         {
@@ -96,32 +124,24 @@ namespace Meshwright
 
             foreach (var brush in brushes)
             {
-                // Resolve the direction sign: the climbing face points at open floor, the opposite side
-                // is wall. Probe both candidates at the base and take whichever finds an area.
-                var (dirA, dirB) = brush.CandidateDirections;
+                bool resolved = brush.AxisKnown
+                    ? ResolveBrush(nav, index, vis, brush, out uint direction, out var bottomArea)
+                    : ResolveUseable(nav, index, vis, brush, out direction, out bottomArea);
 
-                var bottomA = Probe(nav, index, vis, brush.Bottom, dirA, brush.Bottom.Z, BottomHeightTolerance);
-                var bottomB = Probe(nav, index, vis, brush.Bottom, dirB, brush.Bottom.Z, BottomHeightTolerance);
-
-                uint direction;
-                NavArea? bottomArea;
-
-                if (bottomA is not null && bottomB is null) { direction = dirA; bottomArea = bottomA; }
-                else if (bottomB is not null && bottomA is null) { direction = dirB; bottomArea = bottomB; }
-                else if (bottomA is not null && bottomB is not null)
+                if (!resolved || bottomArea is null)
                 {
-                    // floor on both sides: prefer the one whose surface sits closest to the ladder base
-                    float da = MathF.Abs(SurfaceZAt(bottomA, brush.Bottom, dirA) - brush.Bottom.Z);
-                    float db = MathF.Abs(SurfaceZAt(bottomB, brush.Bottom, dirB) - brush.Bottom.Z);
-                    if (da <= db) { direction = dirA; bottomArea = bottomA; } else { direction = dirB; bottomArea = bottomB; }
-                }
-                else
-                {
-                    // no floor either side - the mesh does not cover the base of this ladder
+                    // no floor at the base - the mesh does not cover the foot of this ladder
                     result.Unresolved++;
                     result.Warnings.Add($"no nav area at the base of ladder at {brush.Bottom}; skipped");
                     continue;
                 }
+
+                // A useable ladder's points are where the climber stands, in front of the ladder; the
+                // nav ladder belongs on its face, half a player back towards the wall, which is where a
+                // brush ladder's own bounds already put it.
+                var face = brush.AxisKnown ? 0f : NavConstants.HalfHumanWidth;
+                var topPoint = Offset(brush.Top, Opposite(direction), face);
+                var bottomPoint = Offset(brush.Bottom, Opposite(direction), face);
 
                 var ladder = new NavLadder
                 {
@@ -131,15 +151,15 @@ namespace Meshwright
                     Direction = direction,
                 };
 
-                brush.Top.CopyTo(ladder.Top);
+                topPoint.CopyTo(ladder.Top);
 
                 // Clip the base to the floor the climber actually stands on rather than the raw brush
                 // extent. Ladder brushes are routinely sunk into the floor geometry, so the brush
                 // minimum sits below the walkable surface - Valve's own gm_construct ladder starts
                 // 48 units above where its brush bottoms out.
                 float standingZ = SurfaceZAt(bottomArea, brush.Bottom, direction);
-                var basePoint = new BspFile.Vector3(brush.Bottom.X, brush.Bottom.Y,
-                    MathF.Max(brush.Bottom.Z, standingZ));
+                var basePoint = new BspFile.Vector3(bottomPoint.X, bottomPoint.Y,
+                    MathF.Max(bottomPoint.Z, standingZ));
                 basePoint.CopyTo(ladder.Bottom);
                 ladder.Length = ladder.Top[2] - ladder.Bottom[2];
 
@@ -153,11 +173,17 @@ namespace Meshwright
                 // its base), so at the top the climber steps AWAY from that direction onto the ledge.
                 // TopForward is therefore opposite m_dir, not along it. Verified against Valve's
                 // gm_construct ladder, whose TopForward area sits on the far side from m_dir.
+                //
+                // A top has to be above the floor the climb starts from by more than a step: the floor
+                // at the foot of a short ladder can sit inside the landing window, and a ladder whose
+                // top leads back to its own base leads nowhere.
                 var top = brush.Top;
-                var forward = Probe(nav, index, vis, top, Opposite(direction), top.Z, TopHeightTolerance, TopProbeDistances);
-                var behind = Probe(nav, index, vis, top, direction, top.Z, TopHeightTolerance, TopProbeDistances);
-                var left = Probe(nav, index, vis, top, RotateLeft(direction), top.Z, TopHeightTolerance, TopProbeDistances);
-                var right = Probe(nav, index, vis, top, RotateRight(direction), top.Z, TopHeightTolerance, TopProbeDistances);
+                float lowest = basePoint.Z + NavConstants.StepHeight;
+
+                var forward = ProbeTop(nav, index, vis, brush, top, Opposite(direction), lowest, bottomArea);
+                var behind = ProbeTop(nav, index, vis, brush, top, direction, lowest, bottomArea);
+                var left = ProbeTop(nav, index, vis, brush, top, RotateLeft(direction), lowest, bottomArea);
+                var right = ProbeTop(nav, index, vis, brush, top, RotateRight(direction), lowest, bottomArea);
 
                 DeduplicateNearbyTops(top, ref forward, ref behind, ref left, ref right);
 
@@ -177,6 +203,143 @@ namespace Meshwright
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Which way a ladder brush faces, and the area at its foot. The axis is the brush's thin one;
+        /// the sign is whichever side has floor at the base - the climbing face points at open floor and
+        /// the opposite side is wall - so both candidates are probed and the one that finds an area wins.
+        /// </summary>
+        private static bool ResolveBrush(NavFile nav, NavGeometry.Index index, BspVisibility? vis,
+            LadderFinder.LadderBrush brush, out uint direction, out NavArea? bottomArea)
+        {
+            var (dirA, dirB) = brush.CandidateDirections;
+
+            var bottomA = Probe(nav, index, vis, brush, brush.Bottom, dirA, brush.Bottom.Z, BottomHeightTolerance);
+            var bottomB = Probe(nav, index, vis, brush, brush.Bottom, dirB, brush.Bottom.Z, BottomHeightTolerance);
+
+            if (bottomA is not null && bottomB is null) { direction = dirA; bottomArea = bottomA; return true; }
+            if (bottomB is not null && bottomA is null) { direction = dirB; bottomArea = bottomB; return true; }
+
+            if (bottomA is not null && bottomB is not null)
+            {
+                // floor on both sides: prefer the one whose surface sits closest to the ladder base
+                float da = MathF.Abs(SurfaceZAt(bottomA, brush.Bottom, dirA) - brush.Bottom.Z);
+                float db = MathF.Abs(SurfaceZAt(bottomB, brush.Bottom, dirB) - brush.Bottom.Z);
+
+                if (da <= db) { direction = dirA; bottomArea = bottomA; }
+                else { direction = dirB; bottomArea = bottomB; }
+
+                return true;
+            }
+
+            direction = dirA;
+            bottomArea = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Which way a func_useableladder faces, and the area at its foot.
+        ///
+        /// Nothing on the entity says, so it is read off the landing: a climber steps forward off the
+        /// top, so the direction with a top area is the one the ladder faces away from, and the floor
+        /// they climb from is behind them. Directions are tried in a fixed order and the first that has
+        /// both ends wins. A ladder with no landing anywhere is still built from whatever floor is at
+        /// its foot, as a brush ladder is, and simply has no top.
+        /// </summary>
+        private static bool ResolveUseable(NavFile nav, NavGeometry.Index index, BspVisibility? vis,
+            LadderFinder.LadderBrush brush, out uint direction, out NavArea? bottomArea)
+        {
+            float lowest = brush.Bottom.Z + NavConstants.StepHeight;
+
+            for (uint forward = 0; forward < 4; forward++)
+            {
+                if (ProbeTop(nav, index, vis, brush, brush.Top, forward, lowest, exclude: null) is null)
+                    continue;
+
+                uint facing = Opposite(forward);
+                var bottom = Probe(nav, index, vis, brush, brush.Bottom, facing, brush.Bottom.Z, BottomHeightTolerance,
+                    UseableProbeDistances);
+
+                if (bottom is null)
+                    continue;
+
+                direction = facing;
+                bottomArea = bottom;
+                return true;
+            }
+
+            for (uint facing = 0; facing < 4; facing++)
+            {
+                var bottom = Probe(nav, index, vis, brush, brush.Bottom, facing, brush.Bottom.Z, BottomHeightTolerance,
+                    UseableProbeDistances);
+
+                if (bottom is null)
+                    continue;
+
+                direction = facing;
+                bottomArea = bottom;
+                return true;
+            }
+
+            direction = 0;
+            bottomArea = null;
+            return false;
+        }
+
+        /// <summary>
+        /// The area a climber steps onto at the top in one direction: at the nearest probe distance that
+        /// has one, the highest area whose surface lies in the landing window - from
+        /// <see cref="TopLandingAbove"/> over the top down to <see cref="TopLandingBelow"/> under it,
+        /// and above <paramref name="lowest"/>.
+        ///
+        /// The highest, which is how the engine's GetNavArea picks the area beneath a point, so that in a
+        /// window deep enough to reach a landing well under the brush, a floor further down never wins
+        /// over the landing above it.
+        /// </summary>
+        private static NavArea? ProbeTop(NavFile nav, NavGeometry.Index index, BspVisibility? vis,
+            LadderFinder.LadderBrush brush, BspFile.Vector3 top, uint dir, float lowest, NavArea? exclude)
+        {
+            float ceiling = top.Z + TopLandingAbove;
+            float floor = MathF.Max(top.Z - TopLandingBelow, lowest);
+
+            foreach (float distance in TopProbeDistances)
+            {
+                var point = Offset(top, dir, distance);
+
+                NavArea? best = null;
+                float bestZ = float.MinValue;
+
+                foreach (int i in index.Overlapping(point.X, point.Y, point.X, point.Y))
+                {
+                    var area = nav.Areas[i];
+
+                    if (exclude is not null && area.Id == exclude.Id)
+                        continue;
+
+                    float z = NavGeometry.SurfaceZ(area, point.X, point.Y);
+
+                    if (z > ceiling || z < floor || z <= bestZ)
+                        continue;
+
+                    best = area;
+                    bestZ = z;
+                }
+
+                if (best is null)
+                    continue;
+
+                // At the height of the landing, as the base probe does, not at the top of the brush.
+                var standing = StepOff(brush, point.X, point.Y, bestZ);
+                var landing = new BspFile.Vector3(point.X, point.Y, bestZ);
+
+                if (!IsReachable(vis, standing, landing))
+                    continue;
+
+                return best;
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -332,7 +495,8 @@ namespace Meshwright
         /// surrounding areas do not reach the wall are still connected.
         /// </summary>
         private static NavArea? Probe(NavFile nav, NavGeometry.Index index, BspVisibility? vis,
-            BspFile.Vector3 origin, uint dir, float referenceZ, float tolerance, float[]? distances = null)
+            LadderFinder.LadderBrush brush, BspFile.Vector3 origin, uint dir, float referenceZ, float tolerance,
+            float[]? distances = null)
         {
             foreach (var distance in distances ?? ProbeDistances)
             {
@@ -356,7 +520,7 @@ namespace Meshwright
                 // no nav area at the base, while the area sat directly under the probe the whole time.
                 float floor = NavGeometry.SurfaceZ(area, point.X, point.Y);
 
-                var standing = new BspFile.Vector3(origin.X, origin.Y, floor);
+                var standing = StepOff(brush, point.X, point.Y, floor);
                 var landing = new BspFile.Vector3(point.X, point.Y, floor);
 
                 if (!IsReachable(vis, standing, landing))
@@ -369,6 +533,33 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// Where a climber leaves the ladder for a point beside it: on the ladder's bounds nearest that
+        /// point, and a unit beyond them.
+        ///
+        /// Reachability is traced from here rather than from the middle of the brush. A ladder brush is
+        /// often sunk into the wall it is fixed to, so its face lies flush with the wall's - gm_construct's
+        /// is - and a trace starting in its middle starts inside the wall, which reports the wall in the
+        /// way of every floor, the one the ladder stands on included. A unit past the face is in the open
+        /// on the climbing side, and still inside the wall on the side it is fixed to.
+        /// </summary>
+        internal static BspFile.Vector3 StepOff(LadderFinder.LadderBrush ladder, float x, float y, float z)
+        {
+            float fx = Math.Clamp(x, ladder.Mins.X, ladder.Maxs.X);
+            float fy = Math.Clamp(y, ladder.Mins.Y, ladder.Maxs.Y);
+
+            float dx = x - fx, dy = y - fy;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+
+            if (length > 1f)
+            {
+                fx += dx / length;
+                fy += dy / length;
+            }
+
+            return new BspFile.Vector3(fx, fy, z);
+        }
+
+        /// <summary>
         /// Whether a climber could actually step between the ladder and the probe point, or whether
         /// there is a wall in the way.
         ///
@@ -377,7 +568,7 @@ namespace Meshwright
         /// inside it well within reach, and without this the top of the ladder gets wired to a room on
         /// the other side of the wall. Observed in game on rp_downtown_meowy.
         /// </summary>
-        private static bool IsReachable(BspVisibility? vis, BspFile.Vector3 from, BspFile.Vector3 to)
+        internal static bool IsReachable(BspVisibility? vis, BspFile.Vector3 from, BspFile.Vector3 to)
         {
             if (vis is null)
                 return true;
@@ -390,9 +581,9 @@ namespace Meshwright
                 var b = new BspFile.Vector3(to.X, to.Y, to.Z + height);
 
                 // GenerationMask: "can the climber get across to it", not "can it be seen". Ladder
-                // brushes are excluded as obstructions - `from` is the ladder's own base point, which
-                // sits inside the ladder brush, so counting that brush would make every ladder report
-                // itself as the wall in the way.
+                // brushes are excluded as obstructions - the climber is on one, and `from` is right
+                // against it (it used to be inside it), so counting that brush would make a ladder
+                // report itself as the wall in the way.
                 if (vis.IsLineClear(a, b, BspVisibility.GenerationMask, BspVisibility.ContentsLadder))
                     return true;
             }

@@ -113,6 +113,10 @@ namespace Meshwright
                     list.RemoveAll(jumpIds.Contains);
             }
 
+            // A ladder from the mesh this run started from can end on one. Generated ladders are built
+            // after this pass and never do.
+            NavIntegrity.ForgetLadderEnds(nav, jumpIds);
+
             return result;
         }
 
