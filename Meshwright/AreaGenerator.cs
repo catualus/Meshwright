@@ -798,6 +798,17 @@ namespace Meshwright
                     if (Shadowed(world, gx, gy, z, cell.Z))
                         continue;
 
+                    // The same on the way up, in the column being left. A climb has to rise through the
+                    // space over the walker's own head, and a floor there - the top of whatever the
+                    // ceiling is made of - means there is no such space. The sweep below cannot see it:
+                    // it runs flat at the height of the higher surface, which on a climb out from under a
+                    // thin roof is already above the roof, in open air. Crouch-only ground is where this
+                    // bit: on rp_downtown_tits_v25 an attic floor 64 units under a tiled roof stepped
+                    // straight up onto the roof's eave, and the flood spread 99 areas over a roof nothing
+                    // can reach.
+                    if (Shadowed(world, cell.Gx, cell.Gy, cell.Z, z))
+                        continue;
+
                     // And that a body can actually be dragged from here to there.
                     //
                     // Everything above this line reasons about the destination column alone: is there a

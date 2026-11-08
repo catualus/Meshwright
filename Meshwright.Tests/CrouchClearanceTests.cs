@@ -98,6 +98,23 @@ namespace Meshwright.Tests
             Assert.Equal(AreaGenerator.Clearance.Crouch, At(NavConstants.HumanCrouchHeight + 2f));
         }
 
+        /// <summary>
+        /// Crouch-only ground does not lead up through its own ceiling.
+        ///
+        /// The slab is four units thick with its top 64 units over the ground: in reach of a crouch
+        /// jump, with open sky above it, so the climb passes every test that looks only at the column
+        /// being climbed into, and the sweep across runs above the slab. The flood stepped up onto a
+        /// roof from the attic under it this way once crouch-only ground started being accepted.
+        /// </summary>
+        [Fact]
+        public void ACrouchFloorDoesNotClimbThroughItsOwnCeiling()
+        {
+            var world = Slab(60f, 64f);
+
+            Assert.Equal(AreaGenerator.Clearance.Crouch, AreaGenerator.SampleClearance(world, Mins, Maxs, 10, 10, 0f)[0]);
+            Assert.DoesNotContain(AreaGenerator.SampleNeighbours(world, Mins, Maxs, 10, 10, 0f), c => c.Z > 32f);
+        }
+
         /// <summary>The controls either side: no room even to crouch, and room to stand.</summary>
         [Fact]
         public void TooLowForACrouchIsNoGroundAndHighEnoughIsStanding()
