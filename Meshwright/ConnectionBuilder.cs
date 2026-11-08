@@ -189,9 +189,12 @@ namespace Meshwright
                 }
 
                 var refusal = TestCrossing(vis, from, to, fromX, fromY, fromZ, toX, toY, toZ, out _);
-                log.Add(refusal == Refusal.Clear
-                    ? $"{name}:   would connect"
-                    : $"{name}:   REFUSED by {refusal}");
+                if (refusal == Refusal.Clear)
+                    log.Add($"{name}:   would connect");
+                else if (CrossesElsewhere(vis, from, to, bounds, other, direction, centreA, overlap, out float elsewhere))
+                    log.Add($"{name}:   REFUSED by {refusal} at the middle, would connect further along (climb {elsewhere:F1})");
+                else
+                    log.Add($"{name}:   REFUSED by {refusal} at the middle and everywhere along the span");
             }
 
             return log;
@@ -262,6 +265,14 @@ namespace Meshwright
 
                         var refusal = TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ,
                             out bool startedSolid);
+                        if (refusal != Refusal.Clear &&
+                            CrossesElsewhere(vis, area, other, bounds, NavGeometry.GetBounds(other), direction,
+                                centreA, overlap, out float elsewhere))
+                        {
+                            refusal = Refusal.Clear;
+                            climb = elsewhere;
+                        }
+
                         if (refusal != Refusal.Clear)
                         {
                             local.Rejected++;
@@ -373,6 +384,50 @@ namespace Meshwright
 
             centreA = centreB = (low + high) / 2f;
             return true;
+        }
+
+        /// <summary>How far apart the crossings tried along a shared edge are, after the middle failed.</summary>
+        private const float SpanStep = 8f;
+
+        /// <summary>
+        /// Whether a walker gets across somewhere else along the shared span, the middle having failed.
+        ///
+        /// Only the middle of the span used to be tried. Two rooms meeting across a wall thinner than the
+        /// sampling grid share one long edge, with the doorway wherever the mapper put it, so they were
+        /// linked only when the door happened to sit at the centre: 296 of rp_downtown_tits_v25's 409
+        /// doorways connected, 384 with this. The engine links areas from node connections along the
+        /// whole edge, which is what this approximates. Tried in a fixed order, a body's half-width in
+        /// from each end so the whole hull fits, so the result does not depend on thread timing.
+        /// </summary>
+        private static bool CrossesElsewhere(BspVisibility vis, NavArea area, NavArea other,
+            NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
+            float centre, float overlap, out float climb)
+        {
+            climb = 0;
+            float low = centre - overlap / 2f + NavConstants.HalfHumanWidth;
+            float high = centre + overlap / 2f - NavConstants.HalfHumanWidth;
+
+            for (float c = low; c <= high; c += SpanStep)
+            {
+                if (MathF.Abs(c - centre) < SpanStep / 2f)
+                    continue;   // the middle, already tried
+
+                var (fromX, fromY) = EdgePoint(bounds, direction, c, -Inset);
+                var (toX, toY) = EdgePoint(otherBounds, NavGeometry.Opposite(direction), c, -Inset);
+                float fromZ = NavGeometry.SurfaceZ(area, fromX, fromY);
+                float toZ = NavGeometry.SurfaceZ(other, toX, toY);
+
+                if (!Reachable(toZ - fromZ))
+                    continue;
+
+                if (TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _) == Refusal.Clear)
+                {
+                    climb = toZ - fromZ;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
