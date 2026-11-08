@@ -19,9 +19,10 @@ namespace Meshwright
     /// 0.5% of Valve's own mesh, and every one of the worst offenders was a lone 25x25 area with its node
     /// hard against a wall.
     ///
-    /// Only the east and south edges need this. North and west sit exactly on a node, so they can be
-    /// short of a wall but never past it; extending those outward would be a coverage improvement and a
-    /// different change, and it would overlap the neighbour whose own trailing edge already ends there.
+    /// All four edges need this, because an area reaches half a step past its outermost node on every
+    /// side. Each edge is probed from inside the area out to the edge, and on an area narrower than two
+    /// steps from its centre line - see <see cref="ProbeSpan"/> for why that matters on the one-node
+    /// strips that line every wall.
     /// </summary>
     public static class AreaClipper
     {
@@ -365,15 +366,38 @@ namespace Meshwright
             return b.Width * b.Depth;
         }
 
+        /// <summary>
+        /// How far inside an edge its probe starts: a full sampling step, or half the area's width when
+        /// the area is narrower than two steps, so the probe starts on the centre line.
+        ///
+        /// The probe measures how much of the edge's last stretch is open, and the edge is then put that
+        /// far from where the probe began, so the start has to be on the area's own ground. A full step
+        /// in from one edge of a one-node strip, 25 units across, is the opposite edge, and once
+        /// anything has been clipped it is past it. After the east edge of a strip was pulled back to a
+        /// wall, the west probe started a step east of the west edge - inside that same wall - read no
+        /// room at all, and moved the west edge past the east one. The area came out inside out, failed
+        /// <see cref="Standable"/> and was discarded, which lost the walkable strip along every wall
+        /// with a node within a step of it. Clamping the start to the opposite edge is not enough: with
+        /// a wall on the far side, that edge is inside the wall too, and the probe collapses the area
+        /// onto it.
+        ///
+        /// The centre belongs to neither edge, so each probe only answers for its own half. It also
+        /// bounds the move. An edge always ends at least <see cref="MinimumOverhang"/> beyond its probe's
+        /// start, which is never short of the centre, so it stays more than that far from the opposite
+        /// edge and the area cannot invert, whatever the trace reports.
+        /// </summary>
+        private static float ProbeSpan(float width, float stepSize) => MathF.Min(stepSize, width * 0.5f);
+
         private static bool ClipEast(NavArea area, BspVisibility vis, float stepSize)
         {
             var b = NavGeometry.GetBounds(area);
             if (b.Width <= MinimumOverhang || b.Depth <= 0.01f)
                 return false;
 
-            float from = b.MaxX - stepSize;
+            float span = ProbeSpan(b.Width, stepSize);
+            float from = b.MaxX - span;
             var walls = new List<float>(Samples);
-            float floor = stepSize;
+            float floor = span;
 
             for (int i = 0; i < Samples; i++)
             {
@@ -384,12 +408,12 @@ namespace Meshwright
                 // keeps a ray over a rising slope above the slope rather than into it.
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, from, y), NavGeometry.SurfaceZ(area, b.MaxX, y));
 
-                walls.Add(Reach(vis, from, y, b.MaxX, y, z, stepSize));
-                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MaxX, y, stepSize));
+                walls.Add(Reach(vis, from, y, b.MaxX, y, z, span));
+                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MaxX, y, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
-            if (keep >= stepSize - 0.5f)
+            if (keep >= span - 0.5f)
                 return false;
 
             SetMaxX(area, from + keep);
@@ -399,9 +423,10 @@ namespace Meshwright
         /// <summary>
         /// <see cref="ClipEast"/>, mirrored onto the west edge.
         ///
-        /// The probe runs inward-to-outward exactly as the east pass does - from a step inside the edge
-        /// out to it - so the reach it measures is the distance the area may keep, and the new edge sits
-        /// that far west of the probe's start rather than east of it.
+        /// The probe runs inward-to-outward exactly as the east pass does - from a step inside the edge,
+        /// or the centre line of a narrow area, out to it - so the reach it measures is the distance the
+        /// area may keep, and the new edge sits that far west of the probe's start rather than east of
+        /// it.
         /// </summary>
         private static bool ClipWest(NavArea area, BspVisibility vis, float stepSize)
         {
@@ -409,21 +434,22 @@ namespace Meshwright
             if (b.Width <= MinimumOverhang || b.Depth <= 0.01f)
                 return false;
 
-            float from = b.MinX + stepSize;
+            float span = ProbeSpan(b.Width, stepSize);
+            float from = b.MinX + span;
             var walls = new List<float>(Samples);
-            float floor = stepSize;
+            float floor = span;
 
             for (int i = 0; i < Samples; i++)
             {
                 float y = b.MinY + (i + 0.5f) / Samples * b.Depth;
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, from, y), NavGeometry.SurfaceZ(area, b.MinX, y));
 
-                walls.Add(Reach(vis, from, y, b.MinX, y, z, stepSize));
-                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MinX, y, stepSize));
+                walls.Add(Reach(vis, from, y, b.MinX, y, z, span));
+                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MinX, y, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
-            if (keep >= stepSize - 0.5f)
+            if (keep >= span - 0.5f)
                 return false;
 
             SetMinX(area, from - keep);
@@ -437,21 +463,22 @@ namespace Meshwright
             if (b.Depth <= MinimumOverhang || b.Width <= 0.01f)
                 return false;
 
-            float from = b.MinY + stepSize;
+            float span = ProbeSpan(b.Depth, stepSize);
+            float from = b.MinY + span;
             var walls = new List<float>(Samples);
-            float floor = stepSize;
+            float floor = span;
 
             for (int i = 0; i < Samples; i++)
             {
                 float x = b.MinX + (i + 0.5f) / Samples * b.Width;
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, x, from), NavGeometry.SurfaceZ(area, x, b.MinY));
 
-                walls.Add(Reach(vis, x, from, x, b.MinY, z, stepSize));
-                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MinY, stepSize));
+                walls.Add(Reach(vis, x, from, x, b.MinY, z, span));
+                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MinY, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
-            if (keep >= stepSize - 0.5f)
+            if (keep >= span - 0.5f)
                 return false;
 
             SetMinY(area, from - keep);
@@ -464,21 +491,22 @@ namespace Meshwright
             if (b.Depth <= MinimumOverhang || b.Width <= 0.01f)
                 return false;
 
-            float from = b.MaxY - stepSize;
+            float span = ProbeSpan(b.Depth, stepSize);
+            float from = b.MaxY - span;
             var walls = new List<float>(Samples);
-            float floor = stepSize;
+            float floor = span;
 
             for (int i = 0; i < Samples; i++)
             {
                 float x = b.MinX + (i + 0.5f) / Samples * b.Width;
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, x, from), NavGeometry.SurfaceZ(area, x, b.MaxY));
 
-                walls.Add(Reach(vis, x, from, x, b.MaxY, z, stepSize));
-                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MaxY, stepSize));
+                walls.Add(Reach(vis, x, from, x, b.MaxY, z, span));
+                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MaxY, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
-            if (keep >= stepSize - 0.5f)
+            if (keep >= span - 0.5f)
                 return false;
 
             SetMaxY(area, from + keep);
@@ -486,7 +514,8 @@ namespace Meshwright
         }
 
         /// <summary>
-        /// How far along the edge's outward run there is still floor under the area, up to the full step.
+        /// How far along the edge's outward run there is still floor under the area, up to the run's
+        /// whole <paramref name="length"/>.
         ///
         /// The companion to <see cref="Reach"/>, and the half that was missing. Reach traces horizontally
         /// at knee height, so it finds the thing that stops an area growing *into* something - a wall, a
@@ -500,7 +529,7 @@ namespace Meshwright
         /// of the building.
         /// </summary>
         private static float FloorReach(BspVisibility vis, NavArea area,
-            float x0, float y0, float x1, float y1, float stepSize)
+            float x0, float y0, float x1, float y1, float length)
         {
             const int Steps = 4;
 
@@ -519,18 +548,19 @@ namespace Meshwright
                         NavConstants.StepHeight * 3f, out float actual) ||
                     MathF.Abs(actual - claimed) > NavConstants.StepHeight)
                 {
-                    return (i - 1) / (float)Steps * stepSize;
+                    return (i - 1) / (float)Steps * length;
                 }
             }
 
-            return stepSize;
+            return length;
         }
 
         /// <summary>
-        /// How far along the edge's outward run the world stays open, up to the full step.
+        /// How far along the edge's outward run the world stays open, up to the run's whole
+        /// <paramref name="length"/>.
         /// </summary>
         private static float Reach(BspVisibility vis, float x0, float y0, float x1, float y1, float z,
-            float stepSize)
+            float length)
         {
             var a = new BspFile.Vector3(x0, y0, z + ProbeHeight);
             var b = new BspFile.Vector3(x1, y1, z + ProbeHeight);
@@ -549,12 +579,12 @@ namespace Meshwright
             // GenerationMask: an area should be clipped back at anything a player's body cannot pass,
             // which includes grates and windows the sight mask lets straight through.
             if (!vis.TryTraceSurface(a, b, BspVisibility.GenerationMask, out var hit, out _))
-                return stepSize;
+                return length;
 
             float dx = hit.X - x0;
             float dy = hit.Y - y0;
 
-            return Math.Clamp(MathF.Sqrt(dx * dx + dy * dy), 0f, stepSize);
+            return Math.Clamp(MathF.Sqrt(dx * dx + dy * dy), 0f, length);
         }
 
         private static float Median(List<float> values)
