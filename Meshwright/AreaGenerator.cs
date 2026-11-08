@@ -188,32 +188,45 @@ namespace Meshwright
 
             while (frontier.Count > 0 && visited.Count < MaxVisited)
             {
-                var next = new System.Collections.Concurrent.ConcurrentBag<Cell>();
+                var reached = new System.Collections.Concurrent.ConcurrentBag<Cell>();
 
+                // Expansion only reads the visited set; nothing is claimed until the whole level is in.
+                // Claiming inside the parallel loop made the first thread to arrive the winner, and two
+                // floors of one column within the same eight units share a key: which of them became
+                // the cell - and so which height its node, its links and its area got - depended on
+                // thread timing. rp_downtown_tits_v25 came out 17,189 areas on one run and 17,191 on
+                // the next, from the same build at the same thread count.
                 Parallel.ForEach(frontier, NavConcurrency.Options, cell =>
                 {
                     Interlocked.Increment(ref visitedCount);
 
                     foreach (var neighbour in Neighbours(world, cell))
                     {
-                        if (!visited.TryAdd(Key(neighbour), 0))
-                            continue;
-
-                        next.Add(neighbour);
-
-                        // Cells already represented still propagate - the flood has to be able to cross
-                        // existing mesh to reach the far side of it - but they contribute no new area.
-                        var at = world.PositionOf(neighbour.Gx, neighbour.Gy, neighbour.Z);
-
-                        if (index.FindAt(at.X, at.Y, neighbour.Z, CoveredTolerance) < 0)
-                        {
-                            accepted.Add(neighbour);
-                            Interlocked.Increment(ref uncovered);
-                        }
+                        if (!visited.ContainsKey(Key(neighbour)))
+                            reached.Add(neighbour);
                     }
                 });
 
-                frontier = [.. next];
+                // Settled in a fixed order, so the same cell wins a shared key every run: the lowest
+                // floor, which is the order the result is sorted in further down.
+                var next = reached.ToList();
+                next.Sort(CompareCells);
+                next.RemoveAll(cell => !visited.TryAdd(Key(cell), 0));
+
+                // Cells already represented still propagate - the flood has to be able to cross existing
+                // mesh to reach the far side of it - but they contribute no new area.
+                Parallel.ForEach(next, NavConcurrency.Options, neighbour =>
+                {
+                    var at = world.PositionOf(neighbour.Gx, neighbour.Gy, neighbour.Z);
+
+                    if (index.FindAt(at.X, at.Y, neighbour.Z, CoveredTolerance) < 0)
+                    {
+                        accepted.Add(neighbour);
+                        Interlocked.Increment(ref uncovered);
+                    }
+                });
+
+                frontier = next;
 
                 // No denominator exists here - the flood finds out how much ground there is by walking
                 // it - so this reports what it has found rather than inventing a percentage.
@@ -229,14 +242,7 @@ namespace Meshwright
             // Sorted so the node grid, and therefore the mesh, is identical run to run: a ConcurrentBag
             // returns its contents in whatever order threads happened to add them.
             var ordered = accepted.ToList();
-            ordered.Sort((a, b) =>
-            {
-                int byX = a.Gx.CompareTo(b.Gx);
-                if (byX != 0) return byX;
-
-                int byY = a.Gy.CompareTo(b.Gy);
-                return byY != 0 ? byY : a.Z.CompareTo(b.Z);
-            });
+            ordered.Sort(CompareCells);
 
             // Accepted cells become nodes carrying the ground normal already sampled for them, and
             // areas are built from those - so corner heights come from real sampled points and an area
@@ -502,6 +508,16 @@ namespace Meshwright
 
         /// <summary>Height is quantised so two probes of the same surface hash to the same cell.</summary>
         private static (int, int, int) Key(Cell c) => (c.Gx, c.Gy, (int)MathF.Round(c.Z / 8f));
+
+        /// <summary>Column by column, lowest floor first: the one order cells are ever settled in.</summary>
+        private static int CompareCells(Cell a, Cell b)
+        {
+            int byX = a.Gx.CompareTo(b.Gx);
+            if (byX != 0) return byX;
+
+            int byY = a.Gy.CompareTo(b.Gy);
+            return byY != 0 ? byY : a.Z.CompareTo(b.Z);
+        }
 
         /// <summary>
         /// One expansion of the flood from one cell, for tests.
@@ -1158,7 +1174,13 @@ namespace Meshwright
             /// <inheritdoc cref="Clearance"/>
             public Clearance ClearanceAt(int gx, int gy, float z)
             {
-                var key = (gx, gy, (int)MathF.Round(z / 8f));
+                // Keyed on the exact height, not the eight-unit bucket the visited set uses. Two floors of
+                // one column in the same bucket can have different answers - a tread and the landing a
+                // few units under it, one with room to stand and one without - and a bucketed cache
+                // handed both whichever answer was computed first, which on a parallel flood depends on
+                // thread timing. The heights asked about are the column's own sampled floors, so the
+                // cache still serves every repeat.
+                var key = (gx, gy, BitConverter.SingleToInt32Bits(z));
 
                 if (clearance.TryGetValue(key, out var cached))
                     return cached;

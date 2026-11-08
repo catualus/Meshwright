@@ -99,6 +99,23 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// Two floors of one column a few units apart get their own answers, whichever is asked first.
+        ///
+        /// The answers are cached per column and height, and the height used to be rounded to the
+        /// eight units the flood's visited set uses - so the floor asked about second got the first
+        /// one's answer. Here the top of a thin slab, with open sky over it, and the ground two units
+        /// under the slab, with no room at all, round to the same eight units.
+        /// </summary>
+        [Fact]
+        public void TwoFloorsAFewUnitsApartAreJudgedSeparately()
+        {
+            var answers = AreaGenerator.SampleClearance(Slab(2f, 4f), Mins, Maxs, 10, 10, 4f, 0f);
+
+            Assert.Equal(AreaGenerator.Clearance.Stand, answers[0]);
+            Assert.Equal(AreaGenerator.Clearance.None, answers[1]);
+        }
+
+        /// <summary>
         /// Crouch-only ground does not lead up through its own ceiling.
         ///
         /// The slab is four units thick with its top 64 units over the ground: in reach of a crouch
