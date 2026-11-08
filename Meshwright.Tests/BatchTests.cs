@@ -90,6 +90,34 @@ namespace Meshwright.Tests
             Assert.Equal([map], found.Select(Path.GetFullPath));
         }
 
+        /// <summary>
+        /// A flag missing its value is refused by name. Skipped blind, "-o" swallowed "-gamename" and
+        /// left "Garry's Mod" to be read as a map, so the batch failed with "no such file" about a
+        /// game's name.
+        /// </summary>
+        [Fact]
+        public void AFlagMissingItsValueIsRefusedByName()
+        {
+            string map = Map("only.bsp");
+
+            var refused = Assert.Throws<ArgumentException>(
+                () => Program.CollectMaps(Args(map, "-o", "-gamename", "Garry's Mod")));
+
+            Assert.StartsWith("-o needs a file path", refused.Message);
+            Assert.Throws<ArgumentException>(() => Program.CollectMaps(Args(map, "-threads")));
+        }
+
+        /// <summary>A host fills -gamename in, so it is skipped when present and never refused.</summary>
+        [Fact]
+        public void AGameNameIsSkippedButNeverRefused()
+        {
+            string map = Map("only.bsp");
+
+            Assert.Equal([map], Program.CollectMaps(Args(map, "-gamename", "Garry's Mod")).Select(Path.GetFullPath));
+            Assert.Equal([map], Program.CollectMaps(Args(map, "-gamename", "")).Select(Path.GetFullPath));
+            Assert.Equal([map], Program.CollectMaps(Args(map, "-gamename")).Select(Path.GetFullPath));
+        }
+
         [Fact]
         public void TheSameMapNamedTwiceIsProcessedOnce()
         {

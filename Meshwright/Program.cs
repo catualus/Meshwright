@@ -191,19 +191,18 @@ namespace Meshwright
         /// Reads a global "-threads N" flag, wherever it appears in the argument list. Not part of any
         /// one command's own flag parsing because it has to apply before the command even starts.
         /// </summary>
-        private static bool TryGetThreadCount(string[] args, out int threads)
+        internal static bool TryGetThreadCount(string[] args, out int threads)
         {
             threads = 0;
-            int i = Array.FindIndex(args, a => a.Equals("-threads", StringComparison.OrdinalIgnoreCase));
+            int i = FindFlag(args, "-threads");
 
-            if (i < 0 || i + 1 >= args.Length)
+            if (i < 0)
                 return false;
 
-            if (!int.TryParse(args[i + 1], out threads) || threads < 1)
-            {
-                throw new ArgumentException(
-                    $"-threads expects a positive integer, got '{args[i + 1]}'");
-            }
+            string value = ValueAfter(args, i);
+
+            if (!int.TryParse(value, out threads) || threads < 1)
+                throw new ArgumentException($"-threads expects a positive integer, got '{value}'");
 
             return true;
         }
@@ -227,15 +226,24 @@ namespace Meshwright
             // called, which is a display name nobody constrained: "Garry's Mod", "Team Fortress 2",
             // someone's renamed mod. Aborting a whole compile because a configuration has an unusual
             // name would be absurd, so that one falls back to the default and says it did.
-            int i = Array.FindIndex(args, a => a.Equals("-game", StringComparison.OrdinalIgnoreCase));
+            int i = FindFlag(args, "-game");
             bool strict = i >= 0;
 
             if (i < 0)
-                i = Array.FindIndex(args, a => a.Equals("-gamename", StringComparison.OrdinalIgnoreCase));
+                i = FindFlag(args, "-gamename");
 
-            if (i < 0 || i + 1 >= args.Length) return;
+            if (i < 0) return;
 
-            string game = args[i + 1].ToLowerInvariant();
+            // The same difference in tolerance applies to a missing name. -game with nothing after it is
+            // refused like any other value flag; -gamename with nothing usable after it is a host whose
+            // configuration has no name, which is not worth stopping a compile over.
+            string? named = strict
+                ? ValueAfter(args, i)
+                : i + 1 < args.Length && !IsFlag(args[i + 1]) ? args[i + 1] : null;
+
+            if (named is null) return;
+
+            string game = named.ToLowerInvariant();
 
             bool counterStrike = strict
                 ? game is "cs" or "css" or "csgo" or "cstrike" or "counterstrike"
@@ -243,7 +251,7 @@ namespace Meshwright
                   game is "cs" or "css" or "csgo" or "cstrike" or "counterstrike";
 
             if (strict && !counterStrike && game is not ("gmod" or "garrysmod" or "hl2" or "tf2" or "source"))
-                throw new ArgumentException($"-game does not know '{args[i + 1]}'; use cs, css, csgo, gmod, hl2, tf2 or source");
+                throw new ArgumentException($"-game does not know '{named}'; use cs, css, csgo, gmod, hl2, tf2 or source");
 
             NavConstants.UseCounterStrikeLimits = counterStrike;
 
@@ -262,24 +270,23 @@ namespace Meshwright
         /// <c>&lt;mod&gt;/maps</c>, so the mod directory is two levels up. That works wherever the map
         /// sits inside a game install and fails completely anywhere else: a BSP in a build server's
         /// output directory infers a mod directory that does not exist, so no model resolves, every
-        /// static prop contributes nothing, and the mesh floats over all of them. Nothing about that
-        /// looks like an error - the run reports "0 collision triangles" among a page of other numbers
-        /// and otherwise succeeds.
+        /// static prop contributes nothing, and the mesh floats over all of them. The run warns that
+        /// those models could not be found, and otherwise succeeds.
         ///
         /// That is the case the README has always described and had no answer for, which is why a
         /// directory that does not exist is refused here rather than skipped. A typo would put the run
-        /// straight back into the failure this exists to prevent, and silently.
+        /// straight back into the failure this exists to prevent.
         /// </summary>
-        private static void ApplyContentRoots(string[] args)
+        internal static void ApplyContentRoots(string[] args)
         {
             var roots = new List<string>();
 
-            for (int i = 0; i < args.Length - 1; i++)
+            for (int i = 0; i < args.Length; i++)
             {
                 if (!args[i].Equals("-content", StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                string path = args[i + 1];
+                string path = ValueAfter(args, i);
 
                 if (!Directory.Exists(path))
                     throw new DirectoryNotFoundException($"-content: no such directory: {path}");
@@ -512,10 +519,22 @@ namespace Meshwright
             {
                 string arg = args[i];
 
-                if (arg.StartsWith('-'))
+                if (IsFlag(arg))
                 {
-                    // Skip a flag's value, so "-threads 8" does not read 8 as a map.
-                    if (TakesValue(arg)) i++;
+                    // Skip a flag's value, so "-threads 8" does not read 8 as a map. Checked on the way
+                    // past, so "-o" with nothing after it is refused by name rather than swallowing the
+                    // next flag and leaving that flag's value to be read as a map. -gamename gets the
+                    // tolerance ApplyGame gives it: its value is skipped when there is one.
+                    if (arg.Equals("-gamename", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (i + 1 < args.Length && !IsFlag(args[i + 1])) i++;
+                    }
+                    else if (TakesValue(arg))
+                    {
+                        ValueAfter(args, i);
+                        i++;
+                    }
+
                     continue;
                 }
 
@@ -550,11 +569,11 @@ namespace Meshwright
                 .ToList();
         }
 
-        /// <summary>Flags whose next argument is a value rather than a map.</summary>
+        /// <summary>Flags whose next argument is a value rather than a map. -gamename is handled
+        /// separately, in <see cref="CollectMaps"/>.</summary>
         private static bool TakesValue(string flag) =>
             flag.Equals("-threads", StringComparison.OrdinalIgnoreCase) ||
             flag.Equals("-game", StringComparison.OrdinalIgnoreCase) ||
-            flag.Equals("-gamename", StringComparison.OrdinalIgnoreCase) ||
             flag.Equals("-content", StringComparison.OrdinalIgnoreCase) ||
             flag.Equals("-maxviewdistance", StringComparison.OrdinalIgnoreCase) ||
             flag.Equals("-d", StringComparison.OrdinalIgnoreCase) ||
@@ -758,10 +777,8 @@ namespace Meshwright
             if (!File.Exists(bspPath)) throw new FileNotFoundException($"no such file: {bspPath}");
             if (!File.Exists(navPath)) throw new FileNotFoundException($"no such file: {navPath}");
 
-            int outFlag = Array.FindIndex(args, a => a.Equals("-o", StringComparison.OrdinalIgnoreCase));
-            string outPath = outFlag >= 0 && outFlag + 1 < args.Length
-                ? args[outFlag + 1]
-                : Path.Combine(Path.GetDirectoryName(navPath) ?? ".",
+            string outPath = FlagValue(args, "-o")
+                ?? Path.Combine(Path.GetDirectoryName(navPath) ?? ".",
                     Path.GetFileNameWithoutExtension(navPath) + ".ladders.nav");
 
             // The tracer is what stops a ladder wiring itself to whatever happens to be nearest through
@@ -1362,11 +1379,63 @@ namespace Meshwright
         /// </summary>
         private static (BspFile Bsp, BspVisibility Vis) LoadBsp(string path) => NavPipeline.LoadBsp(path);
 
-        private static string? FlagValue(string[] args, string flag)
+        /// <summary>
+        /// The value given to a flag, or null when the flag is not there at all.
+        ///
+        /// A flag that is there without a value is refused rather than handed whatever comes next.
+        /// Compile Pal is why: a parameter that takes a value, ticked with the value left empty, arrives
+        /// as the bare flag, and the next thing on its command line is the -gamename it appends to every
+        /// step. Taken at face value, an empty "Write to a different file" wrote the mesh to a file
+        /// called -gamename in Compile Pal's own folder and exited 0 with the real .nav untouched, and
+        /// an empty "Thread limit" failed after VBSP, VVIS and VRAD had run, complaining about
+        /// "-gamename" rather than about the thread limit.
+        /// </summary>
+        internal static string? FlagValue(string[] args, string flag)
         {
-            int i = Array.FindIndex(args, a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
-            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+            int i = FindFlag(args, flag);
+            return i < 0 ? null : ValueAfter(args, i);
         }
+
+        /// <summary>
+        /// The value after the flag at <paramref name="i"/>, refusing one that is missing, empty, or
+        /// another flag.
+        ///
+        /// Anything starting with '-' counts as another flag. None of the flags read through here takes
+        /// a negative number; the coordinates that -at, -column and -near take can be negative, so those
+        /// commands read them themselves.
+        /// </summary>
+        internal static string ValueAfter(string[] args, int i)
+        {
+            string flag = args[i];
+            string? value = i + 1 < args.Length ? args[i + 1] : null;
+
+            if (!string.IsNullOrWhiteSpace(value) && !IsFlag(value))
+                return value;
+
+            string found = value is null ? "nothing follows it"
+                : IsFlag(value) ? $"the next argument is {value}"
+                : "it is empty";
+
+            throw new ArgumentException(
+                $"{flag} needs {ValueKind(flag)}, but {found}. From Compile Pal, that means the parameter " +
+                "was ticked with its value left empty: fill it in or untick it.");
+        }
+
+        /// <summary>What a flag's value is, for saying so when it is missing.</summary>
+        private static string ValueKind(string flag) => flag.ToLowerInvariant() switch
+        {
+            "-o" => "a file path",
+            "-threads" => "a thread count",
+            "-content" => "a directory",
+            "-maxviewdistance" or "-d" => "a distance",
+            "-game" => "a game name (cs, css, csgo, gmod, hl2, tf2 or source)",
+            _ => "a value",
+        };
+
+        private static bool IsFlag(string arg) => arg.StartsWith('-');
+
+        private static int FindFlag(string[] args, string flag) =>
+            Array.FindIndex(args, a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
 
 
         /// <summary>
@@ -1529,13 +1598,20 @@ namespace Meshwright
             // -at explains one place rather than scoring the map. When a generated mesh and an
             // engine-made one disagree about a staircase, the useful question is which of the six probe
             // lines vetoed it and why, and that is only answerable one area at a time.
-            if (FlagValue(args, "-at") is { } atX)
+            //
+            // Read here rather than through FlagValue, which refuses a value starting with '-': these
+            // are coordinates, and a coordinate can be negative.
+            int at = FindFlag(args, "-at");
+
+            if (at >= 0)
             {
+                if (at + 3 >= args.Length)
+                    throw new ArgumentException("-at needs three coordinates: -at x y z");
+
                 var c = System.Globalization.CultureInfo.InvariantCulture;
-                int i = Array.FindIndex(args, a => a.Equals("-at", StringComparison.OrdinalIgnoreCase));
-                float px = float.Parse(atX, c);
-                float py = float.Parse(args[i + 2], c);
-                float pz = float.Parse(args[i + 3], c);
+                float px = float.Parse(args[at + 1], c);
+                float py = float.Parse(args[at + 2], c);
+                float pz = float.Parse(args[at + 3], c);
 
                 var index = new NavGeometry.Index(nav.Areas);
                 int found = index.FindAt(px, py, pz, 64f);
