@@ -278,9 +278,9 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,630 | 19,577 | 16,933 |
-| Connections | 11,446 | 13,984 | 91,538 | 75,685 |
-| Height error, mean | 1.0 | 1.0 | 10.3 | **0.7** |
+| Areas | 2,271 | 2,637 | 19,577 | 17,085 |
+| Connections | 11,446 | 14,010 | 91,538 | 76,303 |
+| Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **45 (0.3%)** |
 | Areas over open air | 3 | **0** | 215 (1.1%) | **1** |
@@ -297,20 +297,26 @@ and the areas the run's own reachability check cannot reach from any spawn.
 
 | | gm_construct | rp_downtown_tits_v25 |
 |---|---|---|
-| Coverage of the reference's ground a player can reach | **98.1%** | 67.3% |
-| Coverage of every reference area including stranded | 88.5% | 66.9% |
-| Areas on ground the reference does not have | 2.7% | 9.2% |
+| Coverage of the reference's ground a player can reach | **98.4%** | 67.4% |
+| Coverage of every reference area including stranded | 88.7% | 66.9% |
+| Areas on ground the reference does not have | 2.7% | 9.3% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 379 (2.2%) |
+| Areas no player spawn can reach | 3 (0.1%) | 393 (2.3%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
-drops the second row to 88.5%.
+drops the second row to 88.7%.
 
-67.3% on the large map is the weakest result here, and only a small part of it is the reference's
-fault: of the 6,476 shipped areas the generated mesh does not cover, 950 sit more than 48 units over
-the floor or have no floor under them, and 5,526 are on real ground. `build-areas -reference
-<known-good.nav>` breaks the misses down by cause.
+67.4% on the large map is mostly the reference's doing. It looks like the output of an earlier
+Meshwright, whose flood walked through thin walls and terrain. Of the 6,135 reachable shipped areas
+the generated mesh does not cover, 5,211 are on real ground, and 4,301 of those are under water -
+most of them the sea and lake bed under the displacement islands in the south-east of the map.
+Most of the rest lie under terrain and props in the
+park and hills in the middle of the map. Walked from the spawns in Garry's Mod with the game's own
+player collision - a crouched hull, 18 unit steps, 64 unit jumps, no ladders - 26 of the 5,211 can be
+reached, against 88% of the ground both meshes have; another 252 are within half a sampling step of a
+generated area and miss only on where the score samples them. `build-areas -reference
+<known-good.nav>` breaks misses down by the sampler's own reasons.
 
 The large map's 40 spawns without an area stand 105 units above the floor with nothing under them. The
 ground below them is meshed, and the shipped mesh has an area under the same 56. gm_construct's 3
