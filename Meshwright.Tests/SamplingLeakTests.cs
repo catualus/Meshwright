@@ -215,15 +215,18 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
-        /// Ground the renderer skips is not ground. Same geometry, same reach, same headroom; the only
-        /// difference is the flag on the face, and a sealed floor is nearly always wearing it.
+        /// Ground the renderer skips is still ground, as it is for the engine's nav_generate: the flag
+        /// on the face changes nothing about where a player can stand. Refusing it lost every nodraw
+        /// floor Valve lays under non-solid props, 20% of pl_badwater's ground and everything past it.
         /// </summary>
         [Fact]
-        public void NodrawGroundIsNotSampled()
+        public void NodrawGroundIsSampledLikeAnyOther()
         {
-            var found = AreaGenerator.SampleNeighbours(World(groundNodraw: true), Mins, Maxs, 0, 0, 0f);
+            var nodraw = AreaGenerator.SampleNeighbours(World(groundNodraw: true), Mins, Maxs, 0, 0, 0f);
+            var drawn = AreaGenerator.SampleNeighbours(World(groundNodraw: false), Mins, Maxs, 0, 0, 0f);
 
-            Assert.Empty(found);
+            Assert.NotEmpty(nodraw);
+            Assert.Equal(drawn, nodraw);
         }
     }
 }

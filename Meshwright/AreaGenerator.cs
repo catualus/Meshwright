@@ -1014,28 +1014,16 @@ namespace Meshwright
                     if (MathF.Abs(surface.Position.Z - z) > NavNodeGrid.HeightGranularity)
                         continue;
 
-                    // A face the renderer skips is not ground, whatever its normal says.
+                    // Nodraw faces count as ground, as they do for the engine's nav_generate.
                     //
-                    // Nodraw is a texinfo flag rather than a brush content, so it cannot be masked out
-                    // of a trace: every nodraw brush is CONTENTS_SOLID like any other, and until the
-                    // tracer began reporting which face it landed on there was no way to ask. It has to
-                    // stay solid - it shadows the floors under it, it blocks the sweeps around it, a
-                    // walker cannot pass through it - and this rejects it only as somewhere to stand.
-                    //
-                    // Stricter than the engine, deliberately. nav_generate builds on nodraw as readily
-                    // as on brick, and gets away with it because its flood starts at a player spawn and
-                    // has no way into the places nodraw floors are: mappers use it precisely where
-                    // nothing will ever be seen, which is the same set of places nothing can ever stand.
-                    // The sampler here reaches further - it seeds from ladder tops and lift stops as
-                    // well - so it needs the guard the engine's own reachability gave it for free.
-                    //
-                    // The cost is a real one and worth stating: where a mapper has nodraw-ed a floor
-                    // that something else visibly covers - a prop, a func_brush - and that cover cannot
-                    // be resolved (an unfound prop model, say), this now discards ground the map really
-                    // has. `meshwright props` reports exactly that case.
-                    if (surface.Nodraw)
-                        return false;
-
+                    // They used to be refused, on the reasoning that mappers nodraw only what nothing
+                    // will ever see, and that this sampler - which also seeds from ladder tops and lift
+                    // stops - could reach such places where the engine's spawn-rooted flood could not.
+                    // Since the flood sweeps a body between samples it no longer walks through thin walls
+                    // into sealed space, and the guard cost far more than it saved: Valve puts nodraw
+                    // collision under non-solid prop floors, so 20% of pl_badwater's ground and everything
+                    // beyond it went missing (9% of Valve's routes, 97% without the guard), while on
+                    // gm_construct the mesh came out byte-identical either way.
                     return surface.Normal.Z >= NavConstants.SlopeLimit;
                 }
 
