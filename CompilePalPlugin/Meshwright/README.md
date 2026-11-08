@@ -25,6 +25,11 @@ Turn on **Generate the mesh** and it will also find walkable ground the mesh is 
 from nothing if there is no `.nav` at all. That part is still experimental; review the result before
 shipping it.
 
+Compile again without the **NAV** step and the step starts from its own last output, keeping what it
+made then instead of rebuilding it. If you have changed the map's geometry since, turn on **Start
+from scratch** to rebuild the mesh. The step warns when it is building on its own output untouched,
+and says nothing once you have edited the mesh in game.
+
 **Counter-Strike movement limits** is the one option that is wrong to leave at its default on the
 wrong game. Three constants in `nav.h` differ between Counter-Strike and everything else, and there
 is no way to tell which is right from the BSP, so it has to be told. Off suits Garry's Mod, HL2 and

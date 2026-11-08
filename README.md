@@ -107,6 +107,12 @@ To also find walkable ground the mesh is missing, or to build a mesh where there
 meshwright generate map.bsp -generateareas
 ```
 
+Run again over its own output, `generate` keeps what the last run made instead of rebuilding it,
+and does not check it against the map again. If the map's geometry has changed since, add `-scratch`
+to rebuild the mesh. So that this is hard to miss, Meshwright remembers each mesh it writes, as a
+hash of the file in `%LOCALAPPDATA%\Meshwright\written`, and warns when a run starts from one nobody
+has touched since. A mesh edited in game is not warned about.
+
 ### A whole map pack
 
 ```bash

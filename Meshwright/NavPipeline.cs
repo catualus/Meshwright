@@ -125,6 +125,16 @@ namespace Meshwright
             /// <inheritdoc cref="BspPath"/>
             public string? SeedNavPath;
 
+            /// <summary>
+            /// When the seed mesh is this tool's own output from an earlier run, unchanged since: when
+            /// that run wrote it, in UTC. Null when it is not, or when nobody checked.
+            ///
+            /// The caller finds this out, through <see cref="NavProvenance"/>, because the caller is the
+            /// one that reads and writes files; the run only decides whether it matters, which depends
+            /// on whether the seed is about to be discarded.
+            /// </summary>
+            public DateTime? SeedFromEarlierRun;
+
             /// <summary>Where the running commentary goes. Null discards it.</summary>
             public Action<string>? Log;
 
@@ -309,6 +319,9 @@ namespace Meshwright
                 }
             }
 
+            if (EarlierRunWarning(options) is { } earlier)
+                result.Warnings.Add(earlier);
+
             NavConcurrency.ThrowIfCancelled();
 
             if (options.GenerateAreas && !result.Resumed)
@@ -483,6 +496,44 @@ namespace Meshwright
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// What to tell the caller when this run is building on its own earlier output, or null when
+        /// there is nothing to say.
+        ///
+        /// A warning, not a repair. Nothing in the pipeline re-checks what it is handed: areas below the
+        /// first generated id are never clipped, connections are only added, and a ladder is only
+        /// rebuilt while its brush still exists. So whatever the earlier run made goes forward as if
+        /// it were authored, and if the map has changed in between, some of it no longer fits. Removing
+        /// it here would need to know which parts were touched up in game since, which nothing records;
+        /// <see cref="NavProvenance"/> only says the file as a whole is untouched. Pointing at the
+        /// option that rebuilds it is the safe step.
+        ///
+        /// Nothing to say when the seed is about to be discarded, because then nothing of it survives.
+        /// </summary>
+        internal static string? EarlierRunWarning(Options options)
+        {
+            if (options.SeedFromEarlierRun is not { } written)
+                return null;
+
+            if (options.FromScratch && options.GenerateAreas)
+                return null;
+
+            string when = NavProvenance.Describe(written);
+
+            // The remedy depends on the mode. "Start from scratch" only does anything alongside
+            // generation, so a run that is only finishing the mesh has to name both, or point at
+            // regenerating the base mesh instead.
+            string remedy = options.GenerateAreas
+                ? "Tick \"Start from scratch\" (-scratch) to rebuild the mesh from the map"
+                : "Regenerate the mesh before this step (the NAV step, or nav_generate in game), or tick " +
+                  "\"Generate the mesh\" and \"Start from scratch\" (-generateareas -scratch) to rebuild it here";
+
+            return $"The .nav this run started from is Meshwright's own output from {when}, unchanged since. " +
+                   "The areas, connections and ladders that run made are kept without being checked against " +
+                   "the map again, so if its geometry has changed since, some may float, cross new walls or " +
+                   $"lead to ladders that are gone. {remedy}; that also drops anything authored in it before then.";
         }
 
         /// <summary>

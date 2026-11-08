@@ -610,7 +610,16 @@ namespace Meshwright
             if (File.Exists(navPath))
             {
                 nav = NavFile.Load(navPath);
-                Console.WriteLine($"nav   {Path.GetFileName(navPath)}: {nav.Areas.Count:N0} areas");
+
+                // Whether this is the mesh an earlier run here left behind, untouched since. The run
+                // builds on it as if it were authored, so it needs to know to say so.
+                if (NavProvenance.TryRecognise(navPath, out var written))
+                    options.SeedFromEarlierRun = written;
+
+                Console.WriteLine($"nav   {Path.GetFileName(navPath)}: {nav.Areas.Count:N0} areas" +
+                                  (options.SeedFromEarlierRun is null
+                                      ? ""
+                                      : $", Meshwright's own output from {NavProvenance.Describe(written)}"));
             }
             else if (options.GenerateAreas)
             {
@@ -686,6 +695,11 @@ namespace Meshwright
                 TryDelete(temporary);
                 throw;
             }
+
+            // So the next run handed this file can tell it from an authored one. Every output, not only
+            // one written over its own seed: a mesh written with -o and later given back as the seed is
+            // the same situation.
+            NavProvenance.Record(outPath, DateTime.UtcNow);
 
             // Only when the output replaced the seed. Written to a different file, the seed is untouched
             // and the ordinary fingerprint already matches next time; and only when the cache on disk
