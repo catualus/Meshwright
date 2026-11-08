@@ -189,7 +189,8 @@ These apply to every command, not just `generate`:
 map's own path: a `.bsp` sits in `<mod>/maps`, so the mod directory is two levels up. That covers the
 normal case and nothing else: a BSP in a build server's output directory infers a mod directory that
 does not exist, so no model resolves, no prop is collided against, and the mesh floats over every one
-of them. The run still succeeds. Point `-content` at the mod directory and it resolves normally.
+of them. The run still succeeds, with a warning naming the models it could not find. Point `-content`
+at the mod directory and it resolves normally.
 
 You only need to name the mod directory, not each game it inherits from. Meshwright reads the mod's
 `gameinfo.txt` and mounts what its `SearchPaths` block declares, the same list, in the same order,
@@ -339,8 +340,9 @@ Meshwright with `-nosnipers -noencounters`.
 through the map's embedded pakfile, the loose game and addon directories, `.gma` workshop archives and
 then VPKs, the order the engine mounts them, taken from the mod's own `gameinfo.txt` where there is
 one. Anything not found contributes nothing, and the mesh will float where those props are.
-`meshwright props <bsp>` reports the split; check it if a mesh looks wrong, because nothing else will
-tell you. If the content exists but the map is not inside the game directory, `-content` is the fix.
+`generate` warns when a model a solid prop uses could not be found, naming the first few, and
+`meshwright props <bsp>` lists them all. If the content exists but the map is not inside the game
+directory, `-content` is the fix.
 
 A missing hull is left missing rather than replaced with the model's bounding box. Substituting a box
 measured worse: the models that lack a `.phy` are typically bushes, tree cards and skybox props, and a

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using Meshwright;
 using Xunit;
 
@@ -37,8 +38,21 @@ namespace Meshwright.Tests
         /// </summary>
         private static string WriteBsp(int lumpVersion, int stride, params (float X, float Y, float Z, float Yaw, byte Solid)[] props)
         {
-            const int LumpGameLump = 35;
             string path = Path.Combine(Path.GetTempPath(), $"mw_props_{Guid.NewGuid():N}.bsp");
+
+            WriteBsp(path, lumpVersion, stride, ["models/test/thing.mdl"],
+                [.. props.Select(p => (p.X, p.Y, p.Z, p.Yaw, p.Solid, (ushort)0))]);
+
+            return path;
+        }
+
+        /// <summary>
+        /// The same, naming any number of models, with each prop saying which one it places.
+        /// </summary>
+        internal static void WriteBsp(string path, int lumpVersion, int stride, string[] models,
+            params (float X, float Y, float Z, float Yaw, byte Solid, ushort Model)[] props)
+        {
+            const int LumpGameLump = 35;
 
             using var ms = new MemoryStream();
             using var w = new BinaryWriter(ms);
@@ -64,10 +78,13 @@ namespace Meshwright.Tests
 
             int propsAt = (int)ms.Position;
 
-            w.Write(1);                                             // one model in the dictionary
-            var name = new byte[128];
-            "models/test/thing.mdl"u8.CopyTo(name);
-            w.Write(name);
+            w.Write(models.Length);                                 // the model dictionary
+            foreach (string model in models)
+            {
+                var name = new byte[128];
+                System.Text.Encoding.ASCII.GetBytes(model).CopyTo(name, 0);
+                w.Write(name);
+            }
 
             w.Write(0);                                             // no leaf entries
             w.Write(props.Length);
@@ -78,7 +95,7 @@ namespace Meshwright.Tests
 
                 w.Write(p.X); w.Write(p.Y); w.Write(p.Z);
                 w.Write(0f); w.Write(p.Yaw); w.Write(0f);           // pitch, yaw, roll
-                w.Write((ushort)0);                                 // model index
+                w.Write(p.Model);                                   // model index
                 w.Write((ushort)0);                                 // first leaf
                 w.Write((ushort)0);                                 // leaf count
                 w.Write(p.Solid);
@@ -98,7 +115,6 @@ namespace Meshwright.Tests
             w.Write((int)(propsAt + propsLength - gameLumpOffset));
 
             File.WriteAllBytes(path, ms.ToArray());
-            return path;
         }
 
         [Fact]
@@ -309,6 +325,170 @@ namespace Meshwright.Tests
 
             Assert.Equal(-1f, minX);
             Assert.Equal(6f, maxZ);
+        }
+    }
+
+    /// <summary>
+    /// That a run says so when the props a map places as solid have models it could not find.
+    ///
+    /// Those props get no collision, so the mesh is built through and over them, and until this
+    /// warning nothing in a normal run mentioned it: the step finished cleanly and the gap shipped.
+    /// The cases pinned here are the ones that decide whether the warning is worth reading - that it
+    /// fires for an unmounted model whatever its solidity, and that it stays quiet about models that
+    /// were found, or that no solid prop uses.
+    /// </summary>
+    public class UnresolvedPropTests : IDisposable
+    {
+        private const string Absent = "models/test/absent.mdl";
+        private const string Bare = "models/test/bare.mdl";
+        private const string Decor = "models/test/decor.mdl";
+
+        private readonly string root = Path.Combine(Path.GetTempPath(), $"mw_unresolved_{Guid.NewGuid():N}");
+
+        /// <summary>
+        /// A map inside a mod directory of its own, so the content it can see is exactly what a test
+        /// puts there: one model that exists but ships no .phy, and nothing else.
+        /// </summary>
+        private readonly string bsp;
+
+        public UnresolvedPropTests()
+        {
+            string mod = Path.Combine(root, "mod");
+            Directory.CreateDirectory(Path.Combine(mod, "maps"));
+            Directory.CreateDirectory(Path.Combine(mod, "models", "test"));
+
+            File.WriteAllBytes(Path.Combine(mod, "models", "test", "bare.mdl"), new byte[64]);
+
+            bsp = Path.Combine(mod, "maps", "test.bsp");
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+        }
+
+        private StaticProps Load(string[] models,
+            params (float X, float Y, float Z, float Yaw, byte Solid, ushort Model)[] props)
+        {
+            StaticPropLumpTests.WriteBsp(bsp, lumpVersion: 10, stride: 76, models, props);
+            return StaticProps.Load(bsp);
+        }
+
+        /// <summary>
+        /// Most props are VPhysics-solid, and those only ever looked for a .phy. A model missing
+        /// entirely was reported as one that ships no hull, which is the case the warning deliberately
+        /// ignores - so an unmounted mod, the thing it exists for, never reached it.
+        /// </summary>
+        [Fact]
+        public void AModelThatIsNowhereIsMissingRatherThanHullless()
+        {
+            var props = Load([Absent, Bare],
+                (0f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 0),
+                (100f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 1));
+
+            Assert.Equal([Absent], props.MissingModels);
+            Assert.Equal([Bare], props.ModelsWithoutHull);
+            Assert.Equal(2, props.ModelsUsed);
+        }
+
+        [Fact]
+        public void TheRunWarnsNamingWhatItCouldNotFind()
+        {
+            var props = Load([Absent, Bare],
+                (0f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 0),
+                (100f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 1));
+
+            var vis = BspVisibility.FromGeometry([], [], [], [], [], []);
+            vis.AttachStaticProps(props);
+
+            var result = NavPipeline.Run(BspFile.Load(bsp), vis, new NavFile(), new NavPipeline.Options
+            {
+                Ladders = false,
+                Movement = false,
+                Spots = false,
+                Visibility = false,
+            });
+
+            string warning = Assert.Single(result.Warnings, w => w.Contains("could not be found"));
+
+            Assert.StartsWith("1 of 2 prop models used by solid props could not be found", warning);
+            Assert.Contains(Absent, warning);
+            Assert.DoesNotContain(Bare, warning);
+            Assert.Contains("-content", warning);
+            Assert.Contains("meshwright props", warning);
+        }
+
+        /// <summary>
+        /// A model found without a hull is skipped on purpose, and no flag changes that. A warning about
+        /// it would be in every compile of the map for good.
+        /// </summary>
+        [Fact]
+        public void AModelFoundWithoutAHullIsNotWarnedAbout()
+        {
+            var props = Load([Bare], (0f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 0));
+
+            Assert.Null(NavPipeline.UnresolvedPropWarning(props));
+        }
+
+        /// <summary>
+        /// The dictionary names models only non-solid props use. Counting those would turn a harmless
+        /// gap into an alarm, and a real one into a smaller fraction than it is.
+        /// </summary>
+        [Fact]
+        public void OnlyModelsSolidPropsUseAreCounted()
+        {
+            var props = Load([Absent, Bare, Decor],
+                (0f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 0),
+                (100f, 0f, 0f, 0f, StaticPropLump.SolidVPhysics, 1),
+                (200f, 0f, 0f, 0f, StaticPropLump.SolidNone, 2));
+
+            string? warning = NavPipeline.UnresolvedPropWarning(props);
+
+            Assert.NotNull(warning);
+            Assert.StartsWith("1 of 2 ", warning);
+            Assert.DoesNotContain(Decor, warning);
+        }
+
+        /// <summary>A bounding-box prop reads the .mdl itself, and a missing one is just as missing.</summary>
+        [Fact]
+        public void ABoxSolidPropWithNoModelIsMissingToo()
+        {
+            var props = Load([Absent], (0f, 0f, 0f, 0f, StaticPropLump.SolidBBox, 0));
+
+            Assert.Equal([Absent], props.MissingModels);
+        }
+
+        /// <summary>
+        /// Nothing resolving is a different situation from a few strays - the run cannot see the map's
+        /// content at all - and it is said differently.
+        /// </summary>
+        [Fact]
+        public void ItIsLouderWhenNothingResolved()
+        {
+            string? warning = NavPipeline.UnresolvedPropWarning(2, ["models/a.mdl", "models/b.mdl"]);
+
+            Assert.NotNull(warning);
+            Assert.StartsWith("No static prop on this map has collision", warning);
+            Assert.Contains("none of the 2 prop models", warning);
+        }
+
+        [Fact]
+        public void OnlyTheFirstFewAreNamed()
+        {
+            string? warning = NavPipeline.UnresolvedPropWarning(40,
+                ["models/1.mdl", "models/2.mdl", "models/3.mdl", "models/4.mdl", "models/5.mdl"]);
+
+            Assert.NotNull(warning);
+            Assert.StartsWith("5 of 40 ", warning);
+            Assert.Contains("models/3.mdl and 2 more", warning);
+            Assert.DoesNotContain("models/4.mdl", warning);
+        }
+
+        [Fact]
+        public void NothingMissingIsNothingToSay()
+        {
+            Assert.Null(NavPipeline.UnresolvedPropWarning(12, []));
+            Assert.Null(NavPipeline.UnresolvedPropWarning(null));
         }
     }
 }

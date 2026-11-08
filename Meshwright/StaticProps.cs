@@ -308,9 +308,23 @@ namespace Meshwright
                 {
                     var phy = PhyFile.Parse(phyBytes);
                     if (phy.TriangleCount > 0) return phy.Triangles;
+
+                    noHull = modelPath;
+                    return [];
                 }
 
-                noHull = modelPath;
+                // No .phy, and which kind of absence it is decides what to tell the user. A model that
+                // is there without one has no hull to find, and nothing they do changes that. A model
+                // that is not there at all is content this run could not see - a mod outside the
+                // install inferred from the map's path - and -content fixes it. Both used to be
+                // reported as the first, which hid every prop of an unmounted mod from the warning
+                // that exists for exactly that case. The .mdl is read only on this path, so a map
+                // whose hulls all resolve pays nothing for the distinction.
+                if (files.TryRead(modelPath, out _))
+                    noHull = modelPath;
+                else
+                    missing = modelPath;
+
                 return [];
             }
 

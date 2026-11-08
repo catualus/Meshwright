@@ -322,6 +322,9 @@ namespace Meshwright
             if (EarlierRunWarning(options) is { } earlier)
                 result.Warnings.Add(earlier);
 
+            if (UnresolvedPropWarning(vis.StaticProps) is { } unresolved)
+                result.Warnings.Add(unresolved);
+
             NavConcurrency.ThrowIfCancelled();
 
             if (options.GenerateAreas && !result.Resumed)
@@ -534,6 +537,56 @@ namespace Meshwright
                    "The areas, connections and ladders that run made are kept without being checked against " +
                    "the map again, so if its geometry has changed since, some may float, cross new walls or " +
                    $"lead to ladders that are gone. {remedy}; that also drops anything authored in it before then.";
+        }
+
+        /// <summary>
+        /// What to tell the caller when models the map's solid props use could not be found, or null
+        /// when every one was.
+        ///
+        /// A warning rather than a line of the log, because nothing else about such a run looks wrong.
+        /// Those props get no collision hull, so areas are built straight through them and over the top
+        /// of them, every pass succeeds, and Compile Pal shows a clean step. The usual cause is content
+        /// that lives outside the install inferred from the map's path - Counter-Strike props on a
+        /// Garry's Mod map, since mount.cfg is not read - and only a person can point at where it is.
+        ///
+        /// Counted against the models solid props use, never every model the map names: the dictionary
+        /// includes models only non-solid props reference, and scoring against it reports a failure
+        /// that never happened. And only models that could not be found count. One that was found but
+        /// ships no hull is skipped on purpose (see <see cref="StaticProps"/>), and a warning that
+        /// -content cannot make go away would sit in every compile of that map until people stopped
+        /// reading warnings.
+        /// </summary>
+        internal static string? UnresolvedPropWarning(StaticProps? props) =>
+            props is null ? null : UnresolvedPropWarning(props.ModelsUsed, props.MissingModels);
+
+        /// <inheritdoc cref="UnresolvedPropWarning(StaticProps?)"/>
+        internal static string? UnresolvedPropWarning(int modelsUsed, IReadOnlyList<string> missing)
+        {
+            if (missing.Count == 0)
+                return null;
+
+            const int Named = 3;
+
+            string names = string.Join(", ", missing.Take(Named)) +
+                           (missing.Count > Named ? $" and {missing.Count - Named:N0} more" : "");
+
+            const string Remedy = "Run `meshwright props <map.bsp>` to list them, or pass -content " +
+                                  "(\"Extra content directory\" in Compile Pal) with the folder they live in.";
+
+            // Louder when nothing resolved, because that is a different situation from a few stray
+            // models: the run cannot see the map's content at all, every static prop on the map is
+            // missing from the mesh, and the likely cause is a BSP outside the game directory.
+            if (missing.Count >= modelsUsed)
+            {
+                return $"No static prop on this map has collision: none of the {modelsUsed:N0} prop models " +
+                       $"used by solid props could be found ({names}). The mesh is built through and over " +
+                       "every one of them. The map's content is probably outside the game install worked " +
+                       $"out from the BSP's location. {Remedy}";
+            }
+
+            return $"{missing.Count:N0} of {modelsUsed:N0} prop models used by solid props could not be " +
+                   $"found, so those props have no collision hull and the mesh ignores them ({names}). " +
+                   Remedy;
         }
 
         /// <summary>

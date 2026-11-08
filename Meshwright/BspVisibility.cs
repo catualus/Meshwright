@@ -495,6 +495,10 @@ namespace Meshwright
         public int DisplacementTriangleCount => displacements?.TriangleCount ?? 0;
         public int StaticPropTriangleCount => staticProps?.TriangleCount ?? 0;
 
+        /// <summary>The attached props, for reporting what they could and could not resolve. Null until
+        /// <see cref="AttachStaticProps"/> is called.</summary>
+        public StaticProps? StaticProps => staticProps;
+
         /// <summary>
         /// Whether a line between two points is unobstructed.
         ///
