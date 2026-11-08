@@ -250,9 +250,12 @@ namespace Meshwright
             // Both need `bsp` and neither needs the other. Visibility is much the heavier of the two -
             // it decompresses the whole PVS - so it stays on this thread and models goes to the pool.
             var models = Task.Run(() => BspModels.Load(path, bsp));
+            // The same entities without the ones a player walks through (doors, breakables), for the
+            // traces that decide where a body can stand and go. Sight keeps the full set.
+            var movement = Task.Run(() => BspModels.Load(path, bsp, forMovement: true));
             var vis = BspVisibility.Load(path, bsp);
 
-            vis.AttachModels(models.Result);
+            vis.AttachModels(models.Result, movement.Result);
             vis.AttachDisplacements(displacements.Result);
             vis.AttachStaticProps(props.Result);
 
