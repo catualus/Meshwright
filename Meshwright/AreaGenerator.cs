@@ -139,7 +139,7 @@ namespace Meshwright
             // the passes below have run there is no way to tell what was already present.
             int existingAreas = nav.Areas.Count;
 
-            if (!TryGetWorldBounds(bsp, out var mins, out var maxs))
+            if (!TryGetLattice(bsp, nav.Areas, out var mins, out var maxs))
             {
                 result.Notes.Add("BSP has no world model bounds; cannot sample");
                 return result;
@@ -857,18 +857,100 @@ namespace Meshwright
             return false;
         }
 
-        private static bool TryGetWorldBounds(BspFile bsp, out BspFile.Vector3 mins, out BspFile.Vector3 maxs)
+        /// <summary>
+        /// Where the sampling grid starts, and how far the world goes.
+        ///
+        /// On a run that finishes an existing mesh, the grid is lined up with that mesh. Areas are built
+        /// half a step either side of their nodes, so where the nodes sit decides where every generated
+        /// edge falls, and it used to be the world's minimum that decided it. The engine's own meshes
+        /// have their edges on multiples of 25 - 98.4% of gm_construct's corners and every one of
+        /// gm_flatgrass's - and the world's minimum is wherever the map happens to end: 20 and 14 units
+        /// past a multiple of 25 on ctf_2fort, 2 on rp_downtown_tits. Every generated area along a seam
+        /// with the existing mesh then overlapped its neighbour by more than ConnectionBuilder accepts
+        /// as touching, so the new ground was never linked to the old: 323 of 338 such seams on
+        /// ctf_2fort, 1,387 of 1,586 on cp_dustbowl. So the grid takes the phase most of the existing
+        /// mesh's edges share - a multiple of 25 for the engine's, whatever an earlier run of this used
+        /// for its own - and generated edges land on them.
+        ///
+        /// A run from scratch keeps the world's minimum. Lining it up with the engine's grid there as
+        /// well was tried and measured, and it moved the whole sample grid for nothing a seam could gain:
+        /// on ctf_2fort it put a column of samples on a bevelled threshold across the spawn room's exit,
+        /// which is too steep to stand on, and the flood never left the spawn - 40 areas instead of
+        /// 1,014. Which phase meets such a strip is luck either way, and the grid fresh runs have always
+        /// used is the one every measurement of them was taken on.
+        /// </summary>
+        internal static bool TryGetLattice(BspFile bsp, IReadOnlyList<NavArea> existing,
+            out BspFile.Vector3 origin, out BspFile.Vector3 maxs)
         {
-            mins = default;
+            origin = default;
             maxs = default;
 
             if (bsp.BrushModelBounds.Length == 0)
                 return false;
 
             var world = bsp.BrushModelBounds[0];
-            mins = world.Mins;
             maxs = world.Maxs;
-            return maxs.X > mins.X && maxs.Y > mins.Y && maxs.Z > mins.Z;
+
+            if (!(maxs.X > world.Mins.X && maxs.Y > world.Mins.Y && maxs.Z > world.Mins.Z))
+                return false;
+
+            origin = world.Mins;
+
+            if (EdgePhase(existing, x: true) is float phaseX && EdgePhase(existing, x: false) is float phaseY)
+                origin = new BspFile.Vector3(LatticeStart(world.Mins.X, phaseX), LatticeStart(world.Mins.Y, phaseY), world.Mins.Z);
+
+            return true;
+        }
+
+        /// <summary>
+        /// The first node position at or below <paramref name="min"/> that puts the edges of the areas
+        /// built around nodes - half a step either side - on <paramref name="edgePhase"/> plus a multiple
+        /// of the step. Less than one step outside the world, where its column simply finds no floor;
+        /// the grid's other end still reaches the maximum.
+        /// </summary>
+        internal static float LatticeStart(float min, float edgePhase)
+        {
+            float nodePhase = edgePhase + StepSize / 2f;
+            return MathF.Floor((min - nodePhase) / StepSize) * StepSize + nodePhase;
+        }
+
+        /// <summary>
+        /// Where along one axis, modulo a step, most of a mesh's area edges sit - or null for no mesh.
+        /// Counted in quarter units, ties going to the smaller phase, so the answer is the same however
+        /// the areas are ordered.
+        /// </summary>
+        internal static float? EdgePhase(IReadOnlyList<NavArea> areas, bool x)
+        {
+            if (areas.Count == 0)
+                return null;
+
+            const int Buckets = (int)(StepSize * 4);
+            var counts = new int[Buckets];
+
+            void Count(float edge)
+            {
+                float phase = edge % StepSize;
+                if (phase < 0) phase += StepSize;
+
+                counts[(int)MathF.Round(phase * 4) % Buckets]++;
+            }
+
+            foreach (var area in areas)
+            {
+                var b = NavGeometry.GetBounds(area);
+
+                Count(x ? b.MinX : b.MinY);
+                Count(x ? b.MaxX : b.MaxY);
+            }
+
+            int best = 0;
+            for (int i = 1; i < Buckets; i++)
+            {
+                if (counts[i] > counts[best])
+                    best = i;
+            }
+
+            return best / 4f;
         }
 
         /// <summary>
@@ -1251,7 +1333,7 @@ namespace Meshwright
         {
             var report = new ReachReport();
 
-            if (!TryGetWorldBounds(bsp, out var mins, out var maxs))
+            if (!TryGetLattice(bsp, [], out var mins, out var maxs))
             {
                 report.Notes.Add("BSP has no world model bounds");
                 return report;
