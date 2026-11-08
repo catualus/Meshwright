@@ -554,7 +554,7 @@ namespace Meshwright
             int lifts = 0;
             foreach (var stop in ElevatorConnector.PlatformStops(bsp))
             {
-                if (world.TryCell(stop.X, stop.Y, stop.Z, out var cell))
+                if (world.TryCell(stop.Position.X, stop.Position.Y, stop.Position.Z, out var cell))
                 {
                     lifts++;
                     yield return cell;
