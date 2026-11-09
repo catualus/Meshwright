@@ -530,20 +530,10 @@ namespace Meshwright
                 sideY = dx / length * NavConstants.HalfHumanWidth;
             }
 
-            foreach (float height in ClearanceHeights)
+            if (!LinesClear(vis, fromX, fromY, toX, toY, high, sideX, sideY, sideFloors: false) &&
+                !LinesClear(vis, fromX, fromY, toX, toY, high, sideX, sideY, sideFloors: true))
             {
-                for (int side = -1; side <= 1; side++)
-                {
-                    float ox = sideX * side, oy = sideY * side;
-
-                    var a = new BspFile.Vector3(fromX + ox, fromY + oy, high + height);
-                    var b = new BspFile.Vector3(toX + ox, toY + oy, high + height);
-
-                    // Whether a body fits through the gap, not whether a bot can see through it -
-                    // GenerationMask throughout, matching what Valve traces movement against.
-                    if (!vis.IsLineClear(a, b, BspVisibility.GenerationMask))
-                        return Refusal.Crossing;
-                }
+                return Refusal.Crossing;
             }
 
             if (sweepBody && !BodyCrosses(vis, fromX, fromY, toX, toY, high))
@@ -586,6 +576,90 @@ namespace Meshwright
             }
 
             return Refusal.Clear;
+        }
+
+        /// <summary>
+        /// The clearance lines: three columns a body's width apart, at each of <see cref="ClearanceHeights"/>.
+        ///
+        /// With <paramref name="sideFloors"/> each outer column is measured from the floor under its own
+        /// two ends instead of from <paramref name="high"/>, where that floor is higher - by no more than
+        /// a step. It is the fallback when the plain lines fail, so it only ever adds connections.
+        ///
+        /// A level plane through the middle of the crossing is the wrong base wherever the ground falls
+        /// away across it. A walker standing on a slope rests on its uphill side, so the outer column
+        /// sixteen units up the slope is over ground well above the middle - on a 45 degree slope by the
+        /// full sixteen - and the lowest line, eight units over the middle, runs straight into it. That
+        /// was 2,698 of the 2,869 crossings on the finished rp_downtown_tits_v25 mesh that were refused
+        /// although a hull sweep passes them at the middle - 2,581 over displacement terrain, 117 over
+        /// sloped brushes - and 2,692 of 2,883 on rp_downtown_meowy. Every one was a single outer line
+        /// at the lowest height and nothing else, and every one is clear with the outer columns lifted
+        /// onto their own ground.
+        ///
+        /// No more than a step, and never measured from inside something, so a wall or a ledge higher
+        /// than a walker can step onto is not a floor that lifts the line over itself. Only the outer
+        /// columns, because the middle one is already measured from the floor under it.
+        /// </summary>
+        private static bool LinesClear(BspVisibility vis, float fromX, float fromY, float toX, float toY,
+            float high, float sideX, float sideY, bool sideFloors)
+        {
+            Span<float> bases = [high, high, high];
+
+            if (sideFloors)
+            {
+                bool lifted = false;
+
+                for (int side = -1; side <= 1; side += 2)
+                {
+                    float ox = sideX * side, oy = sideY * side;
+                    float floor = MathF.Max(SideFloor(vis, fromX + ox, fromY + oy, high),
+                        SideFloor(vis, toX + ox, toY + oy, high));
+
+                    bases[side + 1] = floor;
+                    lifted |= floor > high;
+                }
+
+                // Nothing to lift, so the same nine lines as the plain test, which has already failed.
+                if (!lifted)
+                    return false;
+            }
+
+            foreach (float height in ClearanceHeights)
+            {
+                for (int side = -1; side <= 1; side++)
+                {
+                    float ox = sideX * side, oy = sideY * side;
+                    float z = bases[side + 1] + height;
+
+                    var a = new BspFile.Vector3(fromX + ox, fromY + oy, z);
+                    var b = new BspFile.Vector3(toX + ox, toY + oy, z);
+
+                    // Whether a body fits through the gap, not whether a bot can see through it -
+                    // GenerationMask throughout, matching what Valve traces movement against.
+                    if (!vis.IsLineClear(a, b, BspVisibility.GenerationMask))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// The floor under an outer clearance column, if it is above <paramref name="high"/> by no more
+        /// than a step; otherwise <paramref name="high"/>. Searched down from a step up, and not at all
+        /// when that point is inside something - a floor found from in there would be the floor under
+        /// a wall, and lifting a line onto it would carry the line over the wall.
+        /// </summary>
+        private static float SideFloor(BspVisibility vis, float x, float y, float high)
+        {
+            float top = high + NavConstants.StepHeight;
+            var start = new BspFile.Vector3(x, y, top);
+
+            if (!vis.IsLineClear(start, start, BspVisibility.GroundMask))
+                return high;
+
+            return StairMarker.TryFindFloor(vis, x, y, top, NavConstants.StepHeight, out float floor)
+                ? MathF.Max(high, floor)
+                : high;
         }
 
         /// <summary>How far back from a pinched edge to look for somewhere the walker could stand.</summary>
