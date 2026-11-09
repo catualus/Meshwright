@@ -210,6 +210,42 @@ namespace Meshwright
         /// graph being directed is what makes that true: adding a link from A to B does not touch B.
         /// </summary>
         public static Result Build(NavFile nav, BspVisibility vis, NavProgress? progress = null)
+            => Link(nav, vis, progress, reshaped: null);
+
+        /// <summary>
+        /// <see cref="Build"/> again, for only the pairs that <paramref name="reshaped"/> can have changed
+        /// the answer for: every pair with at least one of those areas in it, in both directions.
+        ///
+        /// Connections are built before the clip on purpose (see <see cref="AreaGenerator.ClipToGeometry"/>),
+        /// and nothing re-tested them afterwards. The clip moves edges, so a pair can come out of it with
+        /// a different answer: an area that ran more than <see cref="MaxOverlap"/> units under or into its
+        /// neighbour is pulled back to abut it, and a crossing whose end point was buried in a wall or
+        /// under a ledge is now tested from open floor. Those pairs had been tested once, on shapes that
+        /// no longer exist, and refused.
+        ///
+        /// Only adds. Every connection made before the clip stays: the clip opening a gap where two areas
+        /// used to touch is exactly what the build-first order exists to survive, and re-testing those
+        /// would undo it. A pair where neither area moved is skipped, because its geometry is what it was
+        /// when it was built and the same tests give the same answer. Must run before
+        /// <see cref="AreaConnectionFixer"/>, which is then free to prune what this adds like anything
+        /// else.
+        ///
+        /// One test is stricter than the build's: across a shared span narrower than a body, a crouching
+        /// body is swept through the middle crossing too, not only through the ones off it. The clip
+        /// leaves exactly that shape - a strip pulled back to the wall it ran into, still touching its
+        /// neighbour along a span of twenty-odd units - and the clearance lines, sixteen units either side
+        /// of a middle that now sits a few units off the wall, graze its face and read clear. Without the
+        /// sweep, 428 of the 743 pairs this found on the twelve benchmark maps were ones a hull checker
+        /// finds no body gets through anywhere along the edge, against 1 to 3% of the build's own flat
+        /// links. The build keeps the lines alone: there the middle of a narrow span is usually open
+        /// ground between two strips of the sampling grid, and it is the measured baseline.
+        /// </summary>
+        public static Result Relink(NavFile nav, BspVisibility vis, IReadOnlySet<uint> reshaped,
+            NavProgress? progress = null)
+            => reshaped.Count == 0 ? new Result() : Link(nav, vis, progress, reshaped);
+
+        private static Result Link(NavFile nav, BspVisibility vis, NavProgress? progress,
+            IReadOnlySet<uint>? reshaped)
         {
             var result = new Result();
             var index = new NavGeometry.Index(nav.Areas);
@@ -223,6 +259,9 @@ namespace Meshwright
                 var area = nav.Areas[i];
                 var bounds = NavGeometry.GetBounds(area);
 
+                // On a relink, an area the clip left alone is only tested against neighbours it did move.
+                bool everyCandidate = reshaped is null || reshaped.Contains(area.Id);
+
                 for (int direction = 0; direction < NavGeometry.DirectionCount; direction++)
                 {
                     var existing = new HashSet<uint>(area.Connections[direction]);
@@ -233,6 +272,9 @@ namespace Meshwright
 
                         var other = nav.Areas[j];
                         if (existing.Contains(other.Id))
+                            continue;
+
+                        if (!everyCandidate && !reshaped!.Contains(other.Id))
                             continue;
 
                         if (!SharedEdge(bounds, NavGeometry.GetBounds(other), direction,
@@ -263,8 +305,13 @@ namespace Meshwright
                             continue;
                         }
 
+                        // On a relink, a body is dragged across the middle as well whenever the span is
+                        // narrower than one, as it already is off the middle (CrossesElsewhere). See
+                        // Relink for why the build itself does not.
+                        bool sweepMiddle = reshaped is not null && overlap < 2f * NavConstants.HalfHumanWidth;
+
                         var refusal = TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ,
-                            out bool startedSolid);
+                            out bool startedSolid, sweepBody: sweepMiddle);
                         if (refusal != Refusal.Clear &&
                             CrossesElsewhere(vis, area, other, bounds, NavGeometry.GetBounds(other), direction,
                                 centreA, overlap, out float elsewhere))
