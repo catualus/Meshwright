@@ -60,13 +60,92 @@ namespace Meshwright
             var a = new BspFile.Vector3(from.X, from.Y, top + Lift);
             var b = new BspFile.Vector3(to.X, to.Y, top + Lift);
 
-            if (!vis.TryTraceHull(a, b, BspVisibility.NavTraceMins, BspVisibility.NavTraceMaxs,
-                    BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid))
-            {
-                return true;
-            }
+            bool hit = vis.TryTraceHull(a, b, BspVisibility.NavTraceMins, BspVisibility.NavTraceMaxs,
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
 
-            return !startSolid && fraction >= 1f;
+            if (!startSolid)
+                return !hit || fraction >= 1f;
+
+            // The box began inside something. When it is dragged out of that and meets nothing else,
+            // the sweep enters nothing and reports no hit, and that used to be read as clear - so a
+            // step was allowed out from under a ceiling the body could not have stood under, or
+            // through a wall the start point sat a fraction of a unit inside.
+            //
+            // Refusing every start-solid step is wrong the other way, though. The box is 0.9 wide and
+            // the start point is a grid sample, which lands exactly on a wall face whenever the grid
+            // line and the face coincide - and a face counts as inside the brush. In the flood on the
+            // twelve benchmark maps 235 of the 287 start-solid steps were that: a sample on the foot of
+            // a wall, stepping straight away from it into open floor (cp_dustbowl's yard wall, a run of
+            // samples on y = -1456 with the wall face at -1456). Refusing those made the foot of the
+            // wall a dead end the flood could drop into and never walk out of. The rest, and 202 of
+            // CornerPatcher's 211, ran on through whatever they started in: a patch area built inside a
+            // post on rp_downtown, and links through pillars on cp_granary and cp_badlands.
+            //
+            // So a start-solid step is let through only when the box's overlap at the start is a
+            // graze: swept back the other way, from the far end, the first face the box meets lies at
+            // or behind the start point, so the box only touched it because the box is wider than the
+            // point. A box buried in a ceiling, or starting inside a thin wall the step would pass
+            // through, meets a face that lies out ahead of the start and is refused, as a step that
+            // enters something on the way already is.
+            if (hit)
+                return false;
+
+            return GrazesOnlyAtStart(vis, a, b);
         }
+
+        /// <summary>
+        /// Whether a box swept from <paramref name="b"/> back to <paramref name="a"/> starts clear and
+        /// meets nothing, or meets first a face that only its width would overlap at
+        /// <paramref name="a"/> - a vertical line through the middle of the box there would be clear.
+        ///
+        /// Judged from the face the reverse sweep stops on rather than from how far short of
+        /// <paramref name="a"/> it stops. A box reaches an axis-aligned face half its width before its
+        /// centre does, but reaches a slanted face, or a brush corner it is clipped against through a
+        /// bevel plane, further out than that - on rp_downtown a sample beside a block's corner met its
+        /// bevel 0.69 units out, while sitting 0.2 units clear of it. How far the box would sink into
+        /// the face follows from the stopping point and the face normal, whatever its angle.
+        /// </summary>
+        private static bool GrazesOnlyAtStart(BspVisibility vis, BspFile.Vector3 a, BspFile.Vector3 b)
+        {
+            float dx = b.X - a.X, dy = b.Y - a.Y;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+            if (length < 1e-3f)
+                return false;
+
+            var mins = BspVisibility.NavTraceMins;
+            var maxs = BspVisibility.NavTraceMaxs;
+
+            bool hit = vis.TryTraceHull(b, a, mins, maxs, BspVisibility.GenerationMask,
+                out float fraction, out var normal, out bool startSolid);
+
+            if (startSolid)
+                return false;
+
+            if (!hit)
+                return true;
+
+            // How far the box's width reaches out along the normal - the part of the box a vertical
+            // line through its middle does not have. Its height is left out on purpose: that is the
+            // body the step is testing, and a ceiling the full height runs into is no graze.
+            float reach = Reach(normal.X, mins.X, maxs.X) + Reach(normal.Y, mins.Y, maxs.Y);
+
+            // How much further into the face the box would have gone, carried on from where it
+            // stopped back to a, measured along the normal.
+            float approach = (1f - fraction) * MathF.Abs(normal.X * dx + normal.Y * dy);
+
+            // Within the width's reach, a line through the middle of the box at a would still be
+            // clear of the face: the overlap is the box's width and nothing else.
+            return approach <= reach + GrazeTolerance;
+        }
+
+        /// <summary>The box's reach along one component of a face normal, towards the face.</summary>
+        private static float Reach(float normal, float min, float max)
+            => normal < 0 ? -max * normal : -min * normal;
+
+        /// <summary>
+        /// Slack on the graze test: covers Source's DIST_EPSILON, the 1/32 unit a sweep stops short of
+        /// what it hits, with room to spare, and is still far too little to step through any wall.
+        /// </summary>
+        private const float GrazeTolerance = 0.1f;
     }
 }
