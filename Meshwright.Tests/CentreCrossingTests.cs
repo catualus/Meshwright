@@ -57,6 +57,59 @@ namespace Meshwright.Tests
                                          line.Contains("REFUSED by Crossing at the middle, would connect further along"));
         }
 
+        /// <summary>
+        /// An area that stops twelve units short of a ledge, whose floor runs on to the lip at y = 112,
+        /// and the ground 128 units below starting eight units past it. The fall used to be tested from
+        /// two units past the area, inside the ledge, and was refused; from past the lip it is clear.
+        /// </summary>
+        [Fact]
+        public void ADropOffALedgeIsTestedFromItsLip()
+        {
+            var world = World(new BspFile.Vector3(0f, 0f, 1f), -128f, (-1000f, -1000f, -128f, 1000f, 112f, 0f));
+            var upper = TestWorlds.Area(1, -50f, 0f, 50f, 100f, 0f);
+            var lower = TestWorlds.Area(2, -50f, 120f, 50f, 220f, -128f);
+
+            var log = ConnectionBuilder.Explain(world, upper, lower);
+
+            Assert.Contains(log, line => line == "south:   would connect");
+        }
+
+        /// <summary>
+        /// The pit's own shape before the clip: the lower area runs right up to the upper one, six and a
+        /// half units into the wall under the lip, so its landing point is inside the ledge. The walker
+        /// lands past the lip instead, still inside the lower area.
+        /// </summary>
+        [Fact]
+        public void ADropLandsPastTheLipWhenTheAreaBelowRunsUnderIt()
+        {
+            var world = World(new BspFile.Vector3(0f, 0f, 1f), -128f, (-1000f, -1000f, -128f, 1000f, 106.5f, 0f));
+            var upper = TestWorlds.Area(1, -50f, 0f, 50f, 100f, 0f);
+            var lower = TestWorlds.Area(2, -50f, 100f, 50f, 220f, -128f);
+
+            var log = ConnectionBuilder.Explain(world, upper, lower);
+
+            Assert.Contains(log, line => line == "south:   would connect");
+        }
+
+        /// <summary>
+        /// The control: the same drop where the upper floor is a slab eight units thick that runs on
+        /// over the whole of the lower area - a basement under an upper storey. The floor has no lip
+        /// anywhere near the landing, so there is no fall to make, and the drop is refused rather than
+        /// linked through the slab.
+        /// </summary>
+        [Fact]
+        public void ADropIsNotLinkedThroughTheFloorAboveTheLanding()
+        {
+            var world = World(new BspFile.Vector3(0f, 0f, 1f), -128f, (-1000f, -1000f, -8f, 1000f, 1000f, 0f));
+            var upper = TestWorlds.Area(1, -50f, 0f, 50f, 100f, 0f);
+            var lower = TestWorlds.Area(2, -50f, 120f, 50f, 220f, -128f);
+
+            var log = ConnectionBuilder.Explain(world, upper, lower);
+
+            Assert.DoesNotContain(log, line => line.Contains("would connect"));
+            Assert.Contains(log, line => line.StartsWith("south:") && line.Contains("REFUSED by Fall"));
+        }
+
         /// <summary>An area on ground rising <paramref name="rise"/> units per unit of x.</summary>
         private static NavArea Sloped(uint id, float minX, float minY, float maxX, float maxY, float rise)
         {

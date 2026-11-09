@@ -570,7 +570,7 @@ namespace Meshwright
             // Only downward: a climb has no fall path to check, and the space above a step is already
             // covered by the horizontal clearance lines.
             if (toZ < fromZ - NavConstants.StepHeight &&
-                !CanFallTo(vis, fromX, fromY, fromZ, toX, toY, toZ))
+                !CanFallTo(vis, to, fromX, fromY, fromZ, toX, toY, toZ, high))
             {
                 return Refusal.Fall;
             }
@@ -848,39 +848,52 @@ namespace Meshwright
         /// infinitely thin line it slips through any crack narrower than itself, exactly as the
         /// centre-only horizontal test used to.
         ///
-        /// Starts just past the upper area's edge rather than at the inset point itself, which sits
-        /// <see cref="Inset"/> units inside that area and therefore directly on top of its own floor -
-        /// a column there would begin inside the slab being stepped off and refuse every drop on the
-        /// map. The lateral offsets run parallel to the shared edge, so all three columns in a sample
-        /// stand the same distance past it.
+        /// Starts just past where the floor being stepped off ends (<see cref="Lip"/>) rather than at the
+        /// inset point itself, which sits <see cref="Inset"/> units inside that area and therefore
+        /// directly on top of its own floor - a column there would begin inside the slab being stepped
+        /// off and refuse every drop on the map. The lateral offsets run parallel to the shared edge, so
+        /// all three columns in a sample stand the same distance past it.
         /// </summary>
-        private static bool CanFallTo(BspVisibility vis,
-            float fromX, float fromY, float fromZ, float toX, float toY, float toZ)
+        private static bool CanFallTo(BspVisibility vis, NavArea to,
+            float fromX, float fromY, float fromZ, float toX, float toY, float toZ, float high)
         {
             float dx = toX - fromX, dy = toY - fromY;
             float run = MathF.Sqrt(dx * dx + dy * dy);
 
-            float sideX = 0, sideY = 0;
-            if (run > 0.01f)
-            {
-                sideX = -dy / run * NavConstants.HalfHumanWidth;
-                sideY = dx / run * NavConstants.HalfHumanWidth;
-            }
+            if (run <= 0.01f)
+                return false;
 
-            // Where along the run the first sample sits: clear of the upper area's own edge.
+            float sideX = -dy / run * NavConstants.HalfHumanWidth;
+            float sideY = dx / run * NavConstants.HalfHumanWidth;
+
+            // Where along the run the first sample sits: clear of the lip being stepped off.
             //
-            // If there is no room for it - the landing point is no further out than the edge being
-            // stepped off - then there is no fall to test. The landing is underneath the upper area
-            // rather than beyond it, and a walker cannot step off an edge it has not passed.
+            // If there is no room for it - the landing point is no further out than the lip - the
+            // landing is underneath the floor above rather than beyond it, and a walker cannot step off
+            // an edge it has not passed. The landing then moves out past the lip, if the lower area
+            // reaches that far (<see cref="LandingPastLip"/>); otherwise there is no fall to make.
             //
             // This used to clamp instead, at which point every sample in the loop below collapsed onto
             // the landing point and the sweep became the single column in the wrong place that the
             // comment above says it exists to replace. Clamping is the wrong answer to "the run is too
             // short to sample": the run being too short *is* the refusal.
-            if (run <= Inset + 2f)
-                return false;
+            float reach = LandingReach;
+            float lip = Lip(vis, fromX, fromY, fromZ, dx, dy, run, run + reach);
 
-            float first = (Inset + 2f) / run;
+            if (run <= lip + 2f)
+            {
+                if (!LandingPastLip(vis, to, fromX, fromY, fromZ, toX, toY, dx / run, dy / run, lip, run + reach,
+                        high, sideX, sideY, out float landing, out toZ))
+                {
+                    return false;
+                }
+
+                dx = dx / run * landing;
+                dy = dy / run * landing;
+                run = landing;
+            }
+
+            float first = (lip + 2f) / run;
 
             for (int i = 0; i < FallSamples; i++)
             {
@@ -918,6 +931,105 @@ namespace Meshwright
 
             return true;
         }
+
+        /// <summary>
+        /// How far along the run, from the inset start point, the floor being stepped off actually
+        /// ends: the first point, from the upper area's own edge onward, with no floor within a step
+        /// below the start, or <paramref name="limit"/> if the floor carries on that far.
+        ///
+        /// The fall used to be tested from two units past the upper area's edge, which assumes the
+        /// floor ends where the area does. At a ledge it often does not: areas are built on a sampling
+        /// grid and stop at the last sample, while the floor runs on to the lip, so the first column
+        /// started inside the ledge, read as blocked, and the drop was refused. gm_flatgrass has these
+        /// all round its pit, where the floor runs six and a half units past the areas along the rim,
+        /// and none of the drops from them into the pit were linked. On the finished
+        /// rp_downtown_tits_v25 mesh 330 of the 715 drops refused although a hull sweep passes them at
+        /// the middle were the same shape.
+        ///
+        /// The floor carrying on all the way to the landing point is the slab the fall test exists to
+        /// catch - the landing is underneath it - and leaves no fall to test.
+        /// </summary>
+        private static float Lip(BspVisibility vis, float fromX, float fromY, float fromZ,
+            float dx, float dy, float run, float limit)
+        {
+            float ux = dx / run, uy = dy / run;
+
+            // Counted in steps rather than accumulated, so the probes land on the same points
+            // whatever the run.
+            for (int k = 0; Inset + k * LipStep <= limit; k++)
+            {
+                float along = Inset + k * LipStep;
+                float x = fromX + ux * along, y = fromY + uy * along;
+
+                if (vis.IsLineClear(new BspFile.Vector3(x, y, fromZ + 2f),
+                        new BspFile.Vector3(x, y, fromZ - NavConstants.StepHeight), BspVisibility.GroundMask))
+                {
+                    return along;
+                }
+            }
+
+            return limit;
+        }
+
+        /// <summary>
+        /// Where a walker stepping off the lip lands, when the crossing's own landing point is not past
+        /// it: a little way past the lip instead, as long as that is still inside the lower area, still
+        /// below the floor being left, and has room for a body - and as long as the walk out to the lip
+        /// is as clear as the crossing itself, which the clearance lines tested only as far as the
+        /// original landing point.
+        ///
+        /// The connection pass runs before areas are clipped back out of the geometry, so a lower area
+        /// can run under the ledge above it or into the wall below its lip, and the landing point six
+        /// units inside it is then underneath the ledge or buried in it. Round gm_flatgrass's pit the
+        /// floor of the pit runs six and a half units into the wall under each ledge, and that, with the
+        /// ledge's floor running on past the area along its rim, is what kept every drop into the pit
+        /// unlinked. The clip pulls the lower area back afterwards, but nothing connects it again.
+        ///
+        /// Not past the lower area, and not past <paramref name="limit"/>: a lip further out than that
+        /// is the floor of an upper storey over the lower area, not a ledge.
+        /// </summary>
+        /// <remarks>
+        /// The limit was 32 units past the original landing at first, the furthest a crossing's end
+        /// retreats for headroom. On gm_construct that linked 384 unit drops off the edge of a slab
+        /// that ran 40 units on past the upper area with nothing meshed on it - real edges, but a walk
+        /// across floor no area claims, which is not what this is for. Sixteen covers the ledges.
+        /// </remarks>
+        private static bool LandingPastLip(BspVisibility vis, NavArea to, float fromX, float fromY, float fromZ,
+            float toX, float toY, float ux, float uy, float lip, float limit, float high, float sideX, float sideY,
+            out float landing, out float landingZ)
+        {
+            landingZ = 0;
+            landing = lip + 2f + Inset;
+
+            if (landing > limit)
+                return false;
+
+            float x = fromX + ux * landing, y = fromY + uy * landing;
+            var b = NavGeometry.GetBounds(to);
+
+            if (x < b.MinX + SpanEnd || x > b.MaxX - SpanEnd || y < b.MinY + SpanEnd || y > b.MaxY - SpanEnd)
+                return false;
+
+            if (!StairMarker.TryFindFloor(vis, x, y, NavGeometry.SurfaceZ(to, x, y) + NavConstants.StepHeight,
+                    NavConstants.StepHeight * 2f, out landingZ))
+            {
+                return false;
+            }
+
+            if (landingZ >= fromZ - NavConstants.StepHeight || !HasRoom(vis, x, y, landingZ, out _))
+                return false;
+
+            return LinesClear(vis, toX, toY, x, y, high, sideX, sideY, sideFloors: false);
+        }
+
+        /// <summary>
+        /// How far past a crossing's own landing point the lip of a drop may lie and the walker still
+        /// land past it, in the lower area (<see cref="LandingPastLip"/>).
+        /// </summary>
+        private const float LandingReach = 16f;
+
+        /// <summary>How far apart the probes looking for the lip of a drop are.</summary>
+        private const float LipStep = 2f;
 
         /// <summary>
         /// How many points along the fall's horizontal run are probed. Three: just past the edge being
