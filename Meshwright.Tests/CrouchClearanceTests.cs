@@ -79,7 +79,7 @@ namespace Meshwright.Tests
         /// slot between two solid walls: everything from x = <paramref name="right"/> on, and
         /// everything up to x = <paramref name="left"/>, floor to well over the slab.
         /// </summary>
-        private static BspVisibility SlabInSlot(float left, float right)
+        internal static BspVisibility SlabInSlot(float left, float right)
         {
             var planes = new[]
             {
