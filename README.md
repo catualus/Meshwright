@@ -182,7 +182,7 @@ These apply to every command, not just `generate`:
 | Option | Effect |
 |---|---|
 | `-threads N` | Cap parallel work. Default is every core |
-| `-game NAME` | Movement limits: `cs`/`css`/`csgo`, or `gmod`/`hl2`/`tf2`/`source` (default) |
+| `-game NAME` | Movement limits: `cs`/`css`/`csgo`, or `gmod`/`hl2`/`tf2`/`source` (default). `tf2`, or a Compile Pal game called Team Fortress 2, also makes player clip solid, as it is to TF2's bots |
 | `-content DIR` | Extra directory to resolve prop models from. May be repeated |
 
 `-content` matters more than it looks. Meshwright works out where the game's content lives from the
@@ -278,8 +278,8 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,637 | 19,577 | 17,085 |
-| Connections | 11,446 | 14,010 | 91,538 | 76,303 |
+| Areas | 2,271 | 2,637 | 19,577 | 17,323 |
+| Connections | 11,446 | 14,010 | 91,538 | 77,332 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **45 (0.3%)** |
@@ -298,10 +298,10 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | | gm_construct | rp_downtown_tits_v25 |
 |---|---|---|
 | Coverage of the reference's ground a player can reach | **98.4%** | 67.4% |
-| Coverage of every reference area including stranded | 88.7% | 66.9% |
-| Areas on ground the reference does not have | 2.7% | 9.3% |
+| Coverage of every reference area including stranded | 88.7% | 67.5% |
+| Areas on ground the reference does not have | 2.7% | 9.6% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 393 (2.3%) |
+| Areas no player spawn can reach | 3 (0.1%) | 396 (2.3%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -331,19 +331,24 @@ pairs the reference itself can route.
 | | Reference | Routes found |
 |---|---|---|
 | gm_construct | engine | **99.8%** |
-| ctf_2fort | Valve | 43.6% |
-| cp_dustbowl | Valve | 45.3% |
-| pl_badwater | Valve | 97.4% |
+| ctf_2fort | Valve | 99.9% |
+| cp_dustbowl | Valve | 99.2% |
+| pl_badwater | Valve | 99.8% |
 | cp_granary | Valve | **100.0%** |
 | koth_viaduct | Valve | **100.0%** |
-| pl_upward | Valve | 98.1% |
-| cp_badlands | Valve | 99.9% |
+| pl_upward | Valve | 99.0% |
+| cp_badlands | Valve | 99.7% |
 | ctf_turbine | Valve | **100.0%** |
-| Team Fortress 2, mean | | 85.5% |
+| Team Fortress 2, mean | | 99.7% |
 
-The two weak maps fail differently. On ctf_2fort 775 of the 1,128 failed pairs have both ends joined
-in one direction only - a drop the mesh has without the way back up. On cp_dustbowl 606 have their
-ends in separate parts of the mesh and 472 have an end on ground the mesh does not cover.
+ctf_2fort and cp_dustbowl found 43.6% and 45.3% until clip brushes counted as ground. TF2 lays a
+clip ramp over its stairs and a clip slab over some sunken floors, and the mesh had treated those as
+neither floor nor open air, so nothing was built on them. The same maps also need a toggle brush that
+is switched on at the start - cp_dustbowl's stairs to the first stage's yard, pl_badwater's cover over
+the final pit - to be a floor, and, for TF2 only, player clip to be solid, as it is to TF2's bots.
+That last one also seals the map edges the flood used to walk out through: on koth_viaduct 83.5% of
+the generated areas were on ground Valve's mesh does not have, and now 27.8% are, and on cp_badlands
+69.2% now 25.3%. Coverage of the ground Valve's meshes can reach is 95.5% to 98.5% on every TF2 map.
 
 Finishing an existing mesh (`-generateareas` without `-scratch`) lines the new areas up with the old
 ones, so the seams connect. Run over Valve's own meshes, which then only need their gaps filled, the
