@@ -238,5 +238,55 @@ namespace Meshwright.Tests
             Assert.Equal(0f, min);
             Assert.Equal(Face, max, 0.1f);
         }
+
+        private static NavFile Square(float minX, float minY, float maxX, float maxY, float z = 0f)
+        {
+            var area = new NavArea { Id = 1 };
+            area.NwCorner[0] = minX;
+            area.NwCorner[1] = minY;
+            area.NwCorner[2] = z;
+            area.SeCorner[0] = maxX;
+            area.SeCorner[1] = maxY;
+            area.SeCorner[2] = z;
+            area.NeZ = z;
+            area.SwZ = z;
+
+            var nav = new NavFile();
+            nav.Areas.Add(area);
+            return nav;
+        }
+
+        /// <summary>
+        /// Terrain two units above an area's surface is floor under it.
+        ///
+        /// The floor search walks down from a step above the surface in four-unit segments, and a
+        /// displacement triangle only counts as hit strictly inside one, so terrain exactly two units
+        /// up sits where one segment ends and the next begins and was missed by both. Every probe
+        /// line read no floor, and the area was pulled back on all four sides until it was discarded.
+        /// </summary>
+        [Fact]
+        public void TerrainOnASegmentBoundaryIsStillFloor()
+        {
+            const float Terrain = 2f;
+
+            // Nothing solid but a slab far below, and flat terrain over all of it.
+            var planes = new[] { Plane(0, 0, 1, -1000f) };
+            var nodes = new[] { new BspVisibility.Node { PlaneNum = 0, Child0 = -1, Child1 = -2 } };
+            var leafs = new[] { new BspVisibility.Leaf { Contents = 0 }, new BspVisibility.Leaf { Contents = Solid } };
+            var vis = BspVisibility.FromGeometry(planes, nodes, leafs, [], [], new int[]?[leafs.Length]);
+
+            BspFile.Vector3 V(float x, float y) => new(x, y, Terrain);
+            vis.AttachDisplacements(BspDisplacements.FromTriangles(
+                [V(-500, -500), V(500, -500), V(500, 500), V(-500, -500), V(500, 500), V(-500, 500)],
+                [Solid, Solid]));
+
+            var nav = Square(0f, 0f, 100f, 100f);
+
+            var result = AreaClipper.Clip(nav, vis, Step);
+
+            Assert.Equal(0, result.Clipped);
+            var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
+            Assert.Equal((0f, 0f, 100f, 100f), (b.MinX, b.MinY, b.MaxX, b.MaxY));
+        }
     }
 }
