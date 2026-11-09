@@ -90,6 +90,13 @@ namespace Meshwright
             /// the shapes they had before, so these are what <see cref="ConnectionBuilder.Relink"/> re-tests.
             /// </summary>
             public readonly HashSet<uint> Reshaped = [];
+
+            /// <summary>
+            /// The footprint each area in <see cref="Reshaped"/> had before this pass moved it. The links
+            /// made on those footprints are re-tested on the new ones by <see cref="ConnectionBuilder.DropStale"/>,
+            /// which needs to know where each crossing was.
+            /// </summary>
+            public readonly Dictionary<uint, NavGeometry.Bounds> Before = [];
         }
 
         /// <param name="firstGeneratedId">
@@ -130,6 +137,7 @@ namespace Meshwright
                     return;
 
                 float before = Extent(area);
+                var footprint = NavGeometry.GetBounds(area);
 
                 // Repeated, not once. Each pass inspects only the outermost step of the edge, so an area
                 // that has run several steps into a wall needs several passes to walk back out of it -
@@ -165,6 +173,7 @@ namespace Meshwright
                     clipped++;
                     reclaimed += shrunk;
                     result.Reshaped.Add(area.Id);
+                    result.Before[area.Id] = footprint;
                 }
             });
 

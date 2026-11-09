@@ -1991,6 +1991,10 @@ namespace Meshwright
                     var relinked = ConnectionBuilder.Relink(nav, vis, trimmed.Reshaped);
                     if (relinked.Total > 0)
                         Console.WriteLine($"      relinked {relinked.Total:N0} connections across clipped edges");
+
+                    var unlinked = ConnectionBuilder.DropStale(nav, vis, trimmed.Reshaped, trimmed.Before);
+                    if (unlinked.Removed > 0)
+                        Console.WriteLine($"      unlinked {unlinked.Removed:N0} connections no body gets across");
                 }
             }
 
