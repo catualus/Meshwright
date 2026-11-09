@@ -278,11 +278,11 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,640 | 19,577 | 17,314 |
-| Connections | 11,446 | 14,110 | 91,538 | 78,962 |
+| Areas | 2,271 | 2,640 | 19,577 | 17,322 |
+| Connections | 11,446 | 14,182 | 91,538 | 81,467 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **47 (0.3%)** |
+| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **49 (0.3%)** |
 | Areas over open air | 3 | **0** | 215 (1.1%) | **1** |
 
 On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,713 areas
@@ -301,7 +301,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | Coverage of every reference area including stranded | 88.7% | 67.5% |
 | Areas on ground the reference does not have | 2.8% | 9.6% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 321 (1.9%) |
+| Areas no player spawn can reach | 3 (0.1%) | 153 (0.9%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -337,7 +337,7 @@ pairs the reference itself can route.
 | cp_granary | Valve | **100.0%** |
 | koth_viaduct | Valve | **100.0%** |
 | pl_upward | Valve | 99.1% |
-| cp_badlands | Valve | 99.7% |
+| cp_badlands | Valve | 99.8% |
 | ctf_turbine | Valve | **100.0%** |
 | Team Fortress 2, mean | | 99.7% |
 
@@ -377,6 +377,23 @@ gm_flatgrass has no island left; across the twelve maps the areas with no link a
 to 700 and the crossings left unlinked away from the middle from 3,937 to 1,582. Connections rise by
 1% to 7%, routes and coverage hold or improve slightly, and the areas no spawn can reach fall on every
 map but gm_construct, which stays at 3.
+
+A crossing over ground sloping across it was refused at its middle. The clearance lines are level,
+the lowest eight units above the floor under the middle of the crossing, but a walker on a slope
+rests on its uphill side, and on terrain sloping 30 to 45 degrees across the crossing the outer line
+on that side runs into the ground. Of the shared edges a hull sweep crosses at the middle that the
+builder refused on the finished rp_downtown_tits_v25 mesh, that was 2,698 of 3,585 - nearly all over
+displacement terrain, which RP maps are built on. Each outer line is now measured from the floor under
+it when that floor is higher by no more than a step. Drops off a ledge whose floor runs on past its
+area were refused as well, another 330 there: the fall was checked from two units past the area,
+which put the column inside the ledge, and connections are made before areas are clipped back out of
+walls, so the area below can still reach under the lip and its landing point be inside the ledge too.
+The fall is now checked from where the floor ends, landing past that if the area below reaches up to
+16 units further. gm_flatgrass's pit rim now drops into the pit. Across the twelve maps the areas with
+no link at all fell from 700 to 476, and on the two RP maps the refused middle crossings from 3,585 to
+456 and from 3,561 to 486, and the areas no spawn can reach from 321 to 153 and from 584 to 413.
+Connections rise by 0.5% to 4.4%, routes and coverage hold, and unreachable areas fall on every map
+but gm_construct and gm_flatgrass, which do not change.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
@@ -461,10 +478,10 @@ clipper, so standing headroom is still a line trace. It can drop through a grati
 narrower than itself. Crouch-only ground, where that matters most, also sweeps a body's footprint
 upward, which is a sweep with length and so not degenerate.
 
-**A drop off a ledge whose floor runs past its area can be refused.** A fall is checked down a
-column a couple of units past the upper area's edge, and where the floor itself carries on a few units
-further the column starts inside it. gm_flatgrass's ledges round its pit are like this: they link to
-each other and to the ledge they lead off, but no drop into the pit is recorded from them.
+**A drop off floor that runs well past its area is not linked.** A fall is checked from where the
+floor being stepped off ends, and the walker lands past that, in the area below - but only up to 16
+units beyond where the crossing would otherwise land. Floor that carries on further than that with no
+area on it is taken for the floor of an upper storey, and no drop is recorded off its far edge.
 
 **Stair marking is limited by area shape, not by the test.** Run over the engine's own areas the
 classifier reproduces the engine's verdicts. Run over a mesh generated here it finds fewer, because an
