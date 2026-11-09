@@ -278,11 +278,11 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,637 | 19,577 | 17,302 |
-| Connections | 11,446 | 14,010 | 91,538 | 77,291 |
+| Areas | 2,271 | 2,640 | 19,577 | 17,317 |
+| Connections | 11,446 | 14,117 | 91,538 | 79,161 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **45 (0.3%)** |
+| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **47 (0.3%)** |
 | Areas over open air | 3 | **0** | 215 (1.1%) | **1** |
 
 On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,713 areas
@@ -299,9 +299,9 @@ and the areas the run's own reachability check cannot reach from any spawn.
 |---|---|---|
 | Coverage of the reference's ground a player can reach | **98.4%** | 67.4% |
 | Coverage of every reference area including stranded | 88.7% | 67.5% |
-| Areas on ground the reference does not have | 2.7% | 9.6% |
+| Areas on ground the reference does not have | 2.8% | 9.6% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 388 (2.2%) |
+| Areas no player spawn can reach | 3 (0.1%) | 321 (1.9%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -331,13 +331,13 @@ pairs the reference itself can route.
 | | Reference | Routes found |
 |---|---|---|
 | gm_construct | engine | **99.8%** |
-| ctf_2fort | Valve | 99.9% |
+| ctf_2fort | Valve | **100.0%** |
 | cp_dustbowl | Valve | 99.2% |
 | pl_badwater | Valve | 99.8% |
 | cp_granary | Valve | **100.0%** |
 | koth_viaduct | Valve | **100.0%** |
-| pl_upward | Valve | 99.0% |
-| cp_badlands | Valve | 99.7% |
+| pl_upward | Valve | 99.1% |
+| cp_badlands | Valve | 99.8% |
 | ctf_turbine | Valve | **100.0%** |
 | Team Fortress 2, mean | | 99.7% |
 
@@ -361,6 +361,19 @@ a crouching body anywhere in them, since headroom was a single line. With teamsp
 seeds and a 32 unit wide body swept for crouch-only ground, 51 remain, 45 of them off Valve's ground,
 most of them small pockets a crouching body does fit, several under props. Routes are unchanged and
 coverage moves by a tenth of a point at most.
+
+A shared edge narrower than a body used to be crossed only at its middle. Crossings away from the
+middle were tried with the whole body over the shared span, a body's half-width in from each end, so
+a span under 32 units left nothing else to try - and that is the usual case. Measured with hull
+sweeps along every unlinked shared edge of the twelve benchmark meshes, 3,937 crossings could be made
+only away from the middle, and 93% of those edges were narrower than a body. A ledge 25 units deep under an
+overhang is one: a crouching body fits on it only at the lip, half of it over the drop. gm_flatgrass
+has such ledges round the walls of its pit, and 22 of their areas were islands. The body's centre may
+now be anywhere on the span, and where half of it hangs past the end a body is swept across as well as
+the clearance lines. gm_flatgrass has no island left; across the twelve maps the areas with no link at
+all fell from 830 to 513 and the crossings left unlinked away from the middle from 3,937 to 1,435.
+Connections rise by 1% to 8%, routes and coverage hold or improve slightly, and the areas no spawn can
+reach fall on every map but gm_construct, which stays at 3.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
@@ -445,11 +458,10 @@ clipper, so standing headroom is still a line trace. It can drop through a grati
 narrower than itself. Crouch-only ground, where that matters most, also sweeps a body's footprint
 upward, which is a sweep with length and so not degenerate.
 
-**A ledge a body only fits on by its edge is meshed but not linked.** A crouching body is allowed
-anywhere in a sample's own cell, so a ledge 26 units deep under an overhang, which a body fits on with
-half of it over the drop, is crouch ground. Crossings are tested on an area's centre line, a body's
-half-width either side, so nothing links it: gm_flatgrass has 16 such areas under the rim of its pit,
-each an island.
+**A drop off a ledge whose floor runs past its area can be refused.** A fall is checked down a
+column a couple of units past the upper area's edge, and where the floor itself carries on a few units
+further the column starts inside it. gm_flatgrass's ledges round its pit are like this: they link to
+each other and to the ledge they lead off, but no drop into the pit is recorded from them.
 
 **Stair marking is limited by area shape, not by the test.** Run over the engine's own areas the
 classifier reproduces the engine's verdicts. Run over a mesh generated here it finds fewer, because an
