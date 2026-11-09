@@ -239,6 +239,48 @@ namespace Meshwright.Tests
             Assert.Equal(Face, max, 0.1f);
         }
 
+        /// <summary>
+        /// A floor under z = 0 that ends at a west-facing ledge: solid east of <paramref name="ledge"/>,
+        /// open air everywhere else. Where <paramref name="notchFrom"/> is given, the ledge steps back
+        /// to <paramref name="notchLedge"/> south of that line, so the floor's west edge is not straight.
+        /// </summary>
+        private static BspVisibility Ledge(float ledge, float? notchFrom = null, float notchLedge = 0f)
+        {
+            var planes = new List<BspFile.Plane> { Plane(0, 0, 1, 0) };
+            var leafs = new List<BspVisibility.Leaf>
+            {
+                new() { Contents = 0 },         // 0: open air
+                new() { Contents = Solid },     // 1: floor
+            };
+
+            // Leaf n is referenced as -(n) - 1.
+            const int Air = -1, Floor = -2;
+
+            var nodes = new List<BspVisibility.Node> { default };
+
+            int Split(float x)
+            {
+                planes.Add(Plane(1, 0, 0, x));
+                nodes.Add(new BspVisibility.Node { PlaneNum = planes.Count - 1, Child0 = Floor, Child1 = Air });
+                return nodes.Count - 1;
+            }
+
+            int below = Split(ledge);
+
+            if (notchFrom is float y)
+            {
+                int north = below, south = Split(notchLedge);
+                planes.Add(Plane(0, 1, 0, y));
+                nodes.Add(new BspVisibility.Node { PlaneNum = planes.Count - 1, Child0 = south, Child1 = north });
+                below = nodes.Count - 1;
+            }
+
+            nodes[0] = new BspVisibility.Node { PlaneNum = 0, Child0 = Air, Child1 = below };
+
+            return BspVisibility.FromGeometry([.. planes], [.. nodes], [.. leafs], [], [],
+                new int[]?[leafs.Count]);
+        }
+
         private static NavFile Square(float minX, float minY, float maxX, float maxY, float z = 0f)
         {
             var area = new NavArea { Id = 1 };
@@ -254,6 +296,73 @@ namespace Meshwright.Tests
             var nav = new NavFile();
             nav.Areas.Add(area);
             return nav;
+        }
+
+        /// <summary>
+        /// An area overhanging a ledge on its west side loses the overhang there, and nowhere else.
+        ///
+        /// The south edge's probe line nearest the west side starts over the drop. Its floor reading
+        /// used to pull the whole south edge back a step, over floor that carries on, because the
+        /// south edge is clipped before the west one and the floor readings are combined with their
+        /// minimum. The second line in is over the drop too, so this covers a line that is not the
+        /// outermost as well.
+        /// </summary>
+        [Fact]
+        public void AnOverhangOnOneSideDoesNotPullTheEdgesBesideItBack()
+        {
+            const float Drop = 2f;
+
+            var nav = Square(-15f, 0f, 35f, 100f);
+
+            AreaClipper.Clip(nav, Ledge(Drop), Step);
+
+            var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
+
+            Assert.InRange(b.MinX, Drop, Drop + Step / 2f);
+            Assert.Equal(35f, b.MaxX);
+            Assert.Equal(0f, b.MinY);
+            Assert.Equal(100f, b.MaxY);
+        }
+
+        /// <summary>
+        /// The same, where the line nearest the west side does have floor where it starts and runs off
+        /// the ledge only further on, because the ledge steps back towards the corner. The west edge's
+        /// own lines take the overhang away and the south edge stays where it is.
+        /// </summary>
+        [Fact]
+        public void ALedgeSteppingBackAtACornerDoesNotPullTheEdgeBesideItBack()
+        {
+            var nav = Square(0f, 0f, 100f, 100f);
+
+            AreaClipper.Clip(nav, Ledge(8f, notchFrom: 80f, notchLedge: 12f), Step);
+
+            var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
+
+            Assert.InRange(b.MinX, 12f, 12f + Step / 2f);
+            Assert.Equal(100f, b.MaxX);
+            Assert.Equal(0f, b.MinY);
+            Assert.Equal(100f, b.MaxY);
+        }
+
+        /// <summary>
+        /// The control for both: an area hanging over a drop by more than a step on every line of an
+        /// edge is still walked back out of it, step by step, once every line has its say.
+        /// </summary>
+        [Fact]
+        public void AnAreaOverhangingALedgeByMoreThanAStepStillWalksBack()
+        {
+            const float Drop = 60f;
+
+            var nav = Square(0f, 0f, 150f, 100f);
+
+            AreaClipper.Clip(nav, Ledge(Drop), Step);
+
+            var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
+
+            Assert.InRange(b.MinX, Drop, Drop + Step / 2f);
+            Assert.Equal(150f, b.MaxX);
+            Assert.Equal(0f, b.MinY);
+            Assert.Equal(100f, b.MaxY);
         }
 
         /// <summary>

@@ -139,28 +139,16 @@ namespace Meshwright
                 float before = Extent(area);
                 var footprint = NavGeometry.GetBounds(area);
 
-                // Repeated, not once. Each pass inspects only the outermost step of the edge, so an area
-                // that has run several steps into a wall needs several passes to walk back out of it -
-                // the first pull exposes the next step to be judged. Bounded because an area cannot
-                // usefully retreat further than its own width, and a runaway here would eat the mesh.
-                const int MaxPasses = 8;
+                // Patiently first - see Voters. An area that comes out too small to keep either way is
+                // clipped again from where it started, the way it always was: see Run.
+                var start = Snapshot(area);
+                bool moved = Run(area, vis, stepSize, patient: true);
+                var after = NavGeometry.GetBounds(area);
 
-                bool moved = false;
-
-                for (int pass = 0; pass < MaxPasses; pass++)
+                if (after.Width < MinimumUsableWidth && after.Depth < MinimumUsableWidth)
                 {
-                    // All four edges, because an area overhangs in all four directions. It grows from a
-                    // rectangle of nodes and reaches half a sampling step past the outermost one on
-                    // every side, so a wall can cut across any of them.
-                    bool movedEast = ClipEast(area, vis, stepSize);
-                    bool movedSouth = ClipSouth(area, vis, stepSize);
-                    bool movedWest = ClipWest(area, vis, stepSize);
-                    bool movedNorth = ClipNorth(area, vis, stepSize);
-
-                    moved |= movedEast | movedSouth | movedWest | movedNorth;
-
-                    if (!movedEast && !movedSouth && !movedWest && !movedNorth)
-                        break;
+                    Restore(area, start);
+                    moved = Run(area, vis, stepSize, patient: false);
                 }
 
                 if (!moved)
@@ -186,6 +174,72 @@ namespace Meshwright
                 result.Reshaped.IntersectWith(nav.Areas.Select(a => a.Id));
 
             return result;
+        }
+
+        /// <summary>
+        /// Clips one area's four edges, pass after pass, until a pass moves nothing. Returns whether any
+        /// edge moved.
+        ///
+        /// Repeated, not once. Each pass inspects only the outermost step of the edge, so an area that has
+        /// run several steps into a wall needs several passes to walk back out of it - the first pull
+        /// exposes the next step to be judged. Bounded because an area cannot usefully retreat further
+        /// than its own width, and a runaway here would eat the mesh.
+        ///
+        /// When <paramref name="patient"/>, it runs twice: first with only some of each edge's probe lines
+        /// judging its floor, then with every line, each until a pass moves nothing - see
+        /// <see cref="Voters"/>. Otherwise only the second run, which is how every area used to be clipped.
+        ///
+        /// The caller falls back to that for an area the patient clip leaves narrower than
+        /// <see cref="MinimumUsableWidth"/> both ways. Those are single-node squares sitting over a drop on
+        /// two sides, which the hurried clip walked down to nothing and discarded. Clipped patiently, a
+        /// few stopped as eight-unit squares still partly over the drop, and <see cref="Spare"/> - which
+        /// samples only nine points - kept some of them as the one way between two neighbours: measured
+        /// on the twelve benchmark maps, five more areas floating straight after the clip on the two
+        /// roleplay maps, and no ground gained. A square too small to keep gains nothing from patience,
+        /// so it is judged exactly as before. Strips narrow only one way are not: the commonest place
+        /// the hurried clip lost floor is the one-node strip along a wall or a ledge.
+        /// </summary>
+        private static bool Run(NavArea area, BspVisibility vis, float stepSize, bool patient)
+        {
+            const int MaxPasses = 8;
+
+            bool moved = false;
+
+            for (int phase = patient ? 0 : 1; phase < 2; phase++)
+            {
+                bool everyLine = phase == 1;
+
+                for (int pass = 0; pass < MaxPasses; pass++)
+                {
+                    // All four edges, because an area overhangs in all four directions. It grows from a
+                    // rectangle of nodes and reaches half a sampling step past the outermost one on every
+                    // side, so a wall can cut across any of them.
+                    bool movedEast = ClipEast(area, vis, stepSize, everyLine);
+                    bool movedSouth = ClipSouth(area, vis, stepSize, everyLine);
+                    bool movedWest = ClipWest(area, vis, stepSize, everyLine);
+                    bool movedNorth = ClipNorth(area, vis, stepSize, everyLine);
+
+                    moved |= movedEast | movedSouth | movedWest | movedNorth;
+
+                    if (!movedEast && !movedSouth && !movedWest && !movedNorth)
+                        break;
+                }
+            }
+
+            return moved;
+        }
+
+        private readonly record struct Shape(float NwX, float NwY, float NwZ, float SeX, float SeY, float SeZ,
+            float NeZ, float SwZ);
+
+        private static Shape Snapshot(NavArea a) => new(a.NwCorner[0], a.NwCorner[1], a.NwCorner[2],
+            a.SeCorner[0], a.SeCorner[1], a.SeCorner[2], a.NeZ, a.SwZ);
+
+        private static void Restore(NavArea a, Shape s)
+        {
+            (a.NwCorner[0], a.NwCorner[1], a.NwCorner[2]) = (s.NwX, s.NwY, s.NwZ);
+            (a.SeCorner[0], a.SeCorner[1], a.SeCorner[2]) = (s.SeX, s.SeY, s.SeZ);
+            (a.NeZ, a.SwZ) = (s.NeZ, s.SwZ);
         }
 
         /// <summary>
@@ -412,7 +466,59 @@ namespace Meshwright
         /// </summary>
         private static float ProbeSpan(float width, float stepSize) => MathF.Min(stepSize, width * 0.5f);
 
-        private static bool ClipEast(NavArea area, BspVisibility vis, float stepSize)
+        /// <summary>
+        /// Which of an edge's probe lines judge its floor, as a bit per line: all of them once
+        /// <paramref name="everyLine"/> is set. Before that, never the two outermost, and of the rest
+        /// only those with floor where they start - unless none has, when they all do.
+        ///
+        /// The lines left out are the ones that report floor missing somewhere other than under this
+        /// edge's last step. The outermost lines run a tenth of the area's width in from the two edges
+        /// either side, inside those edges' own last steps, so where one of those edges overhangs a
+        /// ledge the corner line runs over the drop. A line with no floor where it starts is over a drop
+        /// before it reaches this edge's last step at all, and pulling this edge back cannot help it,
+        /// since an edge never comes back past its probe's start. Because the readings are combined
+        /// with their minimum, either one pulled its edge back a full step over floor that carries on -
+        /// usually before the edge that does overhang had been looked at, since the four are clipped
+        /// in turn, and where that edge overhung by more than a step, once a pass until it had walked
+        /// out of the drop. Measured on the ten benchmark maps with a reference mesh, judging floor by a
+        /// crouching body fitting over it at the area's own height and the reference covering it there,
+        /// 859 passes removed a strip that was mostly such floor, and one of these lines bound the floor
+        /// test in 700 of them.
+        ///
+        /// When no middle line has floor where it starts, this edge's whole last step is over the drop,
+        /// and the middle lines all judge it, so an area hanging more than a step off a ledge is walked
+        /// back from that side straight away. Once the clip has come to a standstill like this it runs
+        /// again with every line, exactly as it always did, and that run stops only when a pass with
+        /// every line moves nothing - the same test, on the same lines, as before. Whatever the lines
+        /// left out see that the neighbouring edge did not take away, they still clip: a notch in a
+        /// corner, a ledge running diagonally across it, which are what the minimum is there for.
+        /// </summary>
+        private static int Voters(BspVisibility vis, NavArea area, NavGeometry.Bounds b, float from,
+            bool alongX, bool everyLine)
+        {
+            const int All = (1 << Samples) - 1;
+
+            if (everyLine)
+                return All;
+
+            int middle = 0, floored = 0;
+
+            for (int i = 1; i < Samples - 1; i++)
+            {
+                float t = (i + 0.5f) / Samples;
+                float x = alongX ? from : b.MinX + t * b.Width;
+                float y = alongX ? b.MinY + t * b.Depth : from;
+
+                middle |= 1 << i;
+
+                if (FloorUnder(vis, area, x, y))
+                    floored |= 1 << i;
+            }
+
+            return floored != 0 ? floored : middle;
+        }
+
+        private static bool ClipEast(NavArea area, BspVisibility vis, float stepSize, bool everyLine)
         {
             var b = NavGeometry.GetBounds(area);
             if (b.Width <= MinimumOverhang || b.Depth <= 0.01f)
@@ -421,6 +527,7 @@ namespace Meshwright
             float span = ProbeSpan(b.Width, stepSize);
             float from = b.MaxX - span;
             var walls = new List<float>(Samples);
+            int voters = Voters(vis, area, b, from, true, everyLine);
             float floor = span;
 
             for (int i = 0; i < Samples; i++)
@@ -433,7 +540,8 @@ namespace Meshwright
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, from, y), NavGeometry.SurfaceZ(area, b.MaxX, y));
 
                 walls.Add(Reach(vis, from, y, b.MaxX, y, z, span));
-                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MaxX, y, span));
+                if ((voters & (1 << i)) != 0)
+                    floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MaxX, y, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
@@ -452,7 +560,7 @@ namespace Meshwright
         /// area may keep, and the new edge sits that far west of the probe's start rather than east of
         /// it.
         /// </summary>
-        private static bool ClipWest(NavArea area, BspVisibility vis, float stepSize)
+        private static bool ClipWest(NavArea area, BspVisibility vis, float stepSize, bool everyLine)
         {
             var b = NavGeometry.GetBounds(area);
             if (b.Width <= MinimumOverhang || b.Depth <= 0.01f)
@@ -461,6 +569,7 @@ namespace Meshwright
             float span = ProbeSpan(b.Width, stepSize);
             float from = b.MinX + span;
             var walls = new List<float>(Samples);
+            int voters = Voters(vis, area, b, from, true, everyLine);
             float floor = span;
 
             for (int i = 0; i < Samples; i++)
@@ -469,7 +578,8 @@ namespace Meshwright
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, from, y), NavGeometry.SurfaceZ(area, b.MinX, y));
 
                 walls.Add(Reach(vis, from, y, b.MinX, y, z, span));
-                floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MinX, y, span));
+                if ((voters & (1 << i)) != 0)
+                    floor = MathF.Min(floor, FloorReach(vis, area, from, y, b.MinX, y, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
@@ -481,7 +591,7 @@ namespace Meshwright
         }
 
         /// <summary><see cref="ClipSouth"/>, mirrored onto the north edge.</summary>
-        private static bool ClipNorth(NavArea area, BspVisibility vis, float stepSize)
+        private static bool ClipNorth(NavArea area, BspVisibility vis, float stepSize, bool everyLine)
         {
             var b = NavGeometry.GetBounds(area);
             if (b.Depth <= MinimumOverhang || b.Width <= 0.01f)
@@ -490,6 +600,7 @@ namespace Meshwright
             float span = ProbeSpan(b.Depth, stepSize);
             float from = b.MinY + span;
             var walls = new List<float>(Samples);
+            int voters = Voters(vis, area, b, from, false, everyLine);
             float floor = span;
 
             for (int i = 0; i < Samples; i++)
@@ -498,7 +609,8 @@ namespace Meshwright
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, x, from), NavGeometry.SurfaceZ(area, x, b.MinY));
 
                 walls.Add(Reach(vis, x, from, x, b.MinY, z, span));
-                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MinY, span));
+                if ((voters & (1 << i)) != 0)
+                    floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MinY, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
@@ -509,7 +621,7 @@ namespace Meshwright
             return true;
         }
 
-        private static bool ClipSouth(NavArea area, BspVisibility vis, float stepSize)
+        private static bool ClipSouth(NavArea area, BspVisibility vis, float stepSize, bool everyLine)
         {
             var b = NavGeometry.GetBounds(area);
             if (b.Depth <= MinimumOverhang || b.Width <= 0.01f)
@@ -518,6 +630,7 @@ namespace Meshwright
             float span = ProbeSpan(b.Depth, stepSize);
             float from = b.MaxY - span;
             var walls = new List<float>(Samples);
+            int voters = Voters(vis, area, b, from, false, everyLine);
             float floor = span;
 
             for (int i = 0; i < Samples; i++)
@@ -526,7 +639,8 @@ namespace Meshwright
                 float z = MathF.Max(NavGeometry.SurfaceZ(area, x, from), NavGeometry.SurfaceZ(area, x, b.MaxY));
 
                 walls.Add(Reach(vis, x, from, x, b.MaxY, z, span));
-                floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MaxY, span));
+                if ((voters & (1 << i)) != 0)
+                    floor = MathF.Min(floor, FloorReach(vis, area, x, from, x, b.MaxY, span));
             }
 
             float keep = MathF.Max(MathF.Min(Median(walls), floor), MinimumOverhang);
@@ -594,8 +708,8 @@ namespace Meshwright
         /// being a whole two units under the terrain is enough, and down a straight run of terrain it
         /// stays two units under at every step. cp_badlands lost 70 units of a terrain slope Valve's
         /// mesh covers that way, one step a pass, from a single probe line; on the ten benchmark maps
-        /// with a reference mesh it was the cause in 71 of the 859 passes that removed a strip of mostly real
-        /// floor. Starting half a segment higher puts that
+        /// with a reference mesh it was the cause in 71 of the 859 passes that removed real floor (see
+        /// <see cref="Voters"/> for how that was judged). Starting half a segment higher puts that
         /// surface in the middle of one. The window's bottom does not move, and a floor found in the
         /// extra two units at the top is more than a step above the claim, which the caller rejects just
         /// as it rejected finding nothing.
