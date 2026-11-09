@@ -115,6 +115,34 @@ namespace Meshwright
             return false;
         }
 
+        /// <summary>
+        /// Whether a brush entity a player walks through (<see cref="WalksThrough"/>) is nonetheless a
+        /// floor while the map is running as it starts: a toggle func_brush that starts switched on.
+        ///
+        /// Walking through those is right for the question it answers - whether a body can get past
+        /// one, so that the ground either side of a round gate is linked for when the gate opens. It is
+        /// wrong for the other question, whether the brush is something to stand on, because until map
+        /// logic switches it off it is exactly that. TF2 builds floors this way that later go away:
+        /// cp_dustbowl's cap1_stairs is the only flight up to the raised yard of the first stage until
+        /// the point falls, and pl_badwater's end_pit_destroy_brushes is the floor over the final pit
+        /// until the bomb goes off. With both walked through, the yard had no way up and so no mesh at
+        /// all, and the pit cover got none - its floor was read as the pit below. Valve's meshes cover
+        /// both, and standing on these brushes took the Valve routes the mesh misses from 96 to 16 of
+        /// 2,000 on cp_dustbowl and from 53 to 23 on pl_badwater.
+        ///
+        /// Doors and breakables are not floors in this sense: a closed door's top is in its frame, and
+        /// a breakable is walked through only because it can be broken, not because it goes away.
+        /// </summary>
+        private static bool StandsOn(string classname, Dictionary<string, string> entity)
+        {
+            if (!classname.Equals("func_brush", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string solidity = entity.TryGetValue("solidity", out string? s) ? s : "0";
+            bool startsOff = entity.TryGetValue("StartDisabled", out string? off) && off == "1";
+            return solidity == "0" && !startsOff;
+        }
+
         public readonly struct Model
         {
             /// <summary>World-space bounds, i.e. the model's own bounds shifted by <see cref="Origin"/>.</summary>
@@ -150,9 +178,11 @@ namespace Meshwright
         /// <summary>
         /// The map's blocking brush entities. With <paramref name="forMovement"/>, leaves out the ones a
         /// player walks through (<see cref="WalksThrough"/>): that set is for the traces that decide where
-        /// a body can stand and go, and the full set is for sight.
+        /// a body can stand and go, and the full set is for sight. With <paramref name="forGround"/> as
+        /// well, keeps those of them that are a floor to stand on while the map starts
+        /// (<see cref="StandsOn"/>), for the traces that look for ground.
         /// </summary>
-        public static BspModels Load(string path, BspFile bsp, bool forMovement = false)
+        public static BspModels Load(string path, BspFile bsp, bool forMovement = false, bool forGround = false)
         {
             var result = new BspModels();
 
@@ -170,7 +200,7 @@ namespace Meshwright
             }
 
             var raw = ReadModels(r, offsets[LumpModels]);
-            var blocking = SelectBlocking(bsp.EntityLump, raw.Length, forMovement);
+            var blocking = SelectBlocking(bsp.EntityLump, raw.Length, forMovement, forGround);
 
             var kept = new List<Model>(blocking.Count);
             foreach (var (index, origin) in blocking)
@@ -223,7 +253,7 @@ namespace Meshwright
         /// engine's own visibility pass traced against.
         /// </summary>
         internal static List<(int Index, BspFile.Vector3 Origin)> SelectBlocking(string entityLump, int modelCount,
-            bool forMovement = false)
+            bool forMovement = false, bool forGround = false)
         {
             var result = new List<(int, BspFile.Vector3)>();
 
@@ -243,7 +273,7 @@ namespace Meshwright
                 if (!Blocks(classname, entity))
                     continue;
 
-                if (forMovement && WalksThrough(classname, entity))
+                if (forMovement && WalksThrough(classname, entity) && !(forGround && StandsOn(classname, entity)))
                     continue;
 
                 result.Add((index, ParseVector(entity.TryGetValue("origin", out string? o) ? o : "")));

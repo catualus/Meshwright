@@ -549,20 +549,33 @@ namespace Meshwright
         /// </summary>
         private BspModels? movementModels;
 
-        public void AttachModels(BspModels models, BspModels? forMovement = null)
+        /// <summary>
+        /// Brush entities that are ground: <see cref="movementModels"/> plus the walked-through toggle
+        /// brushes that are switched on when the map starts, which a body passes for the purpose of
+        /// linking either side of them but stands on while they are there (see
+        /// <c>BspModels.StandsOn</c>). Falls back to <see cref="movementModels"/>.
+        /// </summary>
+        private BspModels? groundModels;
+
+        public void AttachModels(BspModels models, BspModels? forMovement = null, BspModels? forGround = null)
         {
             entityModels = models;
             movementModels = forMovement ?? models;
+            groundModels = forGround ?? movementModels;
         }
 
         /// <summary>
         /// The brush entities a trace against <paramref name="mask"/> should meet. Movement masks (both
         /// generation masks carry <see cref="GroundMask"/>'s windows and grates, which sight passes)
         /// get the walk-through set; sight gets every blocking entity, so a closed door still hides
-        /// what is behind it.
+        /// what is behind it. Of the two movement masks, <see cref="GroundMask"/> - the one without
+        /// CONTENTS_MONSTERCLIP - is the one that asks what can be stood on rather than what stops a
+        /// body, and gets the ground set.
         /// </summary>
         private BspModels? ModelsFor(int mask)
-            => (mask & GroundMask) == GroundMask ? movementModels : entityModels;
+            => (mask & GroundMask) != GroundMask ? entityModels
+                : (mask & ContentsMonsterClip) == 0 ? groundModels
+                : movementModels;
 
         public void AttachDisplacements(BspDisplacements disp) => displacements = disp;
 
