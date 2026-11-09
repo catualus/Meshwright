@@ -260,6 +260,7 @@ namespace Meshwright
                 : game.Contains("team fortress") || game is "tf2" or "tf";
 
             NavConstants.PlayerClipStopsEveryWalker = teamFortress;
+            NavConstants.PlayersSpawnOnlyAtTeamSpawns = teamFortress;
 
             if (teamFortress)
                 Console.WriteLine("      Team Fortress 2: player clip is solid ground and wall, as it is for its bots");

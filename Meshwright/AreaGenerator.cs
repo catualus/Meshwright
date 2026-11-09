@@ -701,12 +701,33 @@ namespace Meshwright
         /// </summary>
         public static IEnumerable<BspFile.Vector3> SpawnPositions(BspFile bsp) => SpawnPositions(bsp.EntityLump);
 
+        /// <summary>The one class TF2 spawns players at; see <see cref="NavConstants.PlayersSpawnOnlyAtTeamSpawns"/>.</summary>
+        private const string TeamSpawnClass = "info_player_teamspawn";
+
         /// <inheritdoc cref="SpawnPositions(BspFile)"/>
         internal static IEnumerable<BspFile.Vector3> SpawnPositions(string entityLump)
         {
-            foreach (var entity in BspEntities.Parse(entityLump))
+            var entities = BspEntities.Parse(entityLump).ToList();
+
+            // TF2 puts a player on the team's info_player_teamspawns and nowhere else, so on a TF2 map
+            // that has them, the other spawn classes are not where anyone enters. Seeding from them
+            // anyway is not harmless: cp_granary carries 30 info_player_start left over from
+            // development, eight of them on the floor of the sealed space under its terrain - 52 units
+            // beneath the displacement the yard is walked on. The flood started there and meshed the
+            // whole cavity, 335 areas, 152 of them crouch areas because the terrain overhead dips to
+            // within crouching height. Flooding that space from every one of its edges found no way up
+            // and out of it, and Valve's mesh has nothing there. Only when a teamspawn exists, so a TF2
+            // map built without them still has somewhere to start.
+            bool teamSpawnsOnly = NavConstants.PlayersSpawnOnlyAtTeamSpawns &&
+                                  entities.Any(e => e.TryGetValue("classname", out string? c) &&
+                                                    c.Equals(TeamSpawnClass, StringComparison.OrdinalIgnoreCase));
+
+            foreach (var entity in entities)
             {
                 if (!entity.TryGetValue("classname", out string? classname) || !IsSpawnClass(classname))
+                    continue;
+
+                if (teamSpawnsOnly && !classname.Equals(TeamSpawnClass, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 if (!entity.TryGetValue("origin", out string? origin))

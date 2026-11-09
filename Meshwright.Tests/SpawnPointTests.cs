@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using System.Linq;
 using Meshwright;
 using Xunit;
@@ -112,6 +114,90 @@ namespace Meshwright.Tests
                 """;
 
             Assert.Equal(5f, Assert.Single(AreaGenerator.SpawnPositions(lump)).X);
+        }
+
+        /// <summary>
+        /// TF2 puts players on info_player_teamspawns only, so with its spawn rule on, the other spawn
+        /// classes on a map that has teamspawns are not seeds. cp_granary has info_player_starts left
+        /// on the floor of the sealed space under its terrain, and flooding from them meshed the whole
+        /// cavity.
+        /// </summary>
+        [Fact]
+        public void OnATf2MapOnlyTeamSpawnsAreSpawns()
+        {
+            const string lump = """
+                { "classname" "info_player_start" "origin" "1 0 0" }
+                { "classname" "info_player_teamspawn" "origin" "2 0 0" }
+                { "classname" "info_player_deathmatch" "origin" "3 0 0" }
+                """;
+
+            bool original = NavConstants.PlayersSpawnOnlyAtTeamSpawns;
+            try
+            {
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = true;
+                Assert.Equal(2f, Assert.Single(AreaGenerator.SpawnPositions(lump)).X);
+
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = false;
+                Assert.Equal([1f, 2f, 3f], AreaGenerator.SpawnPositions(lump).Select(p => p.X));
+            }
+            finally
+            {
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = original;
+            }
+        }
+
+        /// <summary>
+        /// The spawn rule comes on with TF2's game name, as player clip does, and stays off for any
+        /// other. The run fails at once - there is no output path - but the game is applied first.
+        /// </summary>
+        [Theory]
+        [InlineData("Team Fortress 2", true)]
+        [InlineData("Garry's Mod", false)]
+        public void TheGameNameDecidesTheSpawnRule(string game, bool expected)
+        {
+            bool original = NavConstants.PlayersSpawnOnlyAtTeamSpawns;
+            bool clip = NavConstants.PlayerClipStopsEveryWalker;
+            bool counterStrike = NavConstants.UseCounterStrikeLimits;
+            var (stdout, stderr) = (Console.Out, Console.Error);
+
+            try
+            {
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = !expected;
+                Console.SetOut(TextWriter.Null);
+                Console.SetError(TextWriter.Null);
+
+                Program.Main(["generate", "missing.bsp", "-o", "-gamename", game]);
+
+                Assert.Equal(expected, NavConstants.PlayersSpawnOnlyAtTeamSpawns);
+            }
+            finally
+            {
+                Console.SetOut(stdout);
+                Console.SetError(stderr);
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = original;
+                NavConstants.PlayerClipStopsEveryWalker = clip;
+                NavConstants.UseCounterStrikeLimits = counterStrike;
+            }
+        }
+
+        /// <summary>A TF2 map with no teamspawn at all keeps the spawns it does have, rather than none.</summary>
+        [Fact]
+        public void ATf2MapWithoutTeamSpawnsKeepsItsOtherSpawns()
+        {
+            const string lump = """
+                { "classname" "info_player_start" "origin" "1 0 0" }
+                """;
+
+            bool original = NavConstants.PlayersSpawnOnlyAtTeamSpawns;
+            try
+            {
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = true;
+                Assert.Equal(1f, Assert.Single(AreaGenerator.SpawnPositions(lump)).X);
+            }
+            finally
+            {
+                NavConstants.PlayersSpawnOnlyAtTeamSpawns = original;
+            }
         }
     }
 
