@@ -278,8 +278,8 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,640 | 19,577 | 17,317 |
-| Connections | 11,446 | 14,117 | 91,538 | 79,161 |
+| Areas | 2,271 | 2,640 | 19,577 | 17,314 |
+| Connections | 11,446 | 14,110 | 91,538 | 78,962 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **47 (0.3%)** |
@@ -337,7 +337,7 @@ pairs the reference itself can route.
 | cp_granary | Valve | **100.0%** |
 | koth_viaduct | Valve | **100.0%** |
 | pl_upward | Valve | 99.1% |
-| cp_badlands | Valve | 99.8% |
+| cp_badlands | Valve | 99.7% |
 | ctf_turbine | Valve | **100.0%** |
 | Team Fortress 2, mean | | 99.7% |
 
@@ -370,10 +370,13 @@ only away from the middle, and 93% of those edges were narrower than a body. A l
 overhang is one: a crouching body fits on it only at the lip, half of it over the drop. gm_flatgrass
 has such ledges round the walls of its pit, and 22 of their areas were islands. The body's centre may
 now be anywhere on the span, and where half of it hangs past the end a body is swept across as well as
-the clearance lines. gm_flatgrass has no island left; across the twelve maps the areas with no link at
-all fell from 830 to 513 and the crossings left unlinked away from the middle from 3,937 to 1,435.
-Connections rise by 1% to 8%, routes and coverage hold or improve slightly, and the areas no spawn can
-reach fall on every map but gm_construct, which stays at 3.
+the clearance lines. A body that starts that sweep inside a wall is refused, though the sweep itself
+reports no hit when it only leads out of the wall: taken as clear, that linked 1,089 crossings out of
+slivers against walls and in corners, nearly all one-way and most from areas no body fits in at all.
+gm_flatgrass has no island left; across the twelve maps the areas with no link at all fell from 830
+to 700 and the crossings left unlinked away from the middle from 3,937 to 1,582. Connections rise by
+1% to 7%, routes and coverage hold or improve slightly, and the areas no spawn can reach fall on every
+map but gm_construct, which stays at 3.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
