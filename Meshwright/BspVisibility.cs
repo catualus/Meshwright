@@ -932,23 +932,6 @@ namespace Meshwright
         private const float DistEpsilon = 0.03125f;
 
         /// <summary>
-        /// Sweeps an axis-aligned box along a segment - the equivalent of <c>UTIL_TraceHull</c>, which
-        /// is what every one of Valve's generation traces actually is.
-        ///
-        /// The brush test is Quake's <c>CM_ClipBoxToBrush</c>: each of the brush's planes is pushed
-        /// outward by the box's support point along that plane's normal, which turns sweeping a box
-        /// against the brush back into sweeping a point against a slightly larger one. Tree descent is
-        /// widened by the same amount so no leaf the box could clip gets skipped.
-        ///
-        /// Covers all three geometry classes: world brushes, brush entities, and - since
-        /// <see cref="BspDisplacements.TryTraceHull"/> was written - displacement terrain. It did not
-        /// always. While the sweep saw brushes only it reported open air over every piece of terrain on
-        /// the map, which made it useless as a general clearance test and forced everything that needed
-        /// one onto thin line traces; substituting it into the standability check back then took
-        /// gm_construct's isolated areas from 46 to 321, by accepting samples under displacement that no
-        /// body could fit in.
-        /// </summary>
-        /// <summary>
         /// Builds a visibility set straight from geometry, for tests.
         ///
         /// The sweep is only testable against a real BSP tree, and the bug this exists to pin down
@@ -969,6 +952,29 @@ namespace Meshwright
                 texInfos = texInfos ?? [],
             };
 
+        /// <summary>
+        /// Sweeps an axis-aligned box along a segment - the equivalent of <c>UTIL_TraceHull</c>, which
+        /// is what every one of Valve's generation traces actually is.
+        ///
+        /// The brush test is Quake's <c>CM_ClipBoxToBrush</c>: each of the brush's planes is pushed
+        /// outward by the box's support point along that plane's normal, which turns sweeping a box
+        /// against the brush back into sweeping a point against a slightly larger one. Tree descent is
+        /// widened by the same amount so no leaf the box could clip gets skipped.
+        ///
+        /// Covers all three geometry classes: world brushes, brush entities, and - since
+        /// <see cref="BspDisplacements.TryTraceHull"/> was written - displacement terrain. It did not
+        /// always. While the sweep saw brushes only it reported open air over every piece of terrain on
+        /// the map, which made it useless as a general clearance test and forced everything that needed
+        /// one onto thin line traces; substituting it into the standability check back then took
+        /// gm_construct's isolated areas from 46 to 321, by accepting samples under displacement that no
+        /// body could fit in.
+        ///
+        /// The return value is whether the box *entered* something, and is not a clearance answer on
+        /// its own. A box that starts inside a brush and is swept out of it enters nothing, so this
+        /// returns false and only <paramref name="startSolid"/> says the box began in solid. A caller
+        /// asking whether a body fits or can pass has to refuse <paramref name="startSolid"/> whatever
+        /// the return value is: <c>!startSolid &amp;&amp; (!hit || fraction &gt;= 1)</c>.
+        /// </summary>
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
             out float fraction, out BspFile.Vector3 normal, out bool startSolid)
@@ -1008,10 +1014,19 @@ namespace Meshwright
                     var entity = new SurfaceHit { Fraction = 1f, Normal = normal };
                     bool entitySolid = false;
 
-                    if (!HullTrace(heads[i], ea, eb, 0f, 1f, ref entity, ref entitySolid, mask, ea, eb, mins, maxs))
+                    bool entityHit = HullTrace(heads[i], ea, eb, 0f, 1f, ref entity, ref entitySolid, mask,
+                        ea, eb, mins, maxs);
+
+                    // Taken before the hit is looked at, not after. A box that starts inside a brush
+                    // entity and is swept out of it never enters one, so the walk reports no hit and
+                    // only this flag records where the box began - and skipping it along with the
+                    // missing hit made a sweep out of a func_wall or a solid func_brush look as if it had
+                    // started in open air.
+                    solid |= entitySolid;
+
+                    if (!entityHit)
                         continue;
 
-                    solid |= entitySolid;
                     if (!found || entity.Fraction < hit.Fraction)
                     {
                         hit = entity;
@@ -1024,26 +1039,30 @@ namespace Meshwright
             // Source map, so without them the sweep reported open air over all of it and could not serve
             // as a general clearance test - which is exactly why every caller that needed one had to
             // fall back to an infinitely thin line and live with what a line misses.
-            if (displacements is not null &&
-                displacements.TryTraceHull(a, b, mins, maxs, mask,
-                    out float dispFraction, out var dispNormal, out bool dispSolid))
+            //
+            // A triangle mesh reports a box that starts overlapping it as a hit at fraction zero as
+            // well as start-solid, so its flag cannot go missing the way a brush entity's could. It
+            // is still taken whatever the hit says, so that stays true if that ever changes.
+            if (displacements is not null)
             {
+                bool dispHit = displacements.TryTraceHull(a, b, mins, maxs, mask,
+                    out float dispFraction, out var dispNormal, out bool dispSolid);
                 solid |= dispSolid;
 
-                if (!found || dispFraction < hit.Fraction)
+                if (dispHit && (!found || dispFraction < hit.Fraction))
                 {
                     hit = new SurfaceHit { Fraction = dispFraction, Normal = dispNormal };
                     found = true;
                 }
             }
 
-            if (staticProps is not null &&
-                staticProps.TryTraceHull(a, b, mins, maxs, mask,
-                    out float propFraction, out var propNormal, out bool propSolid))
+            if (staticProps is not null)
             {
+                bool propHit = staticProps.TryTraceHull(a, b, mins, maxs, mask,
+                    out float propFraction, out var propNormal, out bool propSolid);
                 solid |= propSolid;
 
-                if (!found || propFraction < hit.Fraction)
+                if (propHit && (!found || propFraction < hit.Fraction))
                 {
                     hit = new SurfaceHit { Fraction = propFraction, Normal = propNormal };
                     found = true;
