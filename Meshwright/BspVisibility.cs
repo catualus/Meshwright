@@ -140,7 +140,7 @@ namespace Meshwright
 
         private void ReadLeafBrushes(BinaryReader r, (int Offset, int Length, int Version) lump, BspFile bsp)
         {
-            brushes = bsp.Brushes;
+            brushes = WithFullClip(bsp.Brushes, NavConstants.PlayerClipStopsEveryWalker);
             brushSides = bsp.BrushSides;
 
             if (lump.Length <= 0 || leafs.Length == 0 || brushes.Length == 0)
@@ -441,15 +441,72 @@ namespace Meshwright
         /// against this mask, never <see cref="MaskBlockLos"/>. The two exist for different questions -
         /// can a bot see past this, and can a bot's body pass through this - and this codebase had only
         /// ever asked the first one, everywhere, including for movement.
+        ///
+        /// Plus <see cref="ContentsFullClip"/>, a brush that stops every walker the mesh is for. That
+        /// is usually a brush this mask stopped already through CONTENTS_MONSTERCLIP; the exception is
+        /// TF2's player clip, a wall to its bots (<see cref="NavConstants.PlayerClipStopsEveryWalker"/>).
+        /// It also keeps this mask containing all of <see cref="GroundMask"/>, which is how
+        /// <see cref="ModelsFor"/> tells a movement trace from a sight trace.
         /// </summary>
-        public const int GenerationMask = 0x1 | 0x4000 | 0x2 | 0x20000 | ContentsGrate;
+        public const int GenerationMask = 0x1 | 0x4000 | 0x2 | 0x20000 | ContentsGrate | ContentsFullClip;
 
         /// <summary>CONTENTS_MONSTERCLIP - an invisible brush that stops NPCs and nothing else.</summary>
         private const int ContentsMonsterClip = 0x20000;
 
+        /// <summary>CONTENTS_PLAYERCLIP - an invisible brush that stops players and nothing else.</summary>
+        private const int ContentsPlayerClip = 0x10000;
+
+        /// <summary>
+        /// A content bit of Meshwright's own, set at load on every brush that stops every walker the
+        /// mesh is for: one carrying both CONTENTS_PLAYERCLIP and CONTENTS_MONSTERCLIP - Hammer's plain
+        /// tools/toolsclip, which stops players and NPCs alike - and in TF2, whose bots are players,
+        /// one carrying player clip alone (<see cref="NavConstants.PlayerClipStopsEveryWalker"/>).
+        /// vbsp never writes this bit (it is past CONTENTS_HITBOX, the last one bspflags.h defines), so
+        /// it means exactly that and nothing else.
+        ///
+        /// It exists because a mask is an "any of these bits" test and the question here is "both of
+        /// them". A brush that stops one kind of walker and not the other is a barrier for the one it
+        /// stops, and <see cref="GroundMask"/> explains why NPC clip on its own must not be ground. A
+        /// brush that stops everybody is not a barrier: it is solid, and its top is a floor that every
+        /// walker stands on, in-game, whether or not it is drawn.
+        ///
+        /// TF2 relies on this everywhere. Its stairs are smoothed with a clip ramp laid over the steps,
+        /// and its sunken floors - 2fort's sewer, dustbowl's trenches - are often a clip slab a few
+        /// units over the drawn floor. Without this bit those surfaces were neither ground nor clear:
+        /// not ground because monsterclip is excluded from <see cref="GroundMask"/>, and not clear
+        /// because every step under the ramp has the ramp in its headroom. The flood found nothing to
+        /// stand on there at all. Measured against Valve's own meshes, 919 of the 1,128 routes
+        /// ctf_2fort failed and 812 of cp_dustbowl's 1,095 broke first on exactly such a surface.
+        /// </summary>
+        public const int ContentsFullClip = unchecked((int)0x80000000);
+
+        /// <summary>
+        /// The brushes as the traces should see them: <paramref name="brushes"/> with
+        /// <see cref="ContentsFullClip"/> added to every one that stops players and NPCs both - or,
+        /// with <paramref name="playerClipStopsEveryWalker"/>, to every one that stops players, the
+        /// walkers being players (see <see cref="NavConstants.PlayerClipStopsEveryWalker"/>). A copy,
+        /// because the array belongs to the <see cref="BspFile"/>, which other readers share.
+        /// </summary>
+        internal static BspFile.Brush[] WithFullClip(BspFile.Brush[] brushes, bool playerClipStopsEveryWalker = false)
+        {
+            int stopsEveryWalker = playerClipStopsEveryWalker
+                ? ContentsPlayerClip
+                : ContentsPlayerClip | ContentsMonsterClip;
+
+            var tagged = (BspFile.Brush[])brushes.Clone();
+            for (int i = 0; i < tagged.Length; i++)
+            {
+                if ((tagged[i].Contents & stopsEveryWalker) == stopsEveryWalker)
+                    tagged[i].Contents |= ContentsFullClip;
+            }
+
+            return tagged;
+        }
+
         /// <summary>
         /// What counts as ground the mesh may be built on: <see cref="GenerationMask"/> without
-        /// CONTENTS_MONSTERCLIP.
+        /// CONTENTS_MONSTERCLIP. A brush that is player clip as well as NPC clip still counts, and so in
+        /// TF2 does player clip alone, through <see cref="ContentsFullClip"/>.
         ///
         /// The distinction the single mask was missing is between "can a body pass through this" and
         /// "can a body stand on this". Monsterclip answers yes to the first and no to the second: it is
@@ -859,7 +916,7 @@ namespace Meshwright
                 planes = planes,
                 nodes = nodes,
                 leafs = leafs,
-                brushes = brushes,
+                brushes = WithFullClip(brushes, NavConstants.PlayerClipStopsEveryWalker),
                 brushSides = brushSides,
                 leafBrushes = leafBrushes,
                 texInfos = texInfos ?? [],

@@ -98,6 +98,24 @@ namespace Meshwright
 
         private static bool counterStrike;
 
+        /// <summary>
+        /// Whether player clip stops every walker the mesh is for, as it does when those walkers are
+        /// players - TF2's bots are. Switched on for TF2 by the game name.
+        ///
+        /// CONTENTS_PLAYERCLIP on its own stops players and nothing else, so for Garry's Mod, whose
+        /// NextBots and NPCs walk through it, it is neither a wall nor a floor - which is also how the
+        /// engine's own generator, tracing <c>MASK_NPCSOLID_BRUSHONLY</c>, sees it there. TF2 is the
+        /// opposite case. Its bots are players, a player-clip ramp over a staircase is the surface they
+        /// actually walk, and Valve's own TF2 meshes lie on such ramps: pl_badwater's ramp down from
+        /// the second point's balcony is player clip alone, and with it read as air the steps under it
+        /// had gaps in them no area could cross. And a player-clip wall sealing a TF2 map's edge is a
+        /// wall a bot cannot pass either, which the mesh did not know.
+        ///
+        /// Applied when a BSP is loaded (<see cref="BspVisibility.WithFullClip"/>), by treating such
+        /// brushes like the ones that carry both clip contents.
+        /// </summary>
+        public static bool PlayerClipStopsEveryWalker { get; set; }
+
         /// <summary>Standing height; the headroom a sampled position needs to be walkable.</summary>
         public const float HumanHeight = 71f;
 

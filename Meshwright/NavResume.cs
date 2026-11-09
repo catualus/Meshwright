@@ -78,6 +78,9 @@ namespace Meshwright
                 // Movement limits change which ledges are climbable, so they change the mesh.
                 $"cs={NavConstants.UseCounterStrikeLimits}",
 
+                // Player clip read as solid changes where the ground is.
+                $"playerclip={NavConstants.PlayerClipStopsEveryWalker}",
+
                 // Content roots decide which props have collision, and props clip areas.
                 $"content={string.Join(";", GameFiles.AdditionalRoots)}",
             };

@@ -255,6 +255,15 @@ namespace Meshwright
 
             NavConstants.UseCounterStrikeLimits = counterStrike;
 
+            bool teamFortress = strict
+                ? game is "tf2"
+                : game.Contains("team fortress") || game is "tf2" or "tf";
+
+            NavConstants.PlayerClipStopsEveryWalker = teamFortress;
+
+            if (teamFortress)
+                Console.WriteLine("      Team Fortress 2: player clip is solid ground and wall, as it is for its bots");
+
             if (counterStrike)
             {
                 Console.WriteLine($"      Counter-Strike movement limits: crouch jump " +
