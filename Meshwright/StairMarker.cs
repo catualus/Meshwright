@@ -413,25 +413,65 @@ namespace Meshwright
         /// floor here". Every caller inherits that - the level-ground test around a sample then sees a
         /// 190-unit drop on all four sides and rejects standable ground, and stair detection reads
         /// treads that are not there.
+        ///
+        /// A surface lying where one segment ends and the next begins has to count in one of the two.
+        /// Displacement terrain used to count in neither - a triangle was only hit strictly inside a
+        /// segment - and terrain on a boundary, which down a straight run of it is every boundary, read
+        /// as no floor at all: cp_badlands area 210, on terrain two units above its own surface, was
+        /// reported 82 units afloat. <see cref="TriangleMesh"/> now gives each segment its far end,
+        /// which settles it on flat terrain. It cannot settle it on a slope: where the triangle is steep
+        /// and far from the origin, where a segment's end lands on it is only known to a few millionths
+        /// of the segment, so a surface on the boundary can still come out just past the end of the
+        /// upper segment and just before the start of the lower one. rp_downtown_tits_v25 area 16702
+        /// had a sample over open air that way, on terrain sloping at 52 degrees exactly twenty units
+        /// under the search's start. Each segment therefore runs on a little way into the next, so a
+        /// surface anywhere near a boundary lies well inside the upper one. The sweep stops at the first
+        /// segment blocked, so the overlap can only find a surface sooner, never twice.
+        ///
+        /// The overlap is there to find a surface, and is kept out of everything else. The last segment
+        /// gets none, so the window ends where it always did. And the bisection runs over the segment's
+        /// own four units whenever the surface is in them, so it lands on the same heights it always
+        /// did; it runs over the overlap only when the surface is in that. Bisecting over the longer
+        /// stretch every time placed brush floors up to a thirty-second of a unit higher than before,
+        /// and callers compare these heights against
+        /// exact thresholds: <see cref="ConnectionBuilder"/> tests room above the ground it finds, and
+        /// four 340-unit drops off cp_badlands rooftops that no body fits at the top of were linked on
+        /// the strength of that thirty-second.
         /// </summary>
         public static bool TryFindFloor(BspVisibility vis, float x, float y, float top, float depth, out float z)
         {
             const float CoarseStep = 4f;
             const int Refinements = 7;
 
+            // How far each segment runs on into the next: thousands of times the rounding it covers, and
+            // the size of the bisection's last step, so a surface found in it is still placed within a
+            // step of where the bisection would have put it.
+            const float Overlap = CoarseStep / 128f;
+
             z = 0;
 
             for (float d = 0; d < depth; d += CoarseStep)
             {
+                bool last = d + CoarseStep >= depth;
+
                 var upper = new BspFile.Vector3(x, y, top - d);
-                var lower = new BspFile.Vector3(x, y, top - d - CoarseStep);
+                var lower = new BspFile.Vector3(x, y, top - d - CoarseStep - (last ? 0f : Overlap));
 
                 if (vis.IsLineClear(upper, lower, BspVisibility.GroundMask))
                     continue;
 
-                // clear down to hi, blocked by lo; the surface is between them
-                float hi = top - d;
+                // clear down to hi, blocked by lo; the surface is between them. The segment's own four
+                // units first, as the search has always bisected them; the overlap below only if the
+                // surface is not in those.
+                float hi = upper.Z;
                 float lo = top - d - CoarseStep;
+
+                if (vis.IsLineClear(new BspFile.Vector3(x, y, top), new BspFile.Vector3(x, y, lo),
+                        BspVisibility.GroundMask))
+                {
+                    hi = lo;
+                    lo = lower.Z;
+                }
 
                 for (int i = 0; i < Refinements; i++)
                 {

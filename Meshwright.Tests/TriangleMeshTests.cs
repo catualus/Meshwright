@@ -100,14 +100,18 @@ namespace Meshwright.Tests
                 float vv = (dx * qx + dy * qy + dz * qz) * inverse;
                 if (vv < 0f || u + vv > 1f) continue;
 
+                // The segment's own stretch, start out and end in, a millionth past the end allowed.
                 float t = (e2x * qx + e2y * qy + e2z * qz) * inverse;
-                if (t <= Epsilon || t >= 1f) continue;
+                if (t <= Epsilon || t > 1f + Epsilon) continue;
 
                 if (found && t >= fraction) continue;
 
                 fraction = t;
                 found = true;
             }
+
+            // Reported no further than the end point.
+            if (found) fraction = MathF.Min(fraction, 1f);
 
             return found;
         }
