@@ -12,6 +12,17 @@ namespace Meshwright
     /// connections cannot express, so nothing bridges it unless something is built there deliberately.
     /// Valve's fix is a small patch area - a quarter of a sampling step on a side - dropped into the
     /// gap and wired cardinally to both neighbours, turning the point contact into two ordinary edges.
+    ///
+    /// The patch is flat, at the height of the corner it starts from, and is built only where there is
+    /// floor within a step of that height everywhere the clip would look for it - see
+    /// <see cref="AreaClipper.FloorThroughout"/>. The sweeps below only ask whether a body can get
+    /// across without hitting anything, and over a drop nothing is in the way. Nothing else asked:
+    /// the corner of a raised platform on koth_viaduct touches the corner of an area 35 units below
+    /// it, close enough in plan view to count as touching, and the two patches built between them
+    /// hung off the platform's edge. On a steep ramp a flat patch at one corner's height leaves the
+    /// ground falling away under the far side of it. On the eight TF2 benchmark maps 13 of the 29
+    /// patches built floated more than a step above the ground by <c>meshwright fit</c>'s measure;
+    /// with the floor test 18 are built, and none of them do.
     /// </summary>
     public static class CornerPatcher
     {
@@ -51,6 +62,9 @@ namespace Meshwright
             public int CandidateFound;
             public int CornerMatched;
             public int TraceCleared;
+
+            /// <summary>Patches not built because some of the ground under them is missing.</summary>
+            public int NoFloor;
         }
 
         public static Result Patch(NavFile nav, BspVisibility vis)
@@ -174,7 +188,17 @@ namespace Meshwright
                     continue;
                 }
 
-                var patch = BuildPatch(area, cornerPos, otherEdgePos, ourEdgePos, farCorner, nextId++);
+                var patch = BuildPatch(area, cornerPos, otherEdgePos, ourEdgePos, farCorner, nextId);
+
+                // Over floor, or not at all - see the class summary. The id is only taken once the
+                // patch is, so a refused one leaves no gap in the numbering.
+                if (!AreaClipper.FloorThroughout(vis, patch))
+                {
+                    result.NoFloor++;
+                    continue;
+                }
+
+                nextId++;
                 nav.Areas.Add(patch);
 
                 Connect(area, patch, otherDir);
