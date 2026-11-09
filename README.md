@@ -434,11 +434,20 @@ step a pass. Those lines now wait until the clip has stopped without them, and t
 again half a segment higher. Edges of kept areas pulled back 16 units or more over such floor fall
 from 1,211 to 303 across the twelve maps, and from 106 to 17 on the ten with a reference. Coverage rises
 by 0.4 to 0.7 points on five maps, pl_upward's routes from 99.1% to 99.7%, and the old links on reshaped
-areas that the builder's test now refuses fall from 10,491 to 9,187, the ones removed from 505 to 497. Six
-more areas float on the TF2 maps, strips and squares narrower than a body with up to half their points
-over a drop, against two fewer on the roleplay maps and two fewer over open air. `meshwright fit` counts
-more, pl_upward 13 to 22, because it searches for the floor the same way and misses the same terrain:
-the cp_badlands area now reads as 82 units above ground that is two units above it.
+areas that the builder's test now refuses fall from 10,491 to 9,187, the ones removed from 505 to 497.
+
+On the TF2 maps it set eight areas floating and stopped two, none of them because the clip left too
+much. Three were corner patches - the small squares built where two areas touch only at a corner -
+built without asking whether there was ground under them: two hung off a platform on koth_viaduct and
+one sat flat on a ramp on pl_upward. A patch is now built only over floor. Three were slivers kept as
+the only route between two areas. The clip cannot pull a sliver in closer than four units to its
+middle, so one eight or nine units wide keeps whatever overhang it has, and the spare test only looked
+for floor at the quarters. A spared sliver is now pulled back to its floor first, and not kept when half
+of it has none; refusing every sliver with any floor missing stranded 42 areas on rp_downtown_tits.
+Floating areas on the TF2 maps fall from 32 to 7 (26 before the clip fix), and on the roleplay maps
+from 48 and 49 to 4 each. Routes and coverage do not move. The one island added is a koth_viaduct area
+no body fits in, joined before only through the two hanging patches. What still floats sits over cracks
+a few units wide, which a body walks across.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
