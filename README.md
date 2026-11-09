@@ -278,15 +278,15 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,631 | 19,577 | 17,314 |
-| Connections | 11,446 | 14,140 | 91,538 | 81,351 |
+| Areas | 2,271 | 2,631 | 19,577 | 17,328 |
+| Connections | 11,446 | 14,140 | 91,538 | 81,437 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 2,714 (13.9%) | **4 (0.0%)** |
-| Areas over open air | 3 | **0** | 215 (1.1%) | **0** |
+| Areas floating above the floor | 1 | **0** | 2,690 (13.7%) | **0** |
+| Areas over open air | 3 | **0** | 210 (1.1%) | **0** |
 
-On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,714 areas
-above the floor and 215 over nothing.
+On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,690 areas
+above the floor and 210 over nothing.
 
 ### What it covers
 
@@ -297,7 +297,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 
 | | gm_construct | rp_downtown_tits_v25 |
 |---|---|---|
-| Coverage of the reference's ground a player can reach | **98.9%** | 67.5% |
+| Coverage of the reference's ground a player can reach | **98.9%** | 67.6% |
 | Coverage of every reference area including stranded | 89.2% | 67.6% |
 | Areas on ground the reference does not have | 2.4% | 9.4% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
@@ -307,7 +307,7 @@ Score against reachable ground rather than against every area, because a referen
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
 drops the second row to 89.2%.
 
-67.5% on the large map is mostly the reference's doing. It looks like the output of an earlier
+67.6% on the large map is mostly the reference's doing. It looks like the output of an earlier
 Meshwright, whose flood walked through thin walls and terrain. Of the 6,135 reachable shipped areas
 the generated mesh does not cover, 5,211 are on real ground, and 4,301 of those are under water -
 most of them the sea and lake bed under the displacement islands in the south-east of the map.
@@ -446,8 +446,8 @@ for floor at the quarters. A spared sliver is now pulled back to its floor first
 of it has none; refusing every sliver with any floor missing stranded 42 areas on rp_downtown_tits.
 Floating areas on the TF2 maps fall from 32 to 7 (26 before the clip fix), and on the roleplay maps
 from 48 and 49 to 4 each. Routes and coverage do not move. The one island added is a koth_viaduct area
-no body fits in, joined before only through the two hanging patches. What still floats sits over cracks
-a few units wide, which a body walks across.
+no body fits in, joined before only through the two hanging patches. What still floated sat over cracks
+a few units wide, which a body walks across; the clip no longer stops at those (see below).
 
 Terrain on a segment boundary was missed everywhere the floor search runs, not only in the clip, which
 had the only workaround. A displacement or prop triangle counted as hit only strictly inside a segment,
@@ -462,6 +462,30 @@ this is: it no longer reports terrain under an area as missing, and its counts f
 that tries every column from four heights. Floating areas on the TF2 maps go from 29 to 6 - 13 to 3 on
 cp_badlands, 12 to 1 on pl_upward - and the one area over open air on each of pl_upward and
 rp_downtown_tits goes.
+
+The clip read a crack as a ledge as well. Its floor test looks at four points along each of five probe
+lines, and a crack between two brushes a few units wide often lies under one: running along the line it
+took the line's whole reach, crossing it the reach beyond, and the edge came back to the crack. Two
+areas on cp_badlands, 169 units by 100 of level floor, came out 9 units deep, and pl_upward's bridge
+planks, a few units apart over the valley, cut areas short at every gap. A point with no floor is now
+over a crack when floor within a step of the area's surface resumes on both sides of it, along either
+axis, with the gap between no wider than 16 units - half a body, which a body centred over it still
+straddles - and that floor carries on for two units past the gap's edge, so a rail down a trench is not
+its far side. Floor behind a point and none in front of it is still a ledge however near, and a slot
+between a floor and a wall is not a crack. `meshwright fit` asks the same of a sample it would otherwise
+call floating or over open air, and says how many it let off.
+
+On the twelve maps the clip discards 68 fewer slivers, coverage rises on seven maps by up to 0.7 points,
+pl_upward's from 95.9% to 96.6%, and routes rise by 0.1 points on cp_dustbowl and pl_upward. Nothing
+falls, and no area a spawn reached before is cut off. Sampled every two units over every area, the
+footprint over a crack rises from 10,500 to 72,300 square units, and the footprint with no floor that is
+not a crack from 23,200 to 23,700, 2% - mostly where two cracks meet, which neither axis sees across. By
+the old fit floating areas rise from 36 to 268, and over open air from 2 to 5, nearly all areas that now
+run across a crack one of their samples lands in; by the new one no area floats or hangs over air on any
+of the twelve maps, before or after. Four new islands are pockets against a diagonal wall, two each on
+cp_badlands and pl_upward, that no crouching body fits in anywhere and the build could not link: a
+hairline seam under a probe line used to pare them down to slivers, which were discarded. cp_badlands
+has two more areas no spawn reaches for it, 49; pl_upward and cp_dustbowl have three and one fewer.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
