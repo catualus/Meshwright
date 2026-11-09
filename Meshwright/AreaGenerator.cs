@@ -1266,7 +1266,7 @@ namespace Meshwright
                 // areas against the 13 in the engine's own mesh. It is only paid on samples that already
                 // failed the standing test, which is a small minority, so the speed-up survives.
                 bool walkable = IsWalkableGround(gx, gy, z)
-                                && (stand || IsLevelEnough(x, y, z));
+                                && (stand || IsLevelEnough(x, y, z) && CrouchingBodyFits(x, y, z));
 
                 var result = !crouch || !walkable
                     ? Clearance.None
@@ -1315,6 +1315,62 @@ namespace Meshwright
 
                 return false;
             }
+
+            /// <summary>
+            /// Whether a crouching player's body fits between the floor and the ceiling here - the
+            /// whole 32 unit footprint, not just the line straight up from the sample.
+            ///
+            /// The headroom line is infinitely thin, and under a low ceiling that is not the same
+            /// question. Crouch-only ground is by definition somewhere the ceiling is already within a
+            /// few units of the head, so anything closing in beside the sample - a slot between two
+            /// walls, the underside of a staircase, a sloping rock face - can leave the line clear and
+            /// no room for a body. Across the eight TF2 maps 26 crouch areas off Valve's ground had no
+            /// room for a crouching body anywhere in them.
+            ///
+            /// The body may stand anywhere in the sample's own cell, up to half a step off it in each
+            /// direction, not only centred on it. A crawlspace under a sloping ceiling is a wedge, and
+            /// the node nearest its low side has the slope within 16 units on one side: koth_viaduct's
+            /// mirrored pair of crouch spots are that shape, and Valve marks them crouch. Asking
+            /// for a centred body lost them, and one on cp_granary and one on cp_badlands, along with a
+            /// tenth of a point of coverage on each map, for the sake of the few ledges a body only fits
+            /// on by its edge.
+            ///
+            /// The sweep runs upward from half a step, as Traversability.CanStep does - anything lower
+            /// is stepped over, not crouched under - to the crouching height. It is a sweep with length
+            /// rather than a point query, so the degenerate case the headroom line avoids does not
+            /// arise; a box that starts in solid fails it as surely as one that hits the ceiling. Only
+            /// paid on crouch-only samples, after every cheaper test has passed, and the centred body
+            /// is tried first because it is the one that usually fits.
+            /// </summary>
+            private bool CrouchingBodyFits(float x, float y, float z)
+            {
+                const float Half = NavConstants.HalfHumanWidth;
+                const float Lift = NavConstants.StepHeight / 2f;
+                const float Shift = StepSize / 2f;
+
+                foreach (var (dx, dy) in BodyShifts)
+                {
+                    float bx = x + dx * Shift, by = y + dy * Shift;
+
+                    if (!vis.TryTraceHull(
+                            new BspFile.Vector3(bx, by, z + Lift),
+                            new BspFile.Vector3(bx, by, z + NavConstants.HumanCrouchHeight),
+                            new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, 0f),
+                            BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid))
+                    {
+                        return true;
+                    }
+
+                    if (!startSolid && fraction >= 1f)
+                        return true;
+                }
+
+                return false;
+            }
+
+            /// <summary>The centre first, then half a step along each axis and each diagonal.</summary>
+            private static readonly (int Dx, int Dy)[] BodyShifts =
+                [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
 
             /// <summary>
             /// Whether the surface immediately around a point is close to level. Probes a short way out
