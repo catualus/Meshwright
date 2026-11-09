@@ -1352,9 +1352,11 @@ namespace Meshwright
                     // slope instead of flat, which is exactly what stopped 14 of the 24 staircases the
                     // engine marks on rp_downtown_meowy from passing the "is this a ramp" test. Ask the
                     // brushes that actually bound the solid first, and only fall back to the split
-                    // plane if none of them answer.
+                    // plane if none of them answer. Only a brush the ray enters right here answers: the
+                    // ray is already inside solid at this crossing, so anything the brushes report
+                    // further on is a different surface.
                     int solidLeaf = LeafIndexAt(far, midPoint);
-                    if (solidLeaf >= 0 && TryHitLeafBrush(solidLeaf, rayStart, rayEnd, mid, ref hit, mask))
+                    if (solidLeaf >= 0 && TryHitLeafBrush(solidLeaf, rayStart, rayEnd, mid, mid, ref hit, mask))
                         return true;
 
                     float sign = behind ? -1f : 1f;
@@ -1376,7 +1378,7 @@ namespace Meshwright
 
             // Brushes first even for a solid leaf: they carry the real face the ray came through, where
             // the leaf alone can only say "solid here" and used to answer with a flat (0,0,1) guess.
-            if (TryHitLeafBrush(leafIndex, rayStart, rayEnd, startFraction, ref hit, mask))
+            if (TryHitLeafBrush(leafIndex, rayStart, rayEnd, startFraction, endFraction, ref hit, mask))
                 return true;
 
             if ((leafs[leafIndex].Contents & mask) != 0)
@@ -1443,9 +1445,20 @@ namespace Meshwright
         /// therefore invisible to this trace: the see-through road grates were found in the leaf lists,
         /// carried CONTENTS_GRATE correctly, and still failed to stop a downward trace, so no floor was
         /// ever sampled on top of one and bots had no mesh to walk across.
+        ///
+        /// Only hits inside this leaf's own stretch of the ray, <paramref name="startFraction"/> to
+        /// <paramref name="endFraction"/>, are this leaf's to report. A leaf lists every brush that
+        /// touches it anywhere, and clipping the whole ray against one of those can land far past the
+        /// leaf - where the ray only meets the brush after crossing other leaves, and possibly other
+        /// solids. Reporting that hit here returned it ahead of anything nearer in those later leaves.
+        /// On ctf_2fort a water leaf listed a sloped brush that its column only reached 24 units under
+        /// the drawn floor of the sewer, so every downward trace through the water went straight past
+        /// the floor; the strip it covered got no areas, and 240 of the 259 Valve routes the mesh still
+        /// failed once clip brushes were ground broke there. A hit past the leaf is not lost by
+        /// refusing it: the leaf the ray is in when it does meet the brush lists the brush too.
         /// </summary>
         private bool TryHitLeafBrush(int leafIndex, BspFile.Vector3 rayStart, BspFile.Vector3 rayEnd,
-            float startFraction, ref SurfaceHit hit, int mask)
+            float startFraction, float endFraction, ref SurfaceHit hit, int mask)
         {
             if ((uint)leafIndex >= (uint)leafBrushes.Length)
                 return false;
@@ -1528,7 +1541,7 @@ namespace Meshwright
                 // what was clipped. Ignore anything landing behind this leaf: leaves are visited front
                 // to back, so a nearer intersection with that same brush would already have been found
                 // in an earlier one, and accepting it here would report a hit the ray had passed.
-                if (enter < startFraction - 0.0001f)
+                if (enter < startFraction - 0.0001f || enter > endFraction + 0.0001f)
                     continue;
 
                 if (found && enter >= best)
