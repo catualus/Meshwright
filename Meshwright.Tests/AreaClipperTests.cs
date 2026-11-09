@@ -397,5 +397,183 @@ namespace Meshwright.Tests
             var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
             Assert.Equal((0f, 0f, 100f, 100f), (b.MinX, b.MinY, b.MaxX, b.MaxY));
         }
+
+        /// <summary>
+        /// Solid ground under z = 0 with open air above, cut through where <paramref name="slotFrom"/> is
+        /// given by a bottomless slot running east-west between it and <paramref name="slotTo"/>.
+        /// </summary>
+        private static BspVisibility SlottedGround(float? slotFrom = null, float slotTo = 0f)
+        {
+            var planes = new List<BspFile.Plane> { Plane(0, 0, 1, 0) };
+            var leafs = new List<BspVisibility.Leaf>
+            {
+                new() { Contents = 0 },         // 0: open air
+                new() { Contents = Solid },     // 1: the ground
+            };
+
+            // Leaf n is referenced as -(n) - 1.
+            const int Air = -1, Ground = -2;
+
+            var nodes = new List<BspVisibility.Node> { default };
+            int below = Ground;
+
+            if (slotFrom is float from)
+            {
+                planes.Add(Plane(0, 1, 0, from));
+                nodes.Add(new BspVisibility.Node { PlaneNum = planes.Count - 1, Child0 = Air, Child1 = Ground });
+                int slot = nodes.Count - 1;
+
+                planes.Add(Plane(0, 1, 0, slotTo));
+                nodes.Add(new BspVisibility.Node { PlaneNum = planes.Count - 1, Child0 = Ground, Child1 = slot });
+                below = nodes.Count - 1;
+            }
+
+            nodes[0] = new BspVisibility.Node { PlaneNum = 0, Child0 = Air, Child1 = below };
+
+            return BspVisibility.FromGeometry([.. planes], [.. nodes], [.. leafs], [], [],
+                new int[]?[leafs.Count]);
+        }
+
+        /// <summary>
+        /// A floor under z = 0 that is the convex corner of a platform: solid only where x is past
+        /// <paramref name="x"/> and y past <paramref name="y"/>, open air everywhere else.
+        /// </summary>
+        private static BspVisibility PlatformCorner(float x, float y)
+        {
+            var planes = new[] { Plane(0, 0, 1, 0), Plane(1, 0, 0, x), Plane(0, 1, 0, y) };
+
+            // Leaf n is referenced as -(n) - 1.
+            const int Air = -1, Floor = -2;
+
+            var nodes = new[]
+            {
+                new BspVisibility.Node { PlaneNum = 0, Child0 = Air, Child1 = 1 },
+                new BspVisibility.Node { PlaneNum = 1, Child0 = 2, Child1 = Air },
+                new BspVisibility.Node { PlaneNum = 2, Child0 = Floor, Child1 = Air },
+            };
+
+            var leafs = new[] { new BspVisibility.Leaf { Contents = 0 }, new BspVisibility.Leaf { Contents = Solid } };
+
+            return BspVisibility.FromGeometry(planes, nodes, leafs, [], [], new int[]?[leafs.Length]);
+        }
+
+        /// <summary>The id of the area under test in <see cref="Route"/>; the two below it are its neighbours.</summary>
+        private const uint Between = 3;
+
+        /// <summary>
+        /// An area that is the only link between one to its north and one to its south, the way
+        /// <c>Spare</c> finds a route: connected on opposite sides to two areas not connected to each
+        /// other. The neighbours are given lower ids, so with <see cref="Between"/> as the first
+        /// generated id the clip leaves them exactly as they are, whatever the floor under them.
+        /// </summary>
+        private static NavFile Route(float minX, float minY, float maxX, float maxY)
+        {
+            var north = TestWorlds.Area(1, minX - 20f, minY - 50f, maxX + 20f, minY, 0f);
+            var south = TestWorlds.Area(2, minX - 20f, maxY, maxX + 20f, maxY + 50f, 0f);
+            var area = TestWorlds.Area(Between, minX, minY, maxX, maxY, 0f);
+
+            area.Connections[NavGeometry.North].Add(1);
+            area.Connections[NavGeometry.South].Add(2);
+            north.Connections[NavGeometry.South].Add(Between);
+            south.Connections[NavGeometry.North].Add(Between);
+
+            var nav = new NavFile();
+            nav.Areas.AddRange([north, south, area]);
+            return nav;
+        }
+
+        private static NavGeometry.Bounds BoundsOf(NavFile nav, uint id)
+            => NavGeometry.GetBounds(Assert.Single(nav.Areas, a => a.Id == id));
+
+        /// <summary>
+        /// The control for the next two: a strip eight units wide that is the only way between two
+        /// areas, on floor all the way across, survives the discard as it is. That is what sparing
+        /// exists for.
+        /// </summary>
+        [Fact]
+        public void ANarrowStripThatIsTheOnlyRouteIsSpared()
+        {
+            var nav = Route(0f, 0f, 8f, 100f);
+
+            var result = AreaClipper.Clip(nav, SlottedGround(), Step, firstGeneratedId: Between);
+
+            Assert.Equal(0, result.Discarded);
+            Assert.Equal(0, result.Trimmed);
+            var b = BoundsOf(nav, Between);
+            Assert.Equal((0f, 0f, 8f, 100f), (b.MinX, b.MinY, b.MaxX, b.MaxY));
+        }
+
+        /// <summary>
+        /// The same strip running a little way off a ledge along its west side is kept, and pulled
+        /// back to the ledge first.
+        ///
+        /// The clip itself cannot move that edge: the strip is so narrow that its probe starts on the
+        /// centre line, and an edge never comes closer to its probe's start than
+        /// <see cref="AreaClipper"/>'s four-unit minimum overhang. The nine points the spare test
+        /// samples sit at the quarters, all on floor, so the strip used to be kept with its west side
+        /// over nothing - which is how strips and squares a few units wide, kept as routes, came to
+        /// float on the benchmark maps.
+        /// </summary>
+        [Fact]
+        public void ASparedStripIsPulledBackOffTheDropItOverhangs()
+        {
+            const float Lip = 0.7f;
+
+            var nav = Route(0f, 0f, 8f, 100f);
+
+            var result = AreaClipper.Clip(nav, Ledge(Lip), Step, firstGeneratedId: Between);
+
+            Assert.Equal(0, result.Discarded);
+            Assert.Equal(1, result.Trimmed);
+            Assert.Contains(Between, result.Reshaped);
+
+            var b = BoundsOf(nav, Between);
+            Assert.InRange(b.MinX, Lip, Lip + 1f);
+            Assert.Equal((8f, 0f, 100f), (b.MaxX, b.MinY, b.MaxY));
+        }
+
+        /// <summary>
+        /// A strip crossing a gap narrower than a step is still kept whole.
+        ///
+        /// The slot crosses the strip a tenth of the way along, on one of the lines the clip probes for
+        /// the strip's long edges, so that line has no floor from either edge to the middle. That is not
+        /// an overhang pulling either edge back would fix, and a body walks across it, so the line is
+        /// left out of the trim rather than costing the route.
+        /// </summary>
+        [Fact]
+        public void ASparedStripAcrossANarrowGapIsKeptWhole()
+        {
+            var nav = Route(0f, 0f, 8f, 100f);
+
+            var result = AreaClipper.Clip(nav, SlottedGround(8f, 12f), Step, firstGeneratedId: Between);
+
+            Assert.Equal(0, result.Discarded);
+            Assert.Equal(0, result.Trimmed);
+            var b = BoundsOf(nav, Between);
+            Assert.Equal((0f, 0f, 8f, 100f), (b.MinX, b.MinY, b.MaxX, b.MaxY));
+        }
+
+        /// <summary>
+        /// A one-node square on the corner of a platform, with a drop on two sides, which the clip
+        /// leaves too small to keep is clipped again from where it started, the way every area was
+        /// clipped before the patient clip.
+        ///
+        /// Patiently, it would stop at the platform's corner as a square about fourteen units across
+        /// with floor under all of it, and as the only route between its two neighbours it would be
+        /// spared. Clipped the old way, from its original shape, the edges facing away from the drop
+        /// are pulled back by lines running over it, it ends up mostly over the drop, and it is
+        /// discarded - so this fails if the fallback is dropped, or if it reruns the clip on the
+        /// patient result instead of on the area as it was.
+        /// </summary>
+        [Fact]
+        public void ASquareThePatientClipLeavesTooSmallIsClippedTheOldWay()
+        {
+            var nav = Route(0f, 0f, Step, Step);
+
+            var result = AreaClipper.Clip(nav, PlatformCorner(10f, 10f), Step, firstGeneratedId: Between);
+
+            Assert.Equal(1, result.Discarded);
+            Assert.DoesNotContain(nav.Areas, a => a.Id == Between);
+        }
     }
 }

@@ -85,6 +85,9 @@ namespace Meshwright
             public float Reclaimed;
             public int Discarded;
 
+            /// <summary>Slivers kept as the only route between two areas and pulled back to their floor.</summary>
+            public int Trimmed;
+
             /// <summary>
             /// The ids of the areas this pass moved an edge of and kept. Their connections were tested on
             /// the shapes they had before, so these are what <see cref="ConnectionBuilder.Relink"/> re-tests.
@@ -167,7 +170,7 @@ namespace Meshwright
 
             result.Clipped = clipped;
             result.Reclaimed = (float)reclaimed;
-            result.Discarded = DiscardSlivers(nav, vis, firstGeneratedId);
+            result.Discarded = DiscardSlivers(nav, vis, firstGeneratedId, result);
 
             // A discarded area has nothing left to relink.
             if (result.Discarded > 0)
@@ -193,11 +196,15 @@ namespace Meshwright
         /// <see cref="MinimumUsableWidth"/> both ways. Those are single-node squares sitting over a drop on
         /// two sides, which the hurried clip walked down to nothing and discarded. Clipped patiently, a
         /// few stopped as eight-unit squares still partly over the drop, and <see cref="Spare"/> - which
-        /// samples only nine points - kept some of them as the one way between two neighbours: measured
-        /// on the twelve benchmark maps, five more areas floating straight after the clip on the two
-        /// roleplay maps, and no ground gained. A square too small to keep gains nothing from patience,
-        /// so it is judged exactly as before. Strips narrow only one way are not: the commonest place
-        /// the hurried clip lost floor is the one-node strip along a wall or a ledge.
+        /// then judged floor at only nine points - kept some of them as the one way between two
+        /// neighbours: measured on the twelve benchmark maps, five more areas floating straight after
+        /// the clip on the two roleplay maps, and no ground gained. A square too small to keep gains
+        /// nothing from patience, so it is judged exactly as before. Strips narrow only one way are not:
+        /// the commonest place the hurried clip lost floor is the one-node strip along a wall or a ledge.
+        ///
+        /// Spare now pulls what it keeps back to its floor first (<see cref="TrimToFloor"/>), which
+        /// would also stop those squares floating. The fallback has not been measured against that and
+        /// stays; it can discard a square the patient clip would have left on floor, which a test pins.
         /// </summary>
         private static bool Run(NavArea area, BspVisibility vis, float stepSize, bool patient)
         {
@@ -287,6 +294,31 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// Whether there is floor within a step of the area's surface at every point where the lines the
+        /// clip probes cross: <see cref="Samples"/> lines each way, through the middle of each fifth.
+        /// Those are also the points <c>meshwright fit</c> samples. <see cref="CornerPatcher"/> asks
+        /// this of a patch before building it.
+        /// </summary>
+        internal static bool FloorThroughout(BspVisibility vis, NavArea area)
+        {
+            var b = NavGeometry.GetBounds(area);
+
+            for (int i = 0; i < Samples; i++)
+            {
+                for (int j = 0; j < Samples; j++)
+                {
+                    float x = b.MinX + (i + 0.5f) / Samples * b.Width;
+                    float y = b.MinY + (j + 0.5f) / Samples * b.Depth;
+
+                    if (!FloorUnder(vis, area, x, y))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Takes back out of the doomed set anything that is the only way between two of its
         /// neighbours.
         ///
@@ -306,8 +338,13 @@ namespace Meshwright
         /// what a corridor looks like and what a sliver pinned against a wall does not: that one either
         /// touches a single neighbour, or touches neighbours that already abut each other and can route
         /// around it.
+        ///
+        /// What it keeps it first pulls back to its floor, and what is mostly over a drop it does not
+        /// keep - see <see cref="TrimToFloor"/>. Each trimmed area goes into <paramref name="trimmed"/>
+        /// with the footprint it had before.
         /// </summary>
-        private static void Spare(NavFile nav, BspVisibility vis, HashSet<uint> doomed)
+        private static void Spare(NavFile nav, BspVisibility vis, HashSet<uint> doomed,
+            Dictionary<uint, NavGeometry.Bounds> trimmed)
         {
             var neighbours = new Dictionary<uint, HashSet<uint>>(nav.Areas.Count);
 
@@ -384,15 +421,118 @@ namespace Meshwright
                     }
                 }
 
-                if (joinsApart)
-                    spared.Add(id);
+                if (!joinsApart)
+                    continue;
+
+                // Kept as the floor it stands on, not as the clip left it. Trimming moves its edges,
+                // so the nine points are asked again on the shape that is actually kept.
+                var start = Snapshot(self);
+                var footprint = NavGeometry.GetBounds(self);
+
+                if (!TrimToFloor(vis, self) || !Standable(vis, self))
+                {
+                    Restore(self, start);
+                    continue;
+                }
+
+                if (Snapshot(self) != start)
+                    trimmed[id] = footprint;
+
+                spared.Add(id);
             }
 
             foreach (uint id in spared)
                 doomed.Remove(id);
         }
 
-        private static int DiscardSlivers(NavFile nav, BspVisibility vis, uint firstGeneratedId)
+        /// <summary>
+        /// Pulls each edge of a sliver being spared back to the floor under it. Each of the edge's probe
+        /// lines walks in from the edge half a unit at a time until it finds floor within a step of the
+        /// area's surface, and the edge goes in as far as the line that had furthest to go. Returns
+        /// false when no line of some edge finds floor before the area's centre line: that half is over
+        /// a drop, the area is not worth sparing, and the caller puts it back as it was.
+        ///
+        /// The clip cannot do this itself. A sliver's probes start on its centre line, and an edge never
+        /// comes closer to its probe's start than <see cref="MinimumOverhang"/>, so a strip eight or
+        /// nine units wide keeps whatever overhang it has whatever its probes read. The nine points
+        /// <see cref="Standable"/> samples sit at the quarters, on floor, so it used to be kept with its
+        /// outer unit or two over the drop - and <c>meshwright fit</c>, which samples a tenth of the
+        /// way in, counted it as floating. After the clip stopped pulling areas back off floor that
+        /// carries on, that was 16 of the 32 areas floating on the eight TF2 benchmark maps by a floor
+        /// search that cannot miss terrain on a segment boundary, and 46 of the 48 and of the 49 on the
+        /// two roleplay maps: there, chains of eight-unit squares along ledges, the only way along them.
+        /// Refusing to spare anything with floor missing at one of those points stranded 42 areas on
+        /// rp_downtown_tits that a spawn reached before; trimming strands none.
+        ///
+        /// A line with no floor anywhere between the edge and the middle is left out rather than allowed
+        /// to decide. That is a gap running across the area - a crack between two brushes, a few units
+        /// wide - and pulling the edge back cannot get past it. The clip narrowed several strips to
+        /// slivers for exactly that reason, since the crack lies under one of its probe lines; a body
+        /// walks across it, and refusing those strips stranded areas on cp_granary and cp_badlands. They
+        /// are kept as they were, and <c>meshwright fit</c> still counts the four of them on the TF2
+        /// maps, because one of its samples lands in the crack.
+        /// </summary>
+        private static bool TrimToFloor(BspVisibility vis, NavArea area)
+        {
+            const float Step = 0.5f;
+
+            ReadOnlySpan<int> order = [NavGeometry.East, NavGeometry.South, NavGeometry.West, NavGeometry.North];
+
+            foreach (int edge in order)
+            {
+                var b = NavGeometry.GetBounds(area);
+                bool alongX = edge is NavGeometry.East or NavGeometry.West;
+                float width = alongX ? b.Width : b.Depth;
+                float face = edge switch
+                {
+                    NavGeometry.East => b.MaxX,
+                    NavGeometry.West => b.MinX,
+                    NavGeometry.South => b.MaxY,
+                    _ => b.MinY,
+                };
+                float inward = edge is NavGeometry.East or NavGeometry.South ? -1f : 1f;
+                float overhang = 0f;
+                bool floored = false;
+
+                for (int i = 0; i < Samples; i++)
+                {
+                    float t = (i + 0.5f) / Samples;
+                    float across = alongX ? b.MinY + t * b.Depth : b.MinX + t * b.Width;
+
+                    for (float d = 0f; d <= width * 0.5f; d += Step)
+                    {
+                        float at = face + inward * d;
+
+                        if (!FloorUnder(vis, area, alongX ? at : across, alongX ? across : at))
+                            continue;
+
+                        overhang = MathF.Max(overhang, d);
+                        floored = true;
+                        break;
+                    }
+                }
+
+                if (!floored)
+                    return false;
+
+                if (overhang <= 0f)
+                    continue;
+
+                float to = face + inward * overhang;
+
+                switch (edge)
+                {
+                    case NavGeometry.East: SetMaxX(area, to); break;
+                    case NavGeometry.West: SetMinX(area, to); break;
+                    case NavGeometry.South: SetMaxY(area, to); break;
+                    default: SetMinY(area, to); break;
+                }
+            }
+
+            return true;
+        }
+
+        private static int DiscardSlivers(NavFile nav, BspVisibility vis, uint firstGeneratedId, Result result)
         {
             var doomed = new HashSet<uint>();
 
@@ -416,7 +556,16 @@ namespace Meshwright
             if (doomed.Count == 0)
                 return 0;
 
-            Spare(nav, vis, doomed);
+            var trimmed = new Dictionary<uint, NavGeometry.Bounds>();
+            Spare(nav, vis, doomed, trimmed);
+
+            foreach (var (id, footprint) in trimmed)
+            {
+                result.Trimmed++;
+
+                if (result.Reshaped.Add(id))
+                    result.Before[id] = footprint;
+            }
 
             if (doomed.Count == 0)
                 return 0;
