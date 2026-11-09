@@ -691,6 +691,17 @@ namespace Meshwright
         ///
         /// Lifted half a step, as <see cref="Traversability.CanStep"/> and the crouch sampler are:
         /// anything lower is stepped over.
+        ///
+        /// A body that starts inside something is refused whether or not the sweep reports a hit. A box
+        /// that begins in a brush and is dragged out of it never enters one, so the trace finds nothing
+        /// to report and says so - with only its start-solid flag left to tell. Taking "nothing found"
+        /// as clear let the body begin in a wall whenever the crossing led away from it, which is the
+        /// usual shape off the end of a span: the area being left is a sliver against a wall or in a
+        /// corner, too narrow for a body anywhere, and the crossing runs out of it into open ground.
+        /// On the twelve benchmark maps that was 1,089 of the 11,092 links made with the body hanging
+        /// past the end of a span. For 850 of them no body fits anywhere in the area being left within
+        /// 64 units of the edge, and they were nearly all one-way - 743 of the 787 left in the finished
+        /// meshes had no link back - because the crossing back runs into the wall and is caught.
         /// </summary>
         private static bool BodyCrosses(BspVisibility vis, float fromX, float fromY, float toX, float toY,
             float high)
@@ -698,17 +709,14 @@ namespace Meshwright
             const float Lift = NavConstants.StepHeight / 2f;
             const float Half = NavConstants.HalfHumanWidth;
 
-            if (!vis.TryTraceHull(
-                    new BspFile.Vector3(fromX, fromY, high + Lift),
-                    new BspFile.Vector3(toX, toY, high + Lift),
-                    new BspFile.Vector3(-Half, -Half, 0f),
-                    new BspFile.Vector3(Half, Half, NavConstants.HumanCrouchHeight - Lift),
-                    BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid))
-            {
-                return true;
-            }
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(fromX, fromY, high + Lift),
+                new BspFile.Vector3(toX, toY, high + Lift),
+                new BspFile.Vector3(-Half, -Half, 0f),
+                new BspFile.Vector3(Half, Half, NavConstants.HumanCrouchHeight - Lift),
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
 
-            return !startSolid && fraction >= 1f;
+            return !startSolid && (!hit || fraction >= 1f);
         }
 
         /// <summary>

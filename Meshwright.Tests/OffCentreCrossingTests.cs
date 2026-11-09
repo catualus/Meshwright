@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Meshwright;
 using Xunit;
 
@@ -72,6 +73,31 @@ namespace Meshwright.Tests
             Assert.Contains(log, line => line.StartsWith("south:") && line.Contains("everywhere along the span"));
         }
 
+        /// <summary>
+        /// A slot 24 units wide between two walls, with an area along it, opening at y = 88 onto open
+        /// ground and a second area. No body fits anywhere in the slot. A post just past the shared
+        /// edge at x 27..29 stops the middle crossing's side line. At the low end of the span the
+        /// three lines are all clear of the walls, which stop 6 units short of where they start, and
+        /// the body swept from there starts inside the left wall and is dragged out of it into the
+        /// open - which the sweep reports as no hit at all. Only its start-solid flag refuses it.
+        /// </summary>
+        [Fact]
+        public void ABodyThatStartsInAWallIsNotDraggedOutOfIt()
+        {
+            var world = BoxesOnGround(
+                (-200f, -200f, 0f, 88f),    // the left wall
+                (24f, -200f, 200f, 88f),    // the right wall
+                (27f, 95f, 29f, 105f));     // the post past the slot's mouth
+
+            var first = TestWorlds.Area(1, 0f, 0f, 24f, 100f, 0f);
+            var second = TestWorlds.Area(2, 0f, 100f, 24f, 200f, 0f);
+
+            var log = ConnectionBuilder.Explain(world, first, second);
+
+            Assert.DoesNotContain(log, line => line.Contains("would connect"));
+            Assert.Contains(log, line => line.StartsWith("south:") && line.Contains("everywhere along the span"));
+        }
+
         /// <summary>A crouch area 25 units deep against the wall at x = 300, 100 long from y.</summary>
         private static NavArea Ledge(uint id, float y) => Crouch(TestWorlds.Area(id, 275f, y, 300f, y + 100f, 0f));
 
@@ -138,6 +164,56 @@ namespace Meshwright.Tests
             var leafBrushes = new int[]?[] { null, new[] { 0 }, new[] { 1 } };
 
             return BspVisibility.FromGeometry(planes, nodes, leafs, brushes, sides, leafBrushes);
+        }
+
+        /// <summary>
+        /// Solid ground at z = 0 and open air above it, with upright boxes standing on it from z = 0 to
+        /// 200, each given as x and y bounds. The tree has the one split at the ground; the air leaf
+        /// lists every box, which is all a trace needs to find them.
+        /// </summary>
+        private static BspVisibility BoxesOnGround(params (float MinX, float MinY, float MaxX, float MaxY)[] boxes)
+        {
+            var planes = new List<BspFile.Plane>
+            {
+                Plane(0, 0, 1, 0),        // the ground's top face, and the split above/below it
+                Plane(0, 0, -1, 500),     // z >= -500
+                Plane(-1, 0, 0, 5000),    // x >= -5000
+                Plane(1, 0, 0, 5000),     // x <= 5000
+                Plane(0, -1, 0, 5000),    // y >= -5000
+                Plane(0, 1, 0, 5000),     // y <= 5000
+            };
+
+            var brushes = new List<BspFile.Brush> { new() { FirstSide = 0, NumSides = 6, Contents = Solid } };
+
+            foreach (var (minX, minY, maxX, maxY) in boxes)
+            {
+                brushes.Add(new BspFile.Brush { FirstSide = planes.Count, NumSides = 6, Contents = Solid });
+                planes.Add(Plane(1, 0, 0, maxX));
+                planes.Add(Plane(-1, 0, 0, -minX));
+                planes.Add(Plane(0, 1, 0, maxY));
+                planes.Add(Plane(0, -1, 0, -minY));
+                planes.Add(Plane(0, 0, 1, 200));
+                planes.Add(Plane(0, 0, -1, 0));
+            }
+
+            var sides = new BspFile.BrushSide[planes.Count];
+            for (int i = 0; i < sides.Length; i++)
+                sides[i] = Side(i);
+
+            var nodes = new[] { new BspVisibility.Node { PlaneNum = 0, Child0 = -1, Child1 = -2 } };
+
+            var leafs = new[]
+            {
+                new BspVisibility.Leaf { Contents = 0 },     // 0: open air, with the boxes standing in it
+                new BspVisibility.Leaf { Contents = Solid }, // 1: the ground
+            };
+
+            var standing = new int[boxes.Length];
+            for (int i = 0; i < standing.Length; i++)
+                standing[i] = i + 1;
+
+            return BspVisibility.FromGeometry(planes.ToArray(), nodes, leafs, brushes.ToArray(), sides,
+                [standing, [0]]);
         }
 
         private static BspFile.Plane Plane(float x, float y, float z, float distance)
