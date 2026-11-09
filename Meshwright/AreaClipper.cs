@@ -841,34 +841,9 @@ namespace Meshwright
             // the ramp descending, only for the ground disappearing from under it.
             float claimed = NavGeometry.SurfaceZ(area, x, y);
 
-            return FindFloor(vis, x, y, claimed + NavConstants.StepHeight, NavConstants.StepHeight * 3f,
-                       out float actual)
+            return StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
+                       NavConstants.StepHeight * 3f, out float actual)
                 && MathF.Abs(actual - claimed) <= NavConstants.StepHeight;
-        }
-
-        /// <summary>
-        /// <see cref="StairMarker.TryFindFloor"/>, tried a second time from two units higher when it finds
-        /// nothing.
-        ///
-        /// That search walks down in four-unit segments, and a displacement triangle only counts as hit
-        /// strictly inside a segment. Terrain lying exactly where one segment ends and the next begins is
-        /// inside neither, so the column reads as bottomless. Corner heights and terrain vertices are
-        /// both short binary fractions, so this is not the coincidence it sounds: the area's surface
-        /// being a whole two units under the terrain is enough, and down a straight run of terrain it
-        /// stays two units under at every step. cp_badlands lost 70 units of a terrain slope Valve's
-        /// mesh covers that way, one step a pass, from a single probe line; on the ten benchmark maps
-        /// with a reference mesh it was the cause in 71 of the 859 passes that removed real floor (see
-        /// <see cref="Voters"/> for how that was judged). Starting half a segment higher puts that
-        /// surface in the middle of one. The window's bottom does not move, and a floor found in the
-        /// extra two units at the top is more than a step above the claim, which the caller rejects just
-        /// as it rejected finding nothing.
-        /// </summary>
-        private static bool FindFloor(BspVisibility vis, float x, float y, float top, float depth, out float z)
-        {
-            const float HalfSegment = 2f;
-
-            return StairMarker.TryFindFloor(vis, x, y, top, depth, out z)
-                || StairMarker.TryFindFloor(vis, x, y, top + HalfSegment, depth + HalfSegment, out z);
         }
 
         /// <summary>
