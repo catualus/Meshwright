@@ -48,7 +48,8 @@ namespace Meshwright
         /// </summary>
         public enum Clearance
         {
-            /// <summary>No room for a player, or ground too broken to stand on.</summary>
+            /// <summary>No room for a player, ground too broken to stand on, or ground inside a
+            /// kill volume (<see cref="BspVisibility.IsInKillVolume"/>).</summary>
             None,
 
             /// <summary>Room to crouch but not to stand: <c>HumanCrouchHeight</c>, not <c>HumanHeight</c>.</summary>
@@ -147,6 +148,9 @@ namespace Meshwright
 
             var world = new World(vis, mins, maxs);
             var index = new NavGeometry.Index(nav.Areas);
+
+            if (vis.KillVolumeCount > 0)
+                result.Notes.Add($"kill volumes: {vis.KillVolumeCount:N0} trigger_hurt kept out of the mesh");
 
             // Level-synchronous BFS: expand the whole frontier at once across every core, then swap in
             // what it produced. Ordinary BFS is sequential, and nearly all the cost here is the floor
@@ -1246,6 +1250,14 @@ namespace Meshwright
                 var result = !crouch || !walkable
                     ? Clearance.None
                     : stand ? Clearance.Stand : Clearance.Crouch;
+
+                // Room to stand in a death pit is not somewhere to stand. Refused here, where every way
+                // into the flood is decided - neighbours, seeds and ladder and lift stops all ask - so
+                // the ground under a kill volume gets no node and no area, and nothing is linked into it
+                // later because there is nothing there to link. Asked last because it is the rarest
+                // refusal, and free on the many maps with no kill volume at all.
+                if (result != Clearance.None && vis.IsInKillVolume(x, y, z))
+                    result = Clearance.None;
 
                 return clearance.GetOrAdd(key, result);
             }

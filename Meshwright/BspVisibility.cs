@@ -577,6 +577,40 @@ namespace Meshwright
                 : (mask & ContentsMonsterClip) == 0 ? groundModels
                 : movementModels;
 
+        /// <summary>
+        /// Volumes that kill a player standing in them (<c>BspModels.SelectKillVolumes</c>). Null until
+        /// <see cref="AttachKillVolumes"/> is called, and never consulted by a trace: a trigger is not
+        /// solid, and the ground under a death pit is still a floor something can land on.
+        /// </summary>
+        private BspModels? killVolumes;
+
+        public void AttachKillVolumes(BspModels volumes) => killVolumes = volumes;
+
+        public int KillVolumeCount => killVolumes?.BlockingModelCount ?? 0;
+
+        /// <summary>
+        /// Whether a player standing on the floor at this point would be inside a kill volume: whether
+        /// the column their body fills, from just above their feet to the top of their head, enters one.
+        ///
+        /// The column rather than the feet alone because a trigger touches whatever its box overlaps,
+        /// and a mapper's death pit is often a slab over the bottom of the pit rather than a box down
+        /// into the ground. It is the line through the middle of the body rather than the full hull, so
+        /// ground within half a body of a pit's edge is kept; that is ground a player stands on without
+        /// falling in, and the engine's meshes cover it.
+        /// </summary>
+        public bool IsInKillVolume(float x, float y, float z)
+        {
+            if (killVolumes is null || killVolumes.BlockingModelCount == 0)
+                return false;
+
+            // Every content a brush can be listed under: what matters is that the point is inside the
+            // trigger's brushes, not what they are made of. vbsp compiles them CONTENTS_SOLID.
+            return BlockedByModels(killVolumes,
+                new BspFile.Vector3(x, y, z + 1f),
+                new BspFile.Vector3(x, y, z + NavConstants.HumanHeight),
+                MaskBlockLos | GenerationMask, 0);
+        }
+
         public void AttachDisplacements(BspDisplacements disp) => displacements = disp;
 
         public void AttachStaticProps(StaticProps props) => staticProps = props;

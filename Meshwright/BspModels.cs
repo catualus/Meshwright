@@ -183,6 +183,18 @@ namespace Meshwright
         /// (<see cref="StandsOn"/>), for the traces that look for ground.
         /// </summary>
         public static BspModels Load(string path, BspFile bsp, bool forMovement = false, bool forGround = false)
+            => Load(path, count => SelectBlocking(bsp.EntityLump, count, forMovement, forGround));
+
+        /// <summary>
+        /// The map's kill volumes (<see cref="SelectKillVolumes"/>): not anything a trace stops at, but
+        /// the space a player standing on the mesh must not be in. Kept as a model set of their own so
+        /// the same tree walk and bounding hierarchy answer whether a point is inside one.
+        /// </summary>
+        public static BspModels LoadKillVolumes(string path, BspFile bsp)
+            => Load(path, count => SelectKillVolumes(bsp.EntityLump, count));
+
+        private static BspModels Load(string path,
+            Func<int, List<(int Index, BspFile.Vector3 Origin)>> select)
         {
             var result = new BspModels();
 
@@ -200,7 +212,7 @@ namespace Meshwright
             }
 
             var raw = ReadModels(r, offsets[LumpModels]);
-            var blocking = SelectBlocking(bsp.EntityLump, raw.Length, forMovement, forGround);
+            var blocking = select(raw.Length);
 
             var kept = new List<Model>(blocking.Count);
             foreach (var (index, origin) in blocking)
@@ -298,6 +310,113 @@ namespace Meshwright
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Damage per second at and above which a trigger_hurt counts as a death trap rather than a
+        /// hazard. trigger_hurt deals its damage per second, in two half-second ticks, so this kills a
+        /// 100-health player - Half-Life 2 and Garry's Mod - inside a second and most TF2 classes in two.
+        /// Death pits are set far higher (pl_upward's valley is 9,999); what stays under it is the slow
+        /// kind a player walks through and out of, a hot pipe or a stream, whose ground is still ground.
+        /// </summary>
+        internal const float LethalDamage = 100f;
+
+        private const int TriggerAllowClients = 0x01;   // SF_TRIGGER_ALLOW_CLIENTS
+        private const int TriggerAllowAll = 0x40;       // SF_TRIGGER_ALLOW_ALL
+
+        /// <summary>
+        /// The trigger_hurt volumes that kill every player who walks into them, from the moment the map
+        /// starts: death pits, and the out-of-bounds ground under them. A body that can reach that
+        /// ground dies there, so the flood must not mesh it, and nothing then links into it.
+        ///
+        /// The engine's generator does not do this - nav_generate traces with WALK_THRU_EVERYTHING and
+        /// never looks at triggers - but Valve's shipped TF2 meshes do not cover that ground all the
+        /// same. pl_upward has one such volume, a 7,168 by 7,168 unit box under the whole map with its
+        /// top at z = -96, dealing 9,999. Valve's mesh has 8 stray areas inside it; Meshwright put 1,510
+        /// there (9 million square units, over a quarter of its walkable area), and the valley floor they
+        /// covered was reachable only by falling in, which is why barely two thirds of the mesh was one
+        /// strongly connected piece.
+        ///
+        /// Which volumes count is narrow on purpose, and each rule is a volume Valve's meshes do cover:
+        /// <list type="bullet">
+        /// <item>Started disabled: off until map logic says otherwise. pl_badwater's kill brush between
+        /// its two closing doors and pl_upward's spawn-room kill both start disabled, and Valve's meshes
+        /// have an area in each. (The end-of-round pit kills on both payload maps start disabled too,
+        /// with 51 and 93 Valve areas inside, though those are trigger_multiple and never count.)</item>
+        /// <item>Filtered: lethal to some players and not others. TF2's spawn-room kills hurt one team
+        /// (filter_activator_tfteam), and the payload cart's hurt passes only non-players. Neither
+        /// makes ground anyone stands on impassable for everyone. A filter name that names nothing is
+        /// no filter, as it is to the engine.</item>
+        /// <item>Parented: it moves with its parent, so where it was compiled says nothing about where
+        /// it kills.</item>
+        /// <item>Below <see cref="LethalDamage"/>, or not touching players at all.</item>
+        /// </list>
+        /// </summary>
+        internal static List<(int Index, BspFile.Vector3 Origin)> SelectKillVolumes(string entityLump, int modelCount)
+        {
+            var result = new List<(int, BspFile.Vector3)>();
+            var entities = BspEntities.Parse(entityLump);
+
+            var filters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entity in entities)
+            {
+                if (entity.TryGetValue("classname", out string? c) &&
+                    c.StartsWith("filter_", StringComparison.OrdinalIgnoreCase) &&
+                    entity.TryGetValue("targetname", out string? name) && name.Length > 0)
+                {
+                    filters.Add(name);
+                }
+            }
+
+            foreach (var entity in entities)
+            {
+                string classname = entity.TryGetValue("classname", out string? c) ? c : "";
+                string model = entity.TryGetValue("model", out string? m) ? m : "";
+
+                if (!classname.Equals("trigger_hurt", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!model.StartsWith('*') || !int.TryParse(model[1..], out int index))
+                    continue;
+
+                if (index <= 0 || index >= modelCount)
+                    continue;
+
+                if (!Kills(entity, filters))
+                    continue;
+
+                result.Add((index, ParseVector(entity.TryGetValue("origin", out string? o) ? o : "")));
+            }
+
+            return result;
+        }
+
+        /// <summary>Whether a trigger_hurt kills every player who stands in it while the map starts.</summary>
+        private static bool Kills(Dictionary<string, string> entity, HashSet<string> filters)
+        {
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+
+            if (entity.TryGetValue("StartDisabled", out string? off) && off == "1")
+                return false;
+
+            if (entity.TryGetValue("parentname", out string? parent) && parent.Length > 0)
+                return false;
+
+            if (entity.TryGetValue("filtername", out string? filter) && filters.Contains(filter))
+                return false;
+
+            // A missing value is read as nothing: a compiled map always writes both, and guessing at a
+            // default here would only ever delete ground.
+            if (!entity.TryGetValue("damage", out string? damage) ||
+                !float.TryParse(damage, System.Globalization.NumberStyles.Float, culture, out float perSecond) ||
+                perSecond < LethalDamage)
+            {
+                return false;
+            }
+
+            return entity.TryGetValue("spawnflags", out string? flags) &&
+                   int.TryParse(flags, System.Globalization.NumberStyles.Integer, culture, out int f) &&
+                   (f & (TriggerAllowClients | TriggerAllowAll)) != 0;
         }
 
         private static BspFile.Vector3 ParseVector(string value)
