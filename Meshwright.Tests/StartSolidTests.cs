@@ -63,6 +63,29 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// A crouching body does not fit where every place it could stand in the cell overlaps a post.
+        ///
+        /// Ground at z = 0 under a crouch-height ceiling at 64, the sample at (250, 250), and a post 2
+        /// units square and 40 tall just off the sample: clear of the headroom line straight up, but
+        /// inside the 32 unit plate however the body shifts within the cell. Every plate starts inside
+        /// the post and rises out of it below the crouching height, so the sweep reports no hit, and
+        /// that used to be a fit. The same ceiling with no post is crouch ground.
+        /// </summary>
+        [Fact]
+        public void ACrouchingBodyThatStartsInAPostDoesNotFit()
+        {
+            var ceiling = (new BspFile.Vector3(-1000, -1000, 64), new BspFile.Vector3(2000, 2000, 84));
+            var post = (new BspFile.Vector3(251, 251, 0), new BspFile.Vector3(253, 253, 40));
+            var mins = new BspFile.Vector3(0, 0, -500);
+            var maxs = new BspFile.Vector3(1000, 1000, 500);
+
+            Assert.Equal(AreaGenerator.Clearance.None,
+                AreaGenerator.SampleClearance(Boxes(ceiling, post), mins, maxs, 10, 10, 0f)[0]);
+            Assert.Equal(AreaGenerator.Clearance.Crouch,
+                AreaGenerator.SampleClearance(Boxes(ceiling), mins, maxs, 10, 10, 0f)[0]);
+        }
+
+        /// <summary>
         /// Solid ground with its top at z = 0, and boxes standing in the open air above it, each given
         /// by its corners. The tree has the one split at the ground; the air leaf lists every box,
         /// which is all a trace needs to find them.
