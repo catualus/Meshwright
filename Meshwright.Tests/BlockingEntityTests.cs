@@ -115,5 +115,72 @@ namespace Meshwright.Tests
             Assert.Equal(9, index);
             Assert.Equal(new BspFile.Vector3(8, 16, 32), origin);
         }
+
+        /// <summary>
+        /// A brush entity whose bounds are not numbers - a NaN in the model lump, an origin such as
+        /// "nan 0 0" or one past float's range - is left out, and the others are still found. Kept, one such model
+        /// carried its NaN up the hierarchy's bounds to the root, and no trace found any brush entity
+        /// on the map at all.
+        /// </summary>
+        [Theory]
+        [InlineData("nan-bound")]
+        [InlineData("nan-origin")]
+        [InlineData("inf-origin")]
+        public void ABrushEntityWithBoundsThatAreNotNumbersHidesNoOther(string spoilt)
+        {
+            var models = new (BspFile.Vector3 Mins, BspFile.Vector3 Maxs)[]
+            {
+                (new BspFile.Vector3(-5000, -5000, -5000), new BspFile.Vector3(5000, 5000, 5000)),
+                (new BspFile.Vector3(0, 0, 0), new BspFile.Vector3(64, 64, 64)),
+                (new BspFile.Vector3(200, 0, 0),
+                    new BspFile.Vector3(264, 64, spoilt == "nan-bound" ? float.NaN : 64)),
+                (new BspFile.Vector3(400, 0, 0), new BspFile.Vector3(464, 64, 64)),
+                (new BspFile.Vector3(600, 0, 0), new BspFile.Vector3(664, 64, 64)),
+                (new BspFile.Vector3(800, 0, 0), new BspFile.Vector3(864, 64, 64)),
+            };
+
+            string origin = spoilt switch
+            {
+                "nan-origin" => "nan 0 0",
+                "inf-origin" => "1e39 0 0", // past float's range, so it parses as infinity
+                _ => "0 0 0",
+            };
+
+            var entities = new System.Text.StringBuilder("{ \"classname\" \"worldspawn\" }\n");
+            for (int i = 1; i < models.Length; i++)
+            {
+                entities.Append($"{{ \"classname\" \"func_brush\" \"model\" \"*{i}\" " +
+                                $"\"origin\" \"{(i == 2 ? origin : "0 0 0")}\" }}\n");
+            }
+
+            var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"mw_test_{System.Guid.NewGuid():N}.bsp");
+            try
+            {
+                TestWorlds.WriteBsp(path, entities.ToString(), models, [], [-1, -1, -1, -1, -1, -1]);
+                var set = BspModels.Load(path, BspFile.Load(path));
+
+                Assert.Equal(4, set.BlockingModelCount);
+
+                var heads = new int[8];
+                var shifts = new BspFile.Vector3[8];
+
+                // Through every good model's box, end to end.
+                int found = set.Gather(new BspFile.Vector3(-100, 32, 32), new BspFile.Vector3(1000, 32, 32),
+                    heads, shifts, out bool truncated);
+
+                Assert.False(truncated);
+                Assert.Equal(4, found);
+
+                // And straight down through one of them.
+                int column = set.Gather(new BspFile.Vector3(632, 32, 200), new BspFile.Vector3(632, 32, -200),
+                    heads, shifts, out _);
+
+                Assert.Equal(1, column);
+            }
+            finally
+            {
+                System.IO.File.Delete(path);
+            }
+        }
     }
 }

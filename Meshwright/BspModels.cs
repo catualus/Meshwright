@@ -221,11 +221,19 @@ namespace Meshwright
                     continue;
 
                 var m = raw[index];
-                kept.Add(new Model(
-                    new BspFile.Vector3(m.Mins.X + origin.X, m.Mins.Y + origin.Y, m.Mins.Z + origin.Z),
-                    new BspFile.Vector3(m.Maxs.X + origin.X, m.Maxs.Y + origin.Y, m.Maxs.Z + origin.Z),
-                    origin,
-                    m.HeadNode));
+                var mins = new BspFile.Vector3(m.Mins.X + origin.X, m.Mins.Y + origin.Y, m.Mins.Z + origin.Z);
+                var maxs = new BspFile.Vector3(m.Maxs.X + origin.X, m.Maxs.Y + origin.Y, m.Maxs.Z + origin.Z);
+
+                // A model with a bound that is not a number - a NaN or infinity in the lump, or an
+                // origin such as "nan 0 0", which float.TryParse accepts - is left out. No segment can
+                // hit its box anyway, but kept, it spoilt everyone else's: the hierarchy's bounds take
+                // in their models' with MathF.Min and MathF.Max, which carry a NaN up to the root, and a
+                // NaN bound fails every slab test, so one such entity made every brush entity on the
+                // map invisible to every trace.
+                if (!Finite(mins) || !Finite(maxs) || !Finite(origin))
+                    continue;
+
+                kept.Add(new Model(mins, maxs, origin, m.HeadNode));
             }
 
             result.models = kept.ToArray();
@@ -505,6 +513,9 @@ namespace Meshwright
             _ => (m.Mins.Z + m.Maxs.Z) * 0.5f,
         };
 
+        private static bool Finite(BspFile.Vector3 v) =>
+            float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
         private static BspFile.Vector3 Min(BspFile.Vector3 a, BspFile.Vector3 b) =>
             new(MathF.Min(a.X, b.X), MathF.Min(a.Y, b.Y), MathF.Min(a.Z, b.Z));
 
@@ -618,7 +629,8 @@ namespace Meshwright
         /// <see cref="Gather(BspFile.Vector3, BspFile.Vector3, Span{int}, Span{BspFile.Vector3}, out bool)"/>.
         /// So does a node with no heights: a node's bounds take in its models' with
         /// <see cref="MathF.Min(float, float)"/> and <see cref="MathF.Max(float, float)"/>, which carry a
-        /// NaN up from any model, and a NaN bound fails every slab, flat or not.
+        /// NaN up from any model, and a NaN bound fails every slab, flat or not. <see cref="Load(string, BspFile, bool, bool)"/>
+        /// leaves such models out, so that is only a guard.
         /// </summary>
         internal int GatherColumn(float x, float y, ref int[] into)
         {
