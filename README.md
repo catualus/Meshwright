@@ -350,6 +350,14 @@ That last one also seals the map edges the flood used to walk out through: on ko
 the generated areas were on ground Valve's mesh does not have, and now 27.8% are, and on cp_badlands
 69.2% now 25.3%. Coverage of the ground Valve's meshes can reach is 95.5% to 98.5% on every TF2 map.
 
+Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
+sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
+nothing could leave once it had fallen in. Without them pl_upward has 2,965 areas instead of 4,488,
+27.5% of them on ground Valve's mesh lacks instead of 52.0%, and 90% of the mesh is one strongly
+connected piece instead of 66%, with the same routes and coverage. Hurts that start disabled, are
+filtered to one team, ride a moving entity or deal under 100 damage a second are left alone, as
+Valve's meshes leave them.
+
 Finishing an existing mesh (`-generateareas` without `-scratch`) lines the new areas up with the old
 ones, so the seams connect. Run over Valve's own meshes, which then only need their gaps filled, the
 generated areas overlapping an old one too far to link went from 431 to none on ctf_2fort and from
@@ -428,6 +436,10 @@ than itself.
 classifier reproduces the engine's verdicts. Run over a mesh generated here it finds fewer, because an
 area that runs off the end of a flight or picks up a neighbouring ramp is correctly rejected. The
 shape is wrong, not the verdict.
+
+**Only `trigger_hurt` counts as a death pit.** A `trigger_multiple` that kills through an output
+(`!activator,SetHealth,-1000`) is not recognised, nor is a hurt that map logic switches on later in
+the round, so ground under either is meshed. Valve's meshes cover the second kind as well.
 
 **Generated areas are marked experimental.** `-generateareas` warns on every run. Review the result
 before shipping it.

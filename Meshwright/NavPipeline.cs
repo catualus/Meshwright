@@ -256,9 +256,12 @@ namespace Meshwright
             // And with the toggle brushes that are switched on at the start put back, for the traces
             // that look for ground: a body passes them, but stands on them while they are there.
             var ground = Task.Run(() => BspModels.Load(path, bsp, forMovement: true, forGround: true));
+            // Not geometry at all: the death pits the flood must not mesh. See BspModels.SelectKillVolumes.
+            var kill = Task.Run(() => BspModels.LoadKillVolumes(path, bsp));
             var vis = BspVisibility.Load(path, bsp);
 
             vis.AttachModels(models.Result, movement.Result, ground.Result);
+            vis.AttachKillVolumes(kill.Result);
             vis.AttachDisplacements(displacements.Result);
             vis.AttachStaticProps(props.Result);
 
