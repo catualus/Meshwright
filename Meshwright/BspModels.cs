@@ -607,6 +607,103 @@ namespace Meshwright
             return found;
         }
 
+        /// <summary>
+        /// The models a segment straight up or down through <paramref name="x"/>, <paramref name="y"/>
+        /// could gather, whatever its heights, as indices for <see cref="GatherFromColumn"/>: those
+        /// under every node whose box holds the column and has heights to it. Written to
+        /// <paramref name="into"/>, which is grown as needed; returns how many.
+        ///
+        /// The segment test asks of an axis the segment does not move along only whether the start lies
+        /// within the box's slab, so a node failing that here fails every such segment in
+        /// <see cref="Gather(BspFile.Vector3, BspFile.Vector3, Span{int}, Span{BspFile.Vector3}, out bool)"/>.
+        /// So does a node with no heights: a node's bounds take in its models' with
+        /// <see cref="MathF.Min(float, float)"/> and <see cref="MathF.Max(float, float)"/>, which carry a
+        /// NaN up from any model, and a NaN bound fails every slab, flat or not.
+        /// </summary>
+        internal int GatherColumn(float x, float y, ref int[] into)
+        {
+            if (bvh.Length == 0)
+                return 0;
+
+            Span<int> stack = stackalloc int[64];
+            int top = 0;
+            stack[top++] = 0;
+            int found = 0;
+
+            while (top > 0)
+            {
+                int index = stack[--top];
+                ref readonly var node = ref bvh[index];
+
+                if (!(x >= node.Mins.X && x <= node.Maxs.X && y >= node.Mins.Y && y <= node.Maxs.Y)
+                    || float.IsNaN(node.Mins.Z) || float.IsNaN(node.Maxs.Z))
+                {
+                    continue;
+                }
+
+                if (node.Count == 0)
+                {
+                    // Gather's own guard, which a median split never reaches.
+                    if (top + 2 <= stack.Length)
+                    {
+                        stack[top++] = index + 1;
+                        stack[top++] = node.Left;
+                    }
+
+                    continue;
+                }
+
+                for (int i = node.First; i < node.First + node.Count; i++)
+                {
+                    if (found == into.Length)
+                        Array.Resize(ref into, Math.Max(8, into.Length * 2));
+
+                    into[found++] = i;
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// <see cref="Gather(BspFile.Vector3, BspFile.Vector3, Span{int}, Span{BspFile.Vector3}, out bool)"/>
+        /// for a segment straight up or down the column <paramref name="column"/> was gathered for
+        /// (<see cref="GatherColumn"/>): the same models, perhaps in another order, found by testing
+        /// each candidate's own bounds and nothing above them. Returns how many were written;
+        /// <paramref name="heads"/> and <paramref name="origins"/> must hold as many as there are
+        /// candidates.
+        ///
+        /// The models <see cref="Gather(BspFile.Vector3, BspFile.Vector3, Span{int}, Span{BspFile.Vector3}, out bool)"/>
+        /// finds are those whose own bounds the segment touches below nodes whose bounds it touches
+        /// too. A node's bounds hold every model's under it - the candidates' nodes have no NaN to
+        /// spoil that - and the slab test cannot pass a box and fail one holding it: a flat axis asks
+        /// whether the start lies inside, and on the axis the segment runs along, fractions rounded
+        /// from bounds no further in span no less. So a candidate whose bounds the segment touches has
+        /// every node above it touched as well, and is one the full gather finds. Which order they
+        /// come in decides nothing for a caller asking whether any of them blocks.
+        /// </summary>
+        internal int GatherFromColumn(ReadOnlySpan<int> column, BspFile.Vector3 a, BspFile.Vector3 b,
+            Span<int> heads, Span<BspFile.Vector3> origins)
+        {
+            int found = 0;
+
+            foreach (int i in column)
+            {
+                ref readonly var model = ref models[i];
+
+                // As Gather passes them for a bare segment: the bounds less a zero box, which is the
+                // bounds to the bit.
+                if (!SegmentHitsBox(a, b, Sub(model.Mins, default), Sub(model.Maxs, default)))
+                    continue;
+
+                heads[found] = model.HeadNode;
+                origins[found] = model.Origin;
+                found++;
+            }
+
+            return found;
+        }
+
         private static BspFile.Vector3 Sub(BspFile.Vector3 a, BspFile.Vector3 b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
 
         /// <summary>Slab test of a finite segment against an axis-aligned box.</summary>
