@@ -101,6 +101,77 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// The same kind of spot shut off by a pane: a strip 16 units deep between a wall and a pane a unit
+        /// thick, which before the clip ran five units past the pane to meet the room on its other side. No
+        /// body stands in the strip, but that is not why nothing gets across - a line through the middle of
+        /// the crossing runs into the pane wherever it is tried - so both links go. Window sills behind
+        /// glass on the roleplay maps are this shape.
+        /// </summary>
+        [Fact]
+        public void ALinkThroughAPaneToASpotNoBodyStandsInIsRemoved()
+        {
+            var world = StartSolidTests.Boxes(
+                (new(-200, 100, 0), new(200, 101, 200)),
+                (new(-200, 117, 0), new(200, 300, 200)));
+            var nav = Linked(Area(1, 0, 0, 100, 100), Area(2, 0, 101, 100, 117));
+            var before = Before((2, 0, 95, 100, 117));
+
+            var dropped = ConnectionBuilder.DropStale(nav, world, before.Keys.ToHashSet(), before);
+
+            Assert.Equal(2, dropped.Removed);
+            Assert.Equal(2, dropped.RemovedWalled);
+            Assert.False(Linked(nav, 1, 2), "a link was left through the pane");
+            Assert.False(Linked(nav, 2, 1), "a link was left through the pane");
+        }
+
+        /// <summary>
+        /// A drop off a deck 140 units up onto a slot 20 units wide underneath the deck itself, the deck
+        /// running on over the landing. No body stands in the slot, and the walker has no edge to step off
+        /// short of the landing, so the drop goes - as off the wall tops above the shop windows on the
+        /// roleplay maps, linked before the clip to window displays that then ran out past the glass.
+        /// </summary>
+        [Fact]
+        public void ADropOntoASpotUnderTheFloorItLeavesIsRemoved()
+        {
+            var world = StartSolidTests.Boxes(
+                (new(-400, 0, 120), new(400, 200, 140)),
+                (new(-400, 0, 0), new(400, 80, 120)),
+                (new(-400, 100, 0), new(400, 200, 120)));
+            var nav = LinkedEast(TestWorlds.Area(1, -100, 80, 0, 100, 140f), TestWorlds.Area(2, 0, 80, 100, 100, 0f));
+            var before = Before((2, 0, 80, 100, 100));
+
+            var dropped = ConnectionBuilder.DropStale(nav, world, before.Keys.ToHashSet(), before);
+
+            Assert.Equal(1, dropped.Refused);
+            Assert.Equal(1, dropped.RemovedWalled);
+            Assert.False(Linked(nav, 1, 2), "a drop was left through the deck");
+        }
+
+        /// <summary>
+        /// The control: the deck ends at the edge, and a step 60 units high stands in the 20 unit gap below
+        /// it, before a slot no body stands in. The fall is refused because it lands on the step, but a
+        /// walker steps off that again, so nothing in the crossing says it is shut and the link is left as
+        /// the build made it.
+        /// </summary>
+        [Fact]
+        public void ADropOntoAStepPartwayDownToASpotNoBodyStandsInIsLeftAlone()
+        {
+            var world = StartSolidTests.Boxes(
+                (new(-400, 0, 120), new(0, 200, 140)),
+                (new(0, 80, 0), new(14, 100, 60)),
+                (new(0, 0, 0), new(400, 80, 120)),
+                (new(0, 100, 0), new(400, 200, 120)));
+            var nav = LinkedEast(TestWorlds.Area(1, -100, 80, 0, 100, 140f), TestWorlds.Area(2, 20, 80, 120, 100, 0f));
+            var before = Before((2, 20, 80, 120, 100));
+
+            var dropped = ConnectionBuilder.DropStale(nav, world, before.Keys.ToHashSet(), before);
+
+            Assert.Equal(1, dropped.Refused);
+            Assert.Equal(0, dropped.Removed);
+            Assert.True(Linked(nav, 1, 2));
+        }
+
+        /// <summary>
         /// A link between two areas that did not face each other before the clip is not the builder's - a
         /// bridge the jump-area stitcher made, or a hand edit - and is not judged by the builder's
         /// geometry, wall or no wall.
@@ -149,6 +220,17 @@ namespace Meshwright.Tests
             var nav = new NavFile();
             nav.Areas.Add(north);
             nav.Areas.Add(south);
+            return nav;
+        }
+
+        /// <summary>The two areas, the first linked to the second across its east edge, one way only.</summary>
+        private static NavFile LinkedEast(NavArea west, NavArea east)
+        {
+            west.Connections[NavGeometry.East].Add(east.Id);
+
+            var nav = new NavFile();
+            nav.Areas.Add(west);
+            nav.Areas.Add(east);
             return nav;
         }
 
