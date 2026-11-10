@@ -591,11 +591,36 @@ body walks out of across the shared edge, refused by the builder's test (its bod
 height of the floor under its middle on a slope, positions near the middle of a narrow span are never
 tried, and slivers are tried only six units in; loosening each linked links the checker flags more
 often than the links kept); 11 left on foot only across floor no area covers or just past a span's end;
-10 behind 46 to 48 unit fences and railings, which a jump clears; 10 beyond thin bars and kerbs 10 to
-19 units high, which a walker steps over and the builder's lowest clearance line does not; and 6 no
+10 behind 46 to 48 unit fences and railings, which a jump clears; 10 inside open-topped props, first
+taken for floor beyond bars 10 to 19 units high (see below); and 6 no
 player reaches - a strip behind a row of containers on cp_granary and a recess under a 32 unit lintel,
 a gap behind a displacement rock face on cp_badlands, a terrain shell on each RP map, and a room on
 rp_downtown_meowy with no way out within 256 units.
+
+A walker steps over anything up to a step high, and the builder did not. Its lowest clearance line runs
+eight units over the higher floor, so a bar, a raised threshold or a prop's edge 9 to 18 units high read
+as a wall and the floors either side were never linked. Where the lines refuse a crossing between floors
+within a step of each other, a crouching body is now raised onto whatever it passes over and swept
+across. That top has to be within a step of both floors, so a wall a step over a pavement and 30 units
+over the road beside it stays the drop and climb tests' business. It has to stand in the crossing, with
+its near and far faces no more than a body's width apart halfway up, so a raised floor is a floor and is
+linked by steps up onto it and down off it. And there has to be a crouching body's headroom over it.
+Of the pairs the builder refused and a step move crosses, 9 have ground at both ends in Valve's TF2
+meshes or the engine's gm_construct mesh, and those meshes join all 9: 2 by a direct link, the rest
+through an area spanning the obstacle or standing on it. None of the 10 cut-off groups above put down
+to a bar is behind one. They are three stacked open-topped props at
+(-844, -970) and two pieces of a diagonal planter at (5290, 2141) on each RP map, whose rims stand 26 to
+30 units over the room floor; the floor search inside the rim found the prop's underside, 10 to 19 units
+lower, and that was taken for the obstacle's height. They need a jump and stay cut off, as the engine's
+own mesh leaves them. Five sites gain links on each RP map, one on ctf_2fort and four on pl_upward: 2, 8
+and 10 links, all level, none flagged by a hull checker, against 0.9% to 2.0% of the level links kept.
+The checker rests its body up to 24 units over the floor, so it steps over these too; each site was also
+checked in cross-section. Four links each on the RP maps go to the connection fixer, which drops A to C
+when A to B to C now exists, and a 14 unit strip on top of a 13 unit block on pl_upward goes with its 6
+links, as it was kept only for being the one way between its neighbours. Routes, coverage, floating and
+over-air areas, islands and areas no spawn reaches do not move, and eight maps come out byte-identical.
+The 46 to 48 unit fences are not modelled: 86 and 87 refused pairs on the RP maps, 2 of them into a
+cut-off group, and 0 to 5 on the other maps.
 
 A line traced from inside a static prop is not told so. The line traces have no start-solid flag: one
 starting inside a brush is blocked because it starts inside, but a prop is triangles, and a segment
