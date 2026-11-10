@@ -494,10 +494,10 @@ whole difference: two strips the clip pulls back against a wall, each narrower t
 by a body standing at their open side, and a unit further along its far side is in the wall. Of the
 39,889 adjacent pairs the builder refused on the twelve finished meshes, a hull checker gets a body
 across 956 only with it centred on an end of the span, 737 of them level. The two ends are now tried
-last, from six units and from a unit inside each area, for level crossings only, where every probe under
-the overhanging half finds floor within a step, a crouching body stands at both ends, and a body swept
-across is clear from start to finish. The stale-link pass tries them too, and removes a link the build
-made only at a span end if the clip leaves no body standing at both ends of any crossing.
+last, from six units and from a unit inside each area. A level crossing is linked there where every
+probe under the overhanging half finds floor within a step, a crouching body stands at both ends, and a
+body swept across is clear from start to finish. The stale-link pass tries them too, and removes a link
+the build made only at a span end if the clip leaves no body standing at both ends of any crossing.
 
 The two corner crossings on ctf_2fort an earlier audit found that pass removing were not this. Each is
 a respawn-room doorway with a thin `func_brush` panel between the two areas, and a body gets round it
@@ -512,6 +512,27 @@ from 99.85% to 99.95% on cp_badlands and hold elsewhere, coverage, floating and 
 move, islands fall on seven maps (cp_badlands 46 to 41) and areas no spawn reaches on seven (cp_badlands
 49 to 44), and no area a spawn reached before is cut off. A hull checker that also tries a span's exact
 end flags 2 of the 905 new level links, against 1.2% of the links kept.
+
+Drops and climbs are now tried at a span's end as well. Tried with the level guards alone, they added
+84 drops and 3 climbs, and a hull checker flagged the drops at the rate it flags the drops kept, among
+them a shape no other test saw: on pl_upward a slope ends in a lip that overhangs the floor 33 units
+below by 12, and the drop was linked at the corner, where a body landing beside it is in the lip. A drop
+or a climb at a corner now needs floor under the overhanging half beside its higher end only, a
+crouching body standing at its foot beside the corner as well as at the top - its foot also tried 17
+units into the lower area, clear of the face rising from the shared edge - and a body swept straight
+up at the foot from where it rests to the height it crosses at, the column it falls down or jumps up.
+The climb has to be in reach on the floor as well as on the areas, and the fall and its lip are tested
+as for any other drop. The stale-link pass keeps a link a body gets across this way, and still removes
+a link the build made at a span end when the clip leaves no room; a body standing at both ends of a
+drop or climb there does not count as standing, as counted it removed 21 links on four maps that a hull
+checker gets a body across nearly all of. The finished meshes gain 47 links, 30 drops and 16 climbs the
+checker can test, and lose none; pl_upward's drop off the slope is not among them, and the one beside it
+that lands clear of the lip is. The checker flags 4 of the drops and 5 of the climbs, against 30% and
+32% of those kept, and 4 of the 9 are one 40 unit drop and its climb back, the same on both RP maps,
+whose landing clears a wall's face by a unit the checker's insets step over. Areas, routes, coverage,
+floating and over-air areas, islands and areas no spawn reaches do not move on any map, and ctf_2fort,
+ctf_turbine, gm_construct and gm_flatgrass come out byte-identical. Building and re-testing links takes
+about half a second longer on pl_upward, 3% of its run.
 
 The swept-box gather also brought back 24 drops and climbs on the two RP maps, every one through a pane
 of glass. Before the clip, a window sill's area ran past the glass, so the build linked it to the street
