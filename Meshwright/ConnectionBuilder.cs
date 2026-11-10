@@ -300,7 +300,7 @@ namespace Meshwright
         /// unit in it stands half over the neighbour and crosses. The two ends of the span are tried as well,
         /// with the body centred on each and half of it past it over floor (<see cref="CrossesAtEnds"/>),
         /// and count as any other crossing does: a body that gets across there keeps the link, and one
-        /// that stands at both ends of one there counts as standing.
+        /// that stands at both ends of a level one there counts as standing.
         ///
         /// The second condition is what keeps this from deleting ground. Measured on the twelve benchmark
         /// maps, 10,559 of the 85,484 links made before the clip on a reshaped area fail the builder's test
@@ -946,15 +946,31 @@ namespace Meshwright
         /// (<see cref="BodyCrosses(BspVisibility, float, float, float, float, float)"/>), so a corner is no
         /// way round a wall.
         ///
-        /// Level crossings only, the two floors within a step. A drop or a climb at a corner hangs half the
-        /// body over a third area whose floor belongs to one level or the other, and nothing the fall and
-        /// headroom tests look at is there. Tried at the ends as well, they added 84 drops and 3 climbs on
-        /// the twelve maps; a hull checker flagged 22 of the drops, about the rate it flags the drops kept,
-        /// and those were the shape no test here sees - pl_upward has a 33 unit drop off a slope, linked at
-        /// the corner, where a body cannot stand at the foot beside it.
+        /// A drop or a climb at a corner, the two floors more than a step apart, asks more. Half the body
+        /// hangs over a third area whose floor belongs to one level or the other, and what the fall and
+        /// headroom tests look at is the crossing's own line, not that half. So the floor under it is asked
+        /// for beside the higher end only, the floor the body walks along; a body has to stand at the lower
+        /// end too, beside the corner at the foot of the face; and a body is swept straight up there from
+        /// where it rests to the height it is dragged across at (<see cref="BodyRises"/>) - the column it
+        /// falls down or jumps up. The lower end is also tried from <see cref="ClearOfFace"/>, as at a unit
+        /// or six in the body stands in the face rising from the shared edge. The climb is in reach
+        /// measured on the floor as well as on the areas, and the fall and its lip are
+        /// <see cref="TestCrossing"/>'s, as everywhere else. Without the foot, drops and climbs at the ends
+        /// added 84 drops and 3 climbs on the twelve maps, and a hull checker flagged 22 of the drops, the
+        /// shape no other test here sees: pl_upward has a 33 unit drop off a slope whose lip overhangs the
+        /// floor below by 12 units, linked at the corner, where a body landing beside it is in the lip.
+        /// With it, that drop is not linked - the one beside it, which lands clear of the lip, is - and
+        /// the finished meshes gain 30 drops and 16 climbs a hull checker can test, and lose no link. It
+        /// flags 4 of the drops and 5 of the climbs, against 30% and 32% of those kept; 4 of the 9 are one
+        /// 40 unit drop and its climb back, on both RP maps, whose landing clears the wall's face by the
+        /// unit the checker's own insets step over.
         ///
-        /// <paramref name="stood"/> says whether a body stood at both ends of a crossing tried here, for
-        /// <see cref="DropStale"/>'s verdict.
+        /// <paramref name="stood"/> says whether a body stood at both ends of a level crossing tried here,
+        /// for <see cref="DropStale"/>'s verdict. Not of a drop or a climb: counted, it turned links the
+        /// pass leaves alone for want of room into links a body stood for and could not cross, and on
+        /// ctf_2fort, cp_badlands, gm_construct and pl_upward the pass removed 28 more, 21 of them still
+        /// missing from the finished meshes; a hull checker gets a body across 17 of the 20 it can test,
+        /// 16 at the middle of the span. A drop or a climb that gets across here still keeps a link.
         /// </summary>
         private static bool CrossesAtEnds(BspVisibility vis, NavArea area, NavArea other,
             NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
@@ -975,13 +991,19 @@ namespace Meshwright
                 if (!WithinAlong(bounds, direction, c) || !WithinAlong(otherBounds, direction, c))
                     continue;
 
-                foreach (float into in depths)
+                // The depths given, then ClearOfFace, which is tried only at the lower end of a drop or a
+                // climb: see the summary.
+                for (int i = 0; i <= depths.Length; i++)
                 {
+                    float into = i < depths.Length ? depths[i] : ClearOfFace;
+
                     if (into > 1f && into > depth - 1f)
                         continue;
 
-                    foreach (float intoOther in depths)
+                    for (int j = 0; j <= depths.Length; j++)
                     {
+                        float intoOther = j < depths.Length ? depths[j] : ClearOfFace;
+
                         if (intoOther > 1f && intoOther > otherDepth - 1f)
                             continue;
 
@@ -992,18 +1014,47 @@ namespace Meshwright
                         float toZ = NavGeometry.SurfaceZ(other, toX, toY);
                         float fromGround = GroundAt(vis, fromX, fromY, fromZ);
                         float toGround = GroundAt(vis, toX, toY, toZ);
+                        float rise = toGround - fromGround;
+                        bool level = MathF.Abs(rise) <= NavConstants.StepHeight;
 
-                        // Level crossings only, within a step: see the summary.
-                        if (MathF.Abs(toGround - fromGround) > NavConstants.StepHeight)
+                        // ClearOfFace at the lower end of a drop or a climb only: the end being left on a
+                        // climb, the landing on a drop.
+                        if (i == depths.Length && (level || rise < 0f) ||
+                            j == depths.Length && (level || rise > 0f))
+                        {
+                            continue;
+                        }
+
+                        // A drop or a climb within the builder's reach, measured on the areas as everywhere
+                        // else and on the floor under the corner as well.
+                        if (!level && (!Reachable(toZ - fromZ) || !Reachable(rise)))
                             continue;
 
-                        if (!OverhangSupported(vis, direction, outward, fromX, fromY, fromGround, toX, toY, toGround))
+                        // Level, floor beside both ends and the middle; a drop or a climb, beside the
+                        // higher end, whose floor is the one the body is walking along.
+                        if (!OverhangSupported(vis, direction, outward, fromX, fromY, fromGround, toX, toY, toGround,
+                                level ? -1 : rise < 0f ? 0 : 2))
+                        {
                             continue;
+                        }
 
                         if (!BodyStands(vis, fromX, fromY, fromGround) || !BodyStands(vis, toX, toY, toGround))
                             continue;
 
-                        stood = true;
+                        // Only on the level: see the summary.
+                        stood |= level;
+
+                        // A body falls straight down beside the corner to where it lands, or jumps straight
+                        // up from where it starts, onto the height TestCrossing drags it across at.
+                        if (!level)
+                        {
+                            bool down = rise < 0f;
+                            float footX = down ? toX : fromX, footY = down ? toY : fromY;
+                            float high = MathF.Max(MathF.Max(fromZ, toZ), MathF.Max(fromGround, toGround));
+
+                            if (!BodyRises(vis, footX, footY, Rest(vis, footX, footY, down ? toGround : fromGround), high))
+                                continue;
+                        }
 
                         if (TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _,
                                 sweepBody: true) == Refusal.Clear)
@@ -1019,6 +1070,36 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// How deep into the lower area the lower end of a drop or a climb at the end of a span is also tried
+        /// from (<see cref="CrossesAtEnds"/>): a body's half-width and a unit, the nearest a body standing on
+        /// the lower floor gets to a face that rises from the shared edge.
+        /// </summary>
+        private const float ClearOfFace = NavConstants.HalfHumanWidth + SpanEnd;
+
+        /// <summary>
+        /// Whether a crouching body, the full 32 units wide, goes straight up from resting on the floor at
+        /// <paramref name="low"/> to <paramref name="high"/>, the height <see cref="TestCrossing"/> drags it
+        /// across at, without meeting anything: the column a body falls down at the foot of a drop at the end
+        /// of a span, or jumps up from at the foot of a climb (<see cref="CrossesAtEnds"/>). Lifted half a
+        /// step as <see cref="BodyCrosses(BspVisibility, float, float, float, float, float)"/> is, and refused
+        /// if it starts inside something.
+        /// </summary>
+        internal static bool BodyRises(BspVisibility vis, float x, float y, float low, float high)
+        {
+            const float Lift = NavConstants.StepHeight / 2f;
+            const float Half = NavConstants.HalfHumanWidth;
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(x, y, low + Lift),
+                new BspFile.Vector3(x, y, MathF.Max(high, low) + Lift),
+                new BspFile.Vector3(-Half, -Half, 0f),
+                new BspFile.Vector3(Half, Half, NavConstants.HumanCrouchHeight - Lift),
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
+
+            return !startSolid && (!hit || fraction >= 1f);
+        }
+
+        /// <summary>
         /// Whether a crouching body stands at one end of a crossing at the end of a span
         /// (<see cref="CrossesAtEnds"/>): <see cref="BodyFits"/>, from the height a body resting on the floor
         /// there comes to rest at rather than from the floor under its middle.
@@ -1029,6 +1110,14 @@ namespace Meshwright
         /// the floor under its middle, so that is the height it has to fit from.
         /// </summary>
         internal static bool BodyStands(BspVisibility vis, float x, float y, float ground)
+            => BodyFits(vis, x, y, Rest(vis, x, y, ground));
+
+        /// <summary>
+        /// The height a body resting on the floor at a point comes to rest at: the highest floor under any of
+        /// it up to a step above <paramref name="ground"/>, or <paramref name="ground"/> itself if the plate
+        /// lowered onto it starts inside something or finds nothing (<see cref="BodyStands"/>).
+        /// </summary>
+        private static float Rest(BspVisibility vis, float x, float y, float ground)
         {
             const float Half = NavConstants.HalfHumanWidth;
             const float Drop = NavConstants.StepHeight + 1f;
@@ -1040,7 +1129,7 @@ namespace Meshwright
                 BspVisibility.GroundMask, out float fraction, out _, out bool startSolid);
 
             float rest = !startSolid && hit ? ground + NavConstants.StepHeight - fraction * Drop : ground;
-            return BodyFits(vis, x, y, MathF.Max(rest, ground));
+            return MathF.Max(rest, ground);
         }
 
         /// <summary>Whether a position along an edge lies on an area's own extent along it.</summary>
@@ -1062,9 +1151,12 @@ namespace Meshwright
         /// third area the two both touch, or the floor it stands on; a ledge's corner over a drop, or a
         /// wall, is not. A probe that starts inside something finds no floor, so a wall the span ends
         /// against cannot pass for one.
+        ///
+        /// <paramref name="only"/>, 0 or 2, probes beside only the crossing's start or only its end: the
+        /// higher end of a drop or a climb, whose floor the body walks along at the corner.
         /// </summary>
         internal static bool OverhangSupported(BspVisibility vis, int direction, float outward,
-            float fromX, float fromY, float fromGround, float toX, float toY, float toGround)
+            float fromX, float fromY, float fromGround, float toX, float toY, float toGround, int only = -1)
         {
             bool alongX = direction is NavGeometry.North or NavGeometry.South;
             float low = MathF.Min(fromGround, toGround), high = MathF.Max(fromGround, toGround);
@@ -1074,6 +1166,9 @@ namespace Meshwright
             {
                 for (int k = 0; k <= 2; k++)
                 {
+                    if (only >= 0 && k != only)
+                        continue;
+
                     float x = fromX + (toX - fromX) * k / 2f, y = fromY + (toY - fromY) * k / 2f;
                     if (alongX) x += outward * past; else y += outward * past;
 
