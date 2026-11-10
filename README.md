@@ -278,8 +278,8 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,640 | 19,577 | 17,322 |
-| Connections | 11,446 | 14,182 | 91,538 | 81,467 |
+| Areas | 2,271 | 2,640 | 19,577 | 17,323 |
+| Connections | 11,446 | 14,182 | 91,538 | 81,461 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **49 (0.3%)** |
@@ -301,7 +301,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | Coverage of every reference area including stranded | 88.7% | 67.5% |
 | Areas on ground the reference does not have | 2.8% | 9.6% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 153 (0.9%) |
+| Areas no player spawn can reach | 3 (0.1%) | 155 (0.9%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -394,6 +394,15 @@ no link at all fell from 700 to 476, and on the two RP maps the refused middle c
 456 and from 3,561 to 486, and the areas no spawn can reach from 321 to 153 and from 584 to 413.
 Connections rise by 0.5% to 4.4%, routes and coverage hold, and unreachable areas fall on every map
 but gm_construct and gm_flatgrass, which do not change.
+
+The same "starts inside something, so reports no hit" flaw sat in the other body sweeps. A step
+between two samples, and the diagonal links and patch areas added at corners, could start inside a
+post and pass through it: a patch area was built inside a post on both RP maps and inside a wall on
+koth_viaduct, and links ran through pillars on cp_granary and cp_badlands. A crouching body could fit by starting half inside a
+crate. Those are refused now. A sample lying exactly on a wall face, which the sweep box also counts
+as inside, still steps away from the wall: across the twelve maps that was 235 of the 287 start-solid
+steps in the flood. Seven of the twelve meshes come out byte-identical; on the other five a few links
+and one or two areas go, a handful of areas lose their last link, and routes and coverage do not move.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that

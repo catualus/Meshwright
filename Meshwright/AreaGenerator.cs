@@ -1352,16 +1352,30 @@ namespace Meshwright
                 {
                     float bx = x + dx * Shift, by = y + dy * Shift;
 
-                    if (!vis.TryTraceHull(
-                            new BspFile.Vector3(bx, by, z + Lift),
-                            new BspFile.Vector3(bx, by, z + NavConstants.HumanCrouchHeight),
-                            new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, 0f),
-                            BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid))
-                    {
-                        return true;
-                    }
+                    bool hit = vis.TryTraceHull(
+                        new BspFile.Vector3(bx, by, z + Lift),
+                        new BspFile.Vector3(bx, by, z + NavConstants.HumanCrouchHeight),
+                        new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, 0f),
+                        BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
 
-                    if (!startSolid && fraction >= 1f)
+                    // Start-solid is refused whether or not the sweep reports a hit. A plate that
+                    // begins inside a brush and rises out of it enters nothing, so the sweep says "no
+                    // hit", and that used to be taken as a fit: a body half inside a wall or a crate
+                    // beside the sample passed as long as whatever it started in ended below the
+                    // crouching height. On the twelve benchmark maps that was 182 crouch samples, up to
+                    // 81 on one map and none on five - cp_dustbowl's row along the foot of a 48 unit
+                    // block under sloping terrain, with no room for a body anywhere in the cell, is the
+                    // typical one. None of the ones checked lay under an area of the reference meshes.
+                    //
+                    // Not relaxed for ground the body would stand on, though a plate lifted half a
+                    // step does start inside a steep enough brush ramp. Terrain has always been
+                    // refused here for exactly that: a plate overlapping a displacement reports a hit
+                    // at fraction zero, not a miss, so a crouch sample on a terrain slope never got
+                    // this pass. Lifting a start-solid plate to a full step and asking again was
+                    // measured: it kept about two thirds of them, brush ramps under gm_construct among
+                    // them, but also let in some 400 crouch samples on terrain slopes, 350 of them on
+                    // the two RP maps, that had always been refused.
+                    if (!startSolid && (!hit || fraction >= 1f))
                         return true;
                 }
 

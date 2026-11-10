@@ -2415,6 +2415,9 @@ namespace Meshwright
 
                 bool lineHit = vis.TryTraceSurface(a, b, BspVisibility.GenerationMask, out var linePoint, out _);
 
+                // This one compares where the two traces *enter* solid, so a start-solid box counts as
+                // no entry, as a line starting on a face does. The start point is already known to be
+                // open, so the box can only start solid by lying within its 0.01 of a face.
                 bool pointHit = vis.TryTraceHull(a, b, zero, zeroMax, BspVisibility.GenerationMask,
                     out float pointFraction, out _, out bool pointSolid);
 
@@ -2441,8 +2444,11 @@ namespace Meshwright
                 }
 
                 // And the real question: a player-sized body against the same segment.
+                // Blocked if it starts inside something, too: a body that begins in a brush and is
+                // swept out of it enters nothing and reports no hit, and only the start-solid flag
+                // says it was never in the clear.
                 bool bodyHit = vis.TryTraceHull(a, b, BspVisibility.NavTraceMins, BspVisibility.NavTraceMaxs,
-                    BspVisibility.GenerationMask, out _, out _, out _);
+                    BspVisibility.GenerationMask, out _, out _, out bool bodySolid) || bodySolid;
 
                 if (bodyHit && !lineHit) bodyBlockedLineClear++;
                 if (lineHit && !bodyHit) lineBlockedBodyClear++;
