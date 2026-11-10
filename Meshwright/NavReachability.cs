@@ -281,29 +281,11 @@ namespace Meshwright
                 return result;
             }
 
-            var reached = doomed;
-
-            nav.Areas.RemoveAll(a => reached.Contains(a.Id));
-
             // A ladder naming an area that has just gone is the same dangling reference the engine
-            // refuses to load, and NavIntegrity cannot repair it - it prunes an area's list of ladders,
-            // not a ladder's list of areas.
-            foreach (var ladder in nav.Ladders)
-            {
-                if (reached.Contains(ladder.BottomAreaId)) ladder.BottomAreaId = 0;
-                if (reached.Contains(ladder.TopForwardAreaId)) ladder.TopForwardAreaId = 0;
-                if (reached.Contains(ladder.TopLeftAreaId)) ladder.TopLeftAreaId = 0;
-                if (reached.Contains(ladder.TopRightAreaId)) ladder.TopRightAreaId = 0;
-                if (reached.Contains(ladder.TopBehindAreaId)) ladder.TopBehindAreaId = 0;
-            }
-
-            foreach (var area in nav.Areas)
-                foreach (var list in area.Connections)
-                    list.RemoveAll(reached.Contains);
-
-            result.Removed = reached.Count;
+            // refuses to load, so the ladder ends go with the connections - see NavIntegrity.RemoveAreas.
+            result.Removed = NavIntegrity.RemoveAreas(nav, doomed);
             result.Kept = nav.Areas.Count;
-            result.Stranded = analysis.Unreachable - reached.Count;
+            result.Stranded = analysis.Unreachable - result.Removed;
             return result;
         }
 
@@ -476,7 +458,7 @@ namespace Meshwright
         }
 
         /// <summary>The area a seed position stands in, or the nearest one if it stands in none.</summary>
-        private static NavArea? Nearest(NavFile nav, BspFile.Vector3 point)
+        internal static NavArea? Nearest(NavFile nav, BspFile.Vector3 point)
         {
             NavArea? best = null;
             float bestDistance = float.MaxValue;
