@@ -787,6 +787,32 @@ one process, old and new alternated, the city fell from about 275 to 184 seconds
 from 19.3 to 15.7. `gm_construct`, where the world stops most lines, gains little. The mesh is
 byte-identical on all twelve benchmark maps.
 
+What the corner sweep's lines still spent past the world tree went mostly on displacements: on
+`rp_downtown_tits_v25` the visibility pass asked the displacement test 200 million times, and 96% of
+those lines were blocked. Profiled, each query box-tested 36 tree nodes on the city, 54 on
+`cp_badlands` and 61 on `gm_construct` for three or four leaves, and the leaves' triangle tests were
+only a fifth of its time. Most of those walks found what the one before had found: on the city, the
+leaf that blocked a thread's previous line blocked the next one too 86% of the time, because the
+sweep traces its lines in runs between neighbouring areas, over the same hill. Each thread now
+remembers the last four leaves that blocked a line in each triangle tree and asks them first, each
+with its own box test and triangle test, exactly as the walk asks a leaf: a yes from one is a yes the
+walk would have given, and a no sends the line on to the walk. That settles 97% of the city's
+displacement queries, 77% of `cp_badlands`' and 74% of `gm_construct`'s. The walk that is left tests
+eight of the same tree's boxes at once rather than two, and stops about a third as often.
+
+| per displacement query | `rp_downtown_tits_v25` | `cp_badlands` | `gm_construct` |
+|---|---|---|---|
+| box tests | 36.0 to 2.2 | 53.8 to 3.0 | 61.1 to 3.2 |
+| eight-box tests | none to 0.37 | none to 3.05 | none to 3.47 |
+| leaves | 3.72 to 1.42 | 3.64 to 2.22 | 3.21 to 2.18 |
+
+Replayed one thread at a time from recorded passes, old walk and new alternated over the same
+queries, a displacement query takes 118 nanoseconds rather than 440 on the city, 308 rather than 714
+on `cp_badlands` and 293 rather than 746 on `gm_construct`. Whole visibility passes at 4 threads, run
+side by side with the old build on a busy machine, took 26-37 seconds on the city against 50-62,
+6.7-7.1 on `cp_badlands` against 7.4-8.5, and 7.2-7.6 on `gm_construct` against 8.6-9.8. The mesh
+is byte-identical on all twelve benchmark maps.
+
 Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
 gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
 the same three.
