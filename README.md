@@ -278,11 +278,11 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,640 | 19,577 | 17,323 |
-| Connections | 11,446 | 14,176 | 91,538 | 81,337 |
+| Areas | 2,271 | 2,631 | 19,577 | 17,315 |
+| Connections | 11,446 | 14,140 | 91,538 | 81,357 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **49 (0.3%)** |
+| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **48 (0.3%)** |
 | Areas over open air | 3 | **0** | 215 (1.1%) | **1** |
 
 On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,713 areas
@@ -297,17 +297,17 @@ and the areas the run's own reachability check cannot reach from any spawn.
 
 | | gm_construct | rp_downtown_tits_v25 |
 |---|---|---|
-| Coverage of the reference's ground a player can reach | **98.4%** | 67.4% |
-| Coverage of every reference area including stranded | 88.7% | 67.5% |
-| Areas on ground the reference does not have | 2.8% | 9.6% |
+| Coverage of the reference's ground a player can reach | **98.9%** | 67.5% |
+| Coverage of every reference area including stranded | 89.2% | 67.6% |
+| Areas on ground the reference does not have | 2.4% | 9.4% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 156 (0.9%) |
+| Areas no player spawn can reach | 3 (0.1%) | 142 (0.8%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
-drops the second row to 88.7%.
+drops the second row to 89.2%.
 
-67.4% on the large map is mostly the reference's doing. It looks like the output of an earlier
+67.5% on the large map is mostly the reference's doing. It looks like the output of an earlier
 Meshwright, whose flood walked through thin walls and terrain. Of the 6,135 reachable shipped areas
 the generated mesh does not cover, 5,211 are on real ground, and 4,301 of those are under water -
 most of them the sea and lake bed under the displacement islands in the south-east of the map.
@@ -336,10 +336,10 @@ pairs the reference itself can route.
 | pl_badwater | Valve | 99.8% |
 | cp_granary | Valve | **100.0%** |
 | koth_viaduct | Valve | **100.0%** |
-| pl_upward | Valve | 99.1% |
+| pl_upward | Valve | 99.7% |
 | cp_badlands | Valve | 99.8% |
 | ctf_turbine | Valve | **100.0%** |
-| Team Fortress 2, mean | | 99.7% |
+| Team Fortress 2, mean | | 99.8% |
 
 ctf_2fort and cp_dustbowl found 43.6% and 45.3% until clip brushes counted as ground. TF2 lays a
 clip ramp over its stairs and a clip slab over some sunken floors, and the mesh had treated those as
@@ -348,7 +348,7 @@ is switched on at the start - cp_dustbowl's stairs to the first stage's yard, pl
 the final pit - to be a floor, and, for TF2 only, player clip to be solid, as it is to TF2's bots.
 That last one also seals the map edges the flood used to walk out through: on koth_viaduct 83.5% of
 the generated areas were on ground Valve's mesh does not have, and now 27.8% are, and on cp_badlands
-69.2% now 25.2%. Coverage of the ground Valve's meshes can reach is 95.4% to 98.5% on every TF2 map.
+69.2% now 25.2%. Coverage of the ground Valve's meshes can reach is 95.9% to 98.9% on every TF2 map.
 
 Crouch areas follow the engine's own heights: room under 71 units is crouching room, under 55 is
 none, on TF2 as everywhere else. TF2's player is taller - 82 standing, 62 crouched - but Valve's
@@ -419,6 +419,35 @@ carries on, and about 2,000 lead to a spot no body stands in, such as a crate to
 505 left are removed: drops through the floor over the landing, crossings through a wall the clip
 exposed. A hull checker flags 84% of them, against 4% of the links kept, and where Valve's meshes cover
 both ends they leave 28 of 58 unjoined, against 22 of 4,990. Routes and coverage do not move.
+
+The clip also pulled areas back off floor that carries on. Its floor test takes the shortest of five
+probe lines, and the outermost line runs a tenth of the area's width in from the edge beside it, so where
+that edge overhung a ledge the line ran over the drop and the whole edge came back a step - usually
+before the edge that did overhang had been clipped, and once a pass where it overhung by more than a
+step. A line with no floor where it starts did the same, though pulling the edge back cannot help it.
+Judged by a crouching body fitting at the area's own height and, on the ten maps that have one, the
+reference covering it there, 859 passes removed a strip that was mostly such floor, and one of those
+lines decided 700 of them. Another 71 were terrain the floor search missed: it walks down in four-unit
+segments and a displacement counts only strictly inside one, so terrain lying on a boundary read as no
+floor at all, and on cp_badlands that took an area back 70 units over a slope Valve's mesh covers, a
+step a pass. Those lines now wait until the clip has stopped without them, and the search is tried
+again half a segment higher. Edges of kept areas pulled back 16 units or more over such floor fall
+from 1,211 to 303 across the twelve maps, and from 106 to 17 on the ten with a reference. Coverage rises
+by 0.4 to 0.7 points on five maps, pl_upward's routes from 99.1% to 99.7%, and the old links on reshaped
+areas that the builder's test now refuses fall from 10,491 to 9,187, the ones removed from 505 to 497.
+
+On the TF2 maps it set eight areas floating and stopped two, none of them because the clip left too
+much. Three were corner patches - the small squares built where two areas touch only at a corner -
+built without asking whether there was ground under them: two hung off a platform on koth_viaduct and
+one sat flat on a ramp on pl_upward. A patch is now built only over floor. Three were slivers kept as
+the only route between two areas. The clip cannot pull a sliver in closer than four units to its
+middle, so one eight or nine units wide keeps whatever overhang it has, and the spare test only looked
+for floor at the quarters. A spared sliver is now pulled back to its floor first, and not kept when half
+of it has none; refusing every sliver with any floor missing stranded 42 areas on rp_downtown_tits.
+Floating areas on the TF2 maps fall from 32 to 7 (26 before the clip fix), and on the roleplay maps
+from 48 and 49 to 4 each. Routes and coverage do not move. The one island added is a koth_viaduct area
+no body fits in, joined before only through the two hanging patches. What still floats sits over cracks
+a few units wide, which a body walks across.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that

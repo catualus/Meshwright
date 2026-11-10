@@ -185,6 +185,17 @@ namespace Meshwright
         public IReadOnlyList<Surface> Surfaces => surfaces;
 
 
+        /// <summary>
+        /// Terrain made of the given triangles, three vertices each, with no source displacements behind
+        /// it - for tests, which have no map to load one from.
+        /// </summary>
+        internal static BspDisplacements FromTriangles(BspFile.Vector3[] triangleVertices, int[] triangleContents)
+        {
+            var result = new BspDisplacements();
+            result.mesh.Build(triangleVertices, triangleContents);
+            return result;
+        }
+
         public static BspDisplacements Load(string path)
         {
             var result = new BspDisplacements();
