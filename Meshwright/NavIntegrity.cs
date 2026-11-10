@@ -214,6 +214,29 @@ namespace Meshwright
                 duplicateIds);
         }
 
+        /// <summary>
+        /// Clears every ladder end that names one of <paramref name="removed"/>, for a pass that has
+        /// just deleted those areas. Returns how many ends were cleared.
+        ///
+        /// The same repair the final prune makes, done at the moment of deletion instead of at the end
+        /// of the run, so nothing in between reads a ladder that ends on an area which is gone.
+        /// </summary>
+        public static int ForgetLadderEnds(NavFile nav, IReadOnlySet<uint> removed)
+        {
+            int cleared = 0;
+
+            foreach (var ladder in nav.Ladders)
+            {
+                if (removed.Contains(ladder.BottomAreaId)) { ladder.BottomAreaId = 0; cleared++; }
+                if (removed.Contains(ladder.TopForwardAreaId)) { ladder.TopForwardAreaId = 0; cleared++; }
+                if (removed.Contains(ladder.TopLeftAreaId)) { ladder.TopLeftAreaId = 0; cleared++; }
+                if (removed.Contains(ladder.TopRightAreaId)) { ladder.TopRightAreaId = 0; cleared++; }
+                if (removed.Contains(ladder.TopBehindAreaId)) { ladder.TopBehindAreaId = 0; cleared++; }
+            }
+
+            return cleared;
+        }
+
         private static int ClearIfMissing(HashSet<uint> areas, NavLadder ladder,
             Func<NavLadder, uint> read, Action<NavLadder, uint> write)
         {

@@ -52,6 +52,23 @@ namespace Meshwright.Tests
         }
 
         [Fact]
+        public void LaddersAreDeclaredAfterEveryPassThatDeletesAreas()
+        {
+            // Ladders are wired once the jump-area stitch (part of connecting) and the clip have
+            // deleted what they delete, so no ladder end is left on an area that is gone.
+            var phases = Phases(Everything());
+
+            int connecting = System.Array.IndexOf(phases, NavPipeline.PhaseConnections);
+            int clipping = System.Array.IndexOf(phases, NavPipeline.PhaseClipping);
+            int ladders = System.Array.IndexOf(phases, NavPipeline.PhaseLadders);
+            int reachability = System.Array.IndexOf(phases, NavPipeline.PhaseReachability);
+
+            Assert.True(connecting < ladders, "connections must be declared before ladders");
+            Assert.True(clipping < ladders, "clipping must be declared before ladders");
+            Assert.True(ladders < reachability, "ladders must be declared before reachability, which reads them");
+        }
+
+        [Fact]
         public void VisibilityAndItsCompressionComeLast()
         {
             var phases = Phases(Everything());

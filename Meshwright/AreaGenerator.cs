@@ -139,7 +139,7 @@ namespace Meshwright
             // the passes below have run there is no way to tell what was already present.
             int existingAreas = nav.Areas.Count;
 
-            if (!TryGetWorldBounds(bsp, out var mins, out var maxs))
+            if (!TryGetLattice(bsp, nav.Areas, out var mins, out var maxs))
             {
                 result.Notes.Add("BSP has no world model bounds; cannot sample");
                 return result;
@@ -154,17 +154,37 @@ namespace Meshwright
             // goes and where the parallelism belongs.
             var visited = new System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), byte>();
             var accepted = new System.Collections.Concurrent.ConcurrentBag<Cell>();
+            int uncovered = 0;
 
             var frontier = new List<Cell>();
-            foreach (var seed in Seeds(nav, bsp, world, result))
+            foreach (var seed in Seeds(nav, bsp, vis, world, result))
             {
-                if (visited.TryAdd(Key(seed), 0))
-                    frontier.Add(seed);
+                if (!visited.TryAdd(Key(seed.Cell), 0))
+                    continue;
+
+                frontier.Add(seed.Cell);
+
+                // A seed set down on its column's floor is a cell like any other, and has to be accepted
+                // as one. Only neighbours used to be: a floor cell was accepted when some other cell's
+                // expansion first reached it, and a seed's own column was already marked visited by then
+                // - under the key of the seed's raw height, which for a spawn standing on its floor is
+                // the floor's key too. So the 25 unit square under every spawn, ladder dismount and lift
+                // stop got no node and no area: on gm_construct not one of 33 spawns had an area under
+                // it, against all 33 in the engine's own mesh.
+                if (seed.OnFloor)
+                {
+                    var at = world.PositionOf(seed.Cell.Gx, seed.Cell.Gy, seed.Cell.Z);
+
+                    if (index.FindAt(at.X, at.Y, at.Z, CoveredTolerance) < 0)
+                    {
+                        accepted.Add(seed.Cell);
+                        uncovered++;
+                    }
+                }
             }
 
             result.Seeds = frontier.Count;
             int visitedCount = 0;
-            int uncovered = 0;
 
             while (frontier.Count > 0 && visited.Count < MaxVisited)
             {
@@ -183,10 +203,9 @@ namespace Meshwright
 
                         // Cells already represented still propagate - the flood has to be able to cross
                         // existing mesh to reach the far side of it - but they contribute no new area.
-                        float x = mins.X + neighbour.Gx * StepSize;
-                        float y = mins.Y + neighbour.Gy * StepSize;
+                        var at = world.PositionOf(neighbour.Gx, neighbour.Gy, neighbour.Z);
 
-                        if (index.FindAt(x, y, neighbour.Z, CoveredTolerance) < 0)
+                        if (index.FindAt(at.X, at.Y, neighbour.Z, CoveredTolerance) < 0)
                         {
                             accepted.Add(neighbour);
                             Interlocked.Increment(ref uncovered);
@@ -507,24 +526,51 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// A place the flood starts from, and whether it was set down on a standable floor of its own
+        /// column - only then is the cell itself ground the mesh may cover.
+        /// </summary>
+        private readonly record struct Seed(Cell Cell, bool OnFloor);
+
+        /// <summary>
+        /// How far above a spawn its floor is looked for: the height of a crouched player's hull, which
+        /// is where the engine's <c>FindGroundForNode</c> starts the trace it seeds from
+        /// (<c>VEC_DUCK_HULL_MAX.z</c>, 36 in Garry's Mod and Half-Life 2). Down, it looks as far as a
+        /// survivable drop, as the engine does.
+        /// </summary>
+        private const float SpawnFloorAbove = 36f;
+
+        /// <summary>
         /// Where the flood starts.
         ///
         /// The existing mesh is included so the fill can spread off its edges and travel across it.
-        /// Ladder tops and lift stops are the interesting ones: they are precisely the routes the
-        /// engine's own generator will not take, so the ground beyond them is what went missing.
+        /// Ladders and lift stops are the interesting ones: they are precisely the routes the engine's
+        /// own generator will not take, so the ground beyond them is what went missing.
+        ///
+        /// Every seed but the existing areas is set down on the floor of its own column, the way the
+        /// engine drops each spawn onto the ground before seeding from it. A seed is a point - a spawn's
+        /// origin, the top of a ladder brush, the height a platform stops at - and the ground there sits
+        /// at some other height, so seeding the raw point gave the flood a cell that was not ground, and
+        /// (keyed to the same eight units as the floor beside it) one that hid the floor from being
+        /// accepted at all. Existing areas are left as they are: their surface already is the ground,
+        /// and the mesh already covers it.
         /// </summary>
-        private static IEnumerable<Cell> Seeds(NavFile nav, BspFile bsp, World world, Result result)
+        private static IEnumerable<Seed> Seeds(NavFile nav, BspFile bsp, BspVisibility vis, World world,
+            Result result)
         {
             // Player spawns, which is what the engine itself floods from. These are the only seeds that
             // do not presuppose a mesh, so they are what lets this run against an empty one.
-            int spawns = 0;
+            int spawns = 0, spawnsOnFloor = 0;
             foreach (var origin in SpawnPositions(bsp))
             {
-                if (world.TryCell(origin.X, origin.Y, origin.Z, out var spawn))
-                {
-                    spawns++;
-                    yield return spawn;
-                }
+                if (!world.TryCell(origin.X, origin.Y, origin.Z, out var spawn))
+                    continue;
+
+                var seed = world.OntoFloor(spawn, SpawnFloorAbove, NavConstants.DeathDrop);
+
+                spawns++;
+                if (seed.OnFloor) spawnsOnFloor++;
+
+                yield return seed;
             }
 
             foreach (var area in nav.Areas)
@@ -534,35 +580,82 @@ namespace Meshwright
                 float cy = (b.MinY + b.MaxY) / 2f;
 
                 if (world.TryCell(cx, cy, NavGeometry.SurfaceZ(area, cx, cy), out var cell))
-                    yield return cell;
+                    yield return new Seed(cell, OnFloor: false);
             }
 
-            int ladders = 0;
-            foreach (var brush in LadderFinder.Find(bsp))
+            int ladderTops = 0, ladderBases = 0;
+            foreach (var ladder in LadderFinder.Find(bsp, vis))
             {
-                // just off the climbing face at the top, which is where a climber steps off
+                // Just off the climbing face at the top, which is where a climber steps off, and on the
+                // landing there - which sits anywhere from a step above the top of the brush to a
+                // player's height below it, the same window LadderBuilder looks for the top area in.
+                // Where no floor in that window can be reached from the ladder, the raw point is seeded
+                // as it always was, so the flood still has whatever it reached from there before.
                 foreach (var (dx, dy) in Offsets(StepSize))
                 {
-                    if (world.TryCell(brush.Top.X + dx, brush.Top.Y + dy, brush.Top.Z, out var cell))
-                    {
-                        ladders++;
-                        yield return cell;
-                    }
+                    if (!world.TryCell(ladder.Top.X + dx, ladder.Top.Y + dy, ladder.Top.Z, out var cell))
+                        continue;
+
+                    var seed = world.OntoFloor(cell, LadderBuilder.TopLandingAbove, LadderBuilder.TopLandingBelow);
+
+                    ladderTops++;
+                    yield return seed.OnFloor && ReachableFromLadder(vis, world, ladder, seed.Cell)
+                        ? seed
+                        : new Seed(cell, OnFloor: false);
+                }
+
+                // And at the foot. A ladder is a route both ways, and the engine's flood cannot take it
+                // down any more than up: gm_construct's pit is reached only by its ladder, so a run seeded
+                // from the top alone never found the floor the ladder stands on, and the ladder was
+                // skipped for having no area at its base. Only a floor the climber can step onto from the
+                // ladder is seeded, in the window LadderBuilder matches the base in - nothing raw, since
+                // the floor is the one thing worth starting from here.
+                foreach (var (dx, dy) in Offsets(StepSize))
+                {
+                    if (!world.TryCell(ladder.Bottom.X + dx, ladder.Bottom.Y + dy, ladder.Bottom.Z, out var cell))
+                        continue;
+
+                    var seed = world.OntoFloor(cell,
+                        LadderBuilder.BottomHeightTolerance, LadderBuilder.BottomHeightTolerance);
+
+                    if (!seed.OnFloor || !ReachableFromLadder(vis, world, ladder, seed.Cell))
+                        continue;
+
+                    ladderBases++;
+                    yield return seed;
                 }
             }
 
             int lifts = 0;
-            foreach (var stop in ElevatorConnector.PlatformStops(bsp))
+            foreach (var stop in ElevatorConnector.PlatformStops(bsp, vis))
             {
-                if (world.TryCell(stop.X, stop.Y, stop.Z, out var cell))
-                {
-                    lifts++;
-                    yield return cell;
-                }
+                if (!world.TryCell(stop.Position.X, stop.Position.Y, stop.Position.Z, out var cell))
+                    continue;
+
+                // Down as far as the platform's own underside reaches, plus the usual slack: at a stop
+                // where the platform is not part of the sampled geometry, what a rider stands on is
+                // whatever the platform comes to rest on.
+                lifts++;
+                yield return world.OntoFloor(cell, NavConstants.StepHeight, stop.Depth + ElevatorConnector.StopTolerance);
             }
 
-            result.Notes.Add($"seeded from {spawns} player spawns, {nav.Areas.Count:N0} existing areas, " +
-                             $"{ladders} ladder tops, {lifts} lift stops");
+            result.Notes.Add($"seeded from {spawns} player spawns ({spawnsOnFloor} on a floor), " +
+                             $"{nav.Areas.Count:N0} existing areas, {ladderTops} ladder tops, " +
+                             $"{ladderBases} ladder bases, {lifts} lift stops");
+        }
+
+        /// <summary>
+        /// Whether a climber on the ladder could step across to a seed's floor, rather than the floor
+        /// lying on the far side of the wall the ladder is fixed to - the same test LadderBuilder puts
+        /// every top and bottom area through. Seeding the room behind the wall would flood a place
+        /// nothing can walk into.
+        /// </summary>
+        private static bool ReachableFromLadder(BspVisibility vis, World world, LadderFinder.LadderBrush ladder,
+            Cell floor)
+        {
+            var at = world.PositionOf(floor.Gx, floor.Gy, floor.Z);
+
+            return LadderBuilder.IsReachable(vis, LadderBuilder.StepOff(ladder, at.X, at.Y, floor.Z), at);
         }
 
         /// <summary>
@@ -764,18 +857,100 @@ namespace Meshwright
             return false;
         }
 
-        private static bool TryGetWorldBounds(BspFile bsp, out BspFile.Vector3 mins, out BspFile.Vector3 maxs)
+        /// <summary>
+        /// Where the sampling grid starts, and how far the world goes.
+        ///
+        /// On a run that finishes an existing mesh, the grid is lined up with that mesh. Areas are built
+        /// half a step either side of their nodes, so where the nodes sit decides where every generated
+        /// edge falls, and it used to be the world's minimum that decided it. The engine's own meshes
+        /// have their edges on multiples of 25 - 98.4% of gm_construct's corners and every one of
+        /// gm_flatgrass's - and the world's minimum is wherever the map happens to end: 20 and 14 units
+        /// past a multiple of 25 on ctf_2fort, 2 on rp_downtown_tits. Every generated area along a seam
+        /// with the existing mesh then overlapped its neighbour by more than ConnectionBuilder accepts
+        /// as touching, so the new ground was never linked to the old: 323 of 338 such seams on
+        /// ctf_2fort, 1,387 of 1,586 on cp_dustbowl. So the grid takes the phase most of the existing
+        /// mesh's edges share - a multiple of 25 for the engine's, whatever an earlier run of this used
+        /// for its own - and generated edges land on them.
+        ///
+        /// A run from scratch keeps the world's minimum. Lining it up with the engine's grid there as
+        /// well was tried and measured, and it moved the whole sample grid for nothing a seam could gain:
+        /// on ctf_2fort it put a column of samples on a bevelled threshold across the spawn room's exit,
+        /// which is too steep to stand on, and the flood never left the spawn - 40 areas instead of
+        /// 1,014. Which phase meets such a strip is luck either way, and the grid fresh runs have always
+        /// used is the one every measurement of them was taken on.
+        /// </summary>
+        internal static bool TryGetLattice(BspFile bsp, IReadOnlyList<NavArea> existing,
+            out BspFile.Vector3 origin, out BspFile.Vector3 maxs)
         {
-            mins = default;
+            origin = default;
             maxs = default;
 
             if (bsp.BrushModelBounds.Length == 0)
                 return false;
 
             var world = bsp.BrushModelBounds[0];
-            mins = world.Mins;
             maxs = world.Maxs;
-            return maxs.X > mins.X && maxs.Y > mins.Y && maxs.Z > mins.Z;
+
+            if (!(maxs.X > world.Mins.X && maxs.Y > world.Mins.Y && maxs.Z > world.Mins.Z))
+                return false;
+
+            origin = world.Mins;
+
+            if (EdgePhase(existing, x: true) is float phaseX && EdgePhase(existing, x: false) is float phaseY)
+                origin = new BspFile.Vector3(LatticeStart(world.Mins.X, phaseX), LatticeStart(world.Mins.Y, phaseY), world.Mins.Z);
+
+            return true;
+        }
+
+        /// <summary>
+        /// The first node position at or below <paramref name="min"/> that puts the edges of the areas
+        /// built around nodes - half a step either side - on <paramref name="edgePhase"/> plus a multiple
+        /// of the step. Less than one step outside the world, where its column simply finds no floor;
+        /// the grid's other end still reaches the maximum.
+        /// </summary>
+        internal static float LatticeStart(float min, float edgePhase)
+        {
+            float nodePhase = edgePhase + StepSize / 2f;
+            return MathF.Floor((min - nodePhase) / StepSize) * StepSize + nodePhase;
+        }
+
+        /// <summary>
+        /// Where along one axis, modulo a step, most of a mesh's area edges sit - or null for no mesh.
+        /// Counted in quarter units, ties going to the smaller phase, so the answer is the same however
+        /// the areas are ordered.
+        /// </summary>
+        internal static float? EdgePhase(IReadOnlyList<NavArea> areas, bool x)
+        {
+            if (areas.Count == 0)
+                return null;
+
+            const int Buckets = (int)(StepSize * 4);
+            var counts = new int[Buckets];
+
+            void Count(float edge)
+            {
+                float phase = edge % StepSize;
+                if (phase < 0) phase += StepSize;
+
+                counts[(int)MathF.Round(phase * 4) % Buckets]++;
+            }
+
+            foreach (var area in areas)
+            {
+                var b = NavGeometry.GetBounds(area);
+
+                Count(x ? b.MinX : b.MinY);
+                Count(x ? b.MaxX : b.MaxY);
+            }
+
+            int best = 0;
+            for (int i = 1; i < Buckets; i++)
+            {
+                if (counts[i] > counts[best])
+                    best = i;
+            }
+
+            return best / 4f;
         }
 
         /// <summary>
@@ -806,6 +981,38 @@ namespace Meshwright
             /// <summary>The world position of a sampled cell.</summary>
             public BspFile.Vector3 PositionOf(int gx, int gy, float z)
                 => new(mins.X + gx * StepSize, mins.Y + gy * StepSize, z);
+
+            /// <summary>
+            /// A seed moved onto the floor of its own column: the first floor met coming down from
+            /// <paramref name="above"/> over it, no further than <paramref name="below"/> under it.
+            ///
+            /// The first floor or none, rather than the first standable one. A floor that cannot be
+            /// stood on is still what the seed would land on, and looking past it would set the seed
+            /// down in whatever is underneath - the room below a steep roof. When there is no floor to
+            /// land on, the seed comes back as it was, at its raw height, which is how every seed was
+            /// used before this existed.
+            /// </summary>
+            public Seed OntoFloor(Cell seed, float above, float below)
+            {
+                foreach (var surface in FloorsIn(seed.Gx, seed.Gy))
+                {
+                    float z = surface.Position.Z;
+
+                    // Top down, so everything above the window comes first and everything after the
+                    // first floor below it can be skipped.
+                    if (z > seed.Z + above)
+                        continue;
+
+                    if (z < seed.Z - below)
+                        break;
+
+                    return IsStandable(seed.Gx, seed.Gy, z)
+                        ? new Seed(seed with { Z = z }, OnFloor: true)
+                        : new Seed(seed, OnFloor: false);
+                }
+
+                return new Seed(seed, OnFloor: false);
+            }
 
             /// <summary>
             /// Whether a walker could get from one sampled cell to a floor in the column beside it,
@@ -1126,7 +1333,7 @@ namespace Meshwright
         {
             var report = new ReachReport();
 
-            if (!TryGetWorldBounds(bsp, out var mins, out var maxs))
+            if (!TryGetLattice(bsp, [], out var mins, out var maxs))
             {
                 report.Notes.Add("BSP has no world model bounds");
                 return report;

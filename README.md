@@ -260,71 +260,106 @@ Run `meshwright` with no arguments for the full list.
 
 ## Results
 
-> **These figures predate the September 2026 sampling fix and need remeasuring.** Since they were taken,
-> the area flood sweeps a body between samples, so it no longer walks through thin walls into sealed
-> space. Ground on `nodraw` faces is no longer built on, and drop connections into an area lying
-> underneath another are refused. All three change area counts, coverage and unreachable totals, and
-> the new figures have not been measured yet.
+Measured in November 2026. Every mesh here was generated from scratch (`-generateareas -scratch`)
+with the passes Compile Pal runs by default - areas, ladders, movement, hiding spots, sniper grading,
+encounter spots and visibility - at `-threads 8` on an 8-core Ryzen 7 6800H (16 threads), and scored
+against a mesh made some other way for the same map.
 
-Two maps, both public, both scored against a mesh the game generated for the same map. Machine is an
-8-core Ryzen 7 6800H, 16 threads.
-
-`gm_construct` ships with Garry's Mod. `rp_downtown_tits_v2` is a large roleplay map, 19,275 areas in
-the engine's own mesh, and is the harder case by some distance.
+`gm_construct` ships with Garry's Mod, and its reference is the mesh the game's own `nav_generate`
+makes. `rp_downtown_tits_v25` is a large roleplay map; its reference is the `.nav` that ships with it,
+19,577 areas, which is not a clean engine mesh - 13.9% of its areas float above the floor. The eight
+Team Fortress 2 maps further down are scored against the meshes Valve ships with them.
 
 ### Where the mesh sits
 
 The measure that shows up first in game is whether an area is on the ground. `meshwright fit` traces
 down from 25 points on every area and reports the gap.
 
-| | gm_construct | | rp_downtown_tits_v2 | |
+| | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
-| | engine | Meshwright | engine | Meshwright |
-| Areas | 2,271 | 2,753 | 19,275 | 22,963 |
-| Connections | 11,446 | 14,659 | 85,083 | 104,216 |
-| Height error, mean | 1.0 | 1.0 | 2.9 | **0.6** |
-| Height error, median | 0.3 | **0.2** | 0.3 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 924 (4.8%) | **18 (0.1%)** |
-| Areas over open air | 3 | **0** | 19 | **1** |
+| | engine | Meshwright | shipped | Meshwright |
+| Areas | 2,271 | 2,630 | 19,577 | 16,933 |
+| Connections | 11,446 | 13,984 | 91,538 | 75,685 |
+| Height error, mean | 1.0 | 1.0 | 10.3 | **0.7** |
+| Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
+| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **45 (0.3%)** |
+| Areas over open air | 3 | **0** | 215 (1.1%) | **1** |
 
-On gm_construct the two are level. On the large map they are not: the engine leaves 924 areas above
-the floor and 19 over nothing.
+On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,713 areas
+above the floor and 215 over nothing.
 
 ### What it covers
 
-| | gm_construct | rp_downtown_tits_v2 |
+`meshwright compare-areas` checks every area of the reference against the generated mesh, and
+`-reachable <map.bsp>` leaves out the reference ground its own connections cannot reach from a spawn.
+The spawn and reachability rows count player spawns with a generated area within 80 units under them,
+and the areas the run's own reachability check cannot reach from any spawn.
+
+| | gm_construct | rp_downtown_tits_v25 |
 |---|---|---|
-| Coverage of the engine's ground a player can reach | **98.0%** | **90.1%** |
-| Coverage of every engine area including stranded | 88.4% | 88.6% |
-| Areas on ground the engine's mesh does not have | 5.3% | 40.0% |
+| Coverage of the reference's ground a player can reach | **98.1%** | 67.3% |
+| Coverage of every reference area including stranded | 88.5% | 66.9% |
+| Areas on ground the reference does not have | 2.7% | 9.2% |
+| Player spawns with an area under them | **33 of 33** | 56 of 96 |
+| Areas no player spawn can reach | 3 (0.1%) | 379 (2.2%) |
 
-Score against reachable ground rather than against every area, because an engine mesh contains ground
-nothing can path to. gm_construct's own mesh strands 224 of its 2,271 areas that its own connection
-graph cannot reach. Counting those as misses is what drops the second row to 88.4%.
-`compare-areas -reachable <map.bsp>` does the filtering.
+Score against reachable ground rather than against every area, because a reference mesh contains
+ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
+drops the second row to 88.5%.
 
-90.1% on the large map is the weakest result here. Most of the missing ground is ground the sampling
-flood never reached; the rest was judged unstandable, had no floor found in its column, or was pulled
-back out of geometry by the clip. `build-areas -reference <known-good.nav>` breaks the misses down by
-cause.
+67.3% on the large map is the weakest result here, and only a small part of it is the reference's
+fault: of the 6,476 shipped areas the generated mesh does not cover, 950 sit more than 48 units over
+the floor or have no floor under them, and 5,526 are on real ground. `build-areas -reference
+<known-good.nav>` breaks the misses down by cause.
+
+The large map's 40 spawns without an area stand 105 units above the floor with nothing under them. The
+ground below them is meshed, and the shipped mesh has an area under the same 56. gm_construct's 3
+unreachable areas are the pit under its ladder: the ladder has its foot, but the passage at its top is
+50 units high, lower than the 55 Meshwright needs to call it crouching room, so the top has no area.
+
+How often a bot gets where it is going is the other half. 2,000 pairs of points are picked at random,
+weighted by area, on the reference's ground that a spawn can reach and that lies on a real floor, and
+a pair counts when the generated mesh finds a path between the areas under the two points, out of the
+pairs the reference itself can route.
+
+| | Reference | Routes found |
+|---|---|---|
+| gm_construct | engine | **99.8%** |
+| ctf_2fort | Valve | 43.6% |
+| cp_dustbowl | Valve | 45.3% |
+| pl_badwater | Valve | 97.4% |
+| cp_granary | Valve | **100.0%** |
+| koth_viaduct | Valve | **100.0%** |
+| pl_upward | Valve | 98.1% |
+| cp_badlands | Valve | 99.9% |
+| ctf_turbine | Valve | **100.0%** |
+| Team Fortress 2, mean | | 85.5% |
+
+The two weak maps fail differently. On ctf_2fort 775 of the 1,128 failed pairs have both ends joined
+in one direction only - a drop the mesh has without the way back up. On cp_dustbowl 606 have their
+ends in separate parts of the mesh and 472 have an end on ground the mesh does not cover.
+
+Finishing an existing mesh (`-generateareas` without `-scratch`) lines the new areas up with the old
+ones, so the seams connect. Run over Valve's own meshes, which then only need their gaps filled, the
+generated areas overlapping an old one too far to link went from 431 to none on ctf_2fort and from
+1,833 to 6 on cp_dustbowl, and the islands left cut off from the rest of the finished mesh from 71 to
+5 and from 264 to 44.
 
 ### Speed
 
-`rp_downtown_tits_v2`, both tools running the same passes: areas, movement, ladders, hiding spots,
-sniper grading, encounter spots and visibility.
+`rp_downtown_tits_v25` with the passes above, against the engine on `rp_downtown_tits_v2`, the
+previous version of the map, with the same passes:
 
 | | time |
 |---|---|
-| `nav_generate`, one core, game blocked | about 80 minutes |
-| Meshwright, 16 threads | **255 seconds** |
+| `nav_generate`, one core, game blocked (`rp_downtown_tits_v2`) | about 80 minutes |
+| Meshwright, 8 threads | **161 seconds** |
 
-`gm_construct`, the same passes, takes 8.6 seconds.
+`gm_construct`, the same passes, takes 12 seconds.
 
-Runs are not yet bit-for-bit reproducible across different thread counts. On
-`rp_downtown_tits_v2` the same build produces 25,382 areas at some thread counts and 25,379 at
-others, a difference of one sampled cell out of 562,905, and which counts disagree is not itself
-stable. Repeat runs at a fixed thread count do agree. This is a
-known defect rather than a property being claimed.
+Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
+gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
+the same three.
 
 A timing comparison is worthless unless it says what `nav_quicksave` was set to. It defaults to 1, and
 both `ComputeSniperSpots` and `ComputeSpotEncounters` return immediately when it is, so a stock
@@ -347,15 +382,6 @@ directory, `-content` is the fix.
 A missing hull is left missing rather than replaced with the model's bounding box. Substituting a box
 measured worse: the models that lack a `.phy` are typically bushes, tree cards and skybox props, and a
 box around those deletes the ground beside them.
-
-**Ground is not built on `nodraw`.** A face the renderer skips is treated as solid but not as
-somewhere to stand, which is stricter than the engine. `nav_generate` builds on nodraw as readily as
-on brick and gets away with it, because its flood starts at a player spawn and has no way into the
-places nodraw floors are - mappers use it exactly where nothing will be seen, which is mostly where
-nothing can stand. The sampler here reaches further, so it needs the guard explicitly. The cost falls
-where a nodraw floor is visibly covered by something that could not be resolved, an unfound prop model
-above all; `meshwright props <bsp>` reports that case and `meshwright floors <bsp> x y` shows which
-surfaces in a column are nodraw.
 
 **Generated meshes are more fragmented than the engine's.** Props are solid here, so an area cannot
 grow across one and ends at it instead, and slivers too narrow to walk are discarded. The mesh is
