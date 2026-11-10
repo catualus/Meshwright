@@ -30,6 +30,9 @@ namespace Meshwright
     /// <item>Stitching immediately after connecting, because the stitch needs to know what each jump
     /// area joined, which only the connection pass knows.</item>
     /// <item>Everything that reads an area's final shape - stairs, lifts, corners - after clipping.</item>
+    /// <item>Pockets - areas cut off from everything that no body fits in - removed after the corner
+    /// patcher and the shortcut fixup, the last passes that change a link, so a pocket is judged on the
+    /// graph the reachability check floods.</item>
     /// <item>The reachability prune after every pass that can add a connection, and before the two
     /// that are priced per area - pruning earlier strands areas the corner patcher was about to join,
     /// pruning later spends the most expensive work in the pipeline on areas being deleted.</item>
@@ -162,6 +165,9 @@ namespace Meshwright
             public ElevatorConnector.Result? Elevators;
             public CornerPatcher.Result? Corners;
             public AreaConnectionFixer.Result? Fixup;
+
+            /// <summary>What <see cref="PocketRemover"/> removed after the fixup.</summary>
+            public PocketRemover.Result? Pockets;
             public NavReachability.PruneResult? Pruned;
             public HidingSpotFinder.Result? HidingSpots;
             public SniperSpotClassifier.Result? SniperSpots;
@@ -475,6 +481,14 @@ namespace Meshwright
 
             if (options.Movement && !result.Resumed)
                 RunPostClipMovement(nav, vis, bsp, result, progress, log);
+
+            NavConcurrency.ThrowIfCancelled();
+
+            // After the corner patcher and the shortcut fixup, the last passes that change a link, so the
+            // graph it reads is the one the reachability check floods. Only alongside generation, and
+            // only over what this run generated: see PocketRemover.
+            if (options.Movement && options.GenerateAreas && !result.Resumed)
+                RunPockets(nav, vis, bsp, firstGeneratedId, result, log);
 
             NavConcurrency.ThrowIfCancelled();
 
@@ -796,6 +810,26 @@ namespace Meshwright
 
             if (fixup.ShortcutsRemoved > 0)
                 log($"Fixup: {fixup.ShortcutsRemoved:N0} redundant shortcuts removed");
+        }
+
+        /// <summary>
+        /// Removes the generated areas nothing links to that no body fits in - see
+        /// <see cref="PocketRemover"/> - and says how many cut-off areas it kept because one does.
+        /// </summary>
+        private static void RunPockets(NavFile nav, BspVisibility vis, BspFile bsp, uint firstGeneratedId,
+            Result result, Action<string> log)
+        {
+            var seeds = PocketRemover.SeedPoints(bsp, vis);
+            var spawns = AreaGenerator.SpawnPositions(bsp).ToList();
+            var pockets = PocketRemover.Remove(nav, vis, firstGeneratedId, spawns, seeds);
+            result.Pockets = pockets;
+
+            if (pockets.Removed == 0 && pockets.Roomy == 0)
+                return;
+
+            log($"Pockets: {pockets.Removed:N0} areas removed in {pockets.Pockets:N0} cut-off groups no body " +
+                $"fits in; {pockets.Roomy:N0} cut off with room for a body kept" +
+                (pockets.Seeded > 0 ? $", {pockets.Seeded:N0} kept as seeded" : ""));
         }
 
         /// <summary>
