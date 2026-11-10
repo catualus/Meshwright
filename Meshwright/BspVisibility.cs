@@ -689,17 +689,29 @@ namespace Meshwright
             if (Blocked(0, a, b, mask, a, b, ignoreContents))
                 return false;
 
-            // No return here when there are no brush entities to test. There used to be one, and it
-            // skipped the displacement and prop tests below with it: on a map whose brush entities are
-            // all non-blocking, every line through terrain or a prop read as clear, and the clipper then
-            // deleted most of the mesh (koth_viaduct kept 762 of 6,270 areas).
+            return !BlockedPastWorld(a, b, mask, ignoreContents);
+        }
+
+        /// <summary>
+        /// The half of <see cref="IsLineClear(BspFile.Vector3, BspFile.Vector3, int, int)"/> after the
+        /// world tree has let the segment through: brush entities, displacements, props. Split out so the
+        /// floor walk's column test (<see cref="FirstOpenStep(ReadOnlySpan{float}, float, float, int)"/>),
+        /// which answers the world tree for a whole run of points at once, asks the rest exactly as a
+        /// point test does.
+        /// </summary>
+        private bool BlockedPastWorld(BspFile.Vector3 a, BspFile.Vector3 b, int mask, int ignoreContents)
+        {
+            // No early return here when there are no brush entities to test. There used to be one, and
+            // it skipped the displacement and prop tests below with it: on a map whose brush entities
+            // are all non-blocking, every line through terrain or a prop read as clear, and the clipper
+            // then deleted most of the mesh (koth_viaduct kept 762 of 6,270 areas).
             var models = ModelsFor(mask);
             if (models is not null && models.BlockingModelCount > 0 && BlockedByModels(models, a, b, mask, ignoreContents))
-                return false;
+                return true;
 
-            if (displacements is not null && displacements.Blocks(a, b, mask)) return false;
+            if (displacements is not null && displacements.Blocks(a, b, mask)) return true;
 
-            return staticProps is null || !staticProps.Blocks(a, b, mask);
+            return staticProps is not null && staticProps.Blocks(a, b, mask);
         }
 
         /// <summary>Whether any of <paramref name="models"/> blocks the segment.</summary>
@@ -1374,11 +1386,15 @@ namespace Meshwright
         /// the caller's slots. gm_construct has 118 columns that fill all sixteen. The trace still
         /// runs, and the walk still carries on below what it found, so the floors after it are the
         /// ones they always were.
+        ///
+        /// The descent through solid is defined as stepping <see cref="SolidStep"/> at a time and
+        /// asking <see cref="IsPointSolid"/> at each step, and the floors found depend on exactly where
+        /// that stops: the next trace starts there, so a gap thinner than a step that the stepping
+        /// skips over has to stay skipped. It is no longer paid for that way, though; see
+        /// <see cref="StepOutOfSolid"/>, which gives the same answer for a fraction of the work.
         /// </summary>
         public int EnumerateFloors(float x, float y, float topZ, float bottomZ, Span<FloorSample> into)
         {
-            const float SolidStep = 8f;
-
             int count = 0;
             float cursor = topZ;
             bool buried = IsPointSolid(x, y, cursor, GroundMask);
@@ -1401,12 +1417,209 @@ namespace Meshwright
                 // Descend through whatever was just landed on. Stepping a fixed amount below the face
                 // is not enough on its own - a floor slab is usually thicker than any fixed step worth
                 // taking - so keep going while still inside it.
-                cursor = point.Z - 0.25f;
-                while (cursor > bottomZ && IsPointSolid(x, y, cursor, GroundMask))
-                    cursor -= SolidStep;
+                cursor = StepOutOfSolid(x, y, point.Z - 0.25f, bottomZ);
             }
 
             return count;
+        }
+
+        /// <summary>How far the floor walk steps at a time through the solid under a floor.</summary>
+        internal const float SolidStep = 8f;
+
+        /// <summary>
+        /// Where the floor walk comes out of the solid it has landed in: the first of
+        /// <paramref name="cursor"/>, <c>cursor - 8</c>, <c>cursor - 16</c>, ... that is not
+        /// <see cref="IsPointSolid"/> against <see cref="GroundMask"/>, or the first at or below
+        /// <paramref name="bottomZ"/>. Exactly
+        /// <c>while (cursor &gt; bottomZ &amp;&amp; IsPointSolid(x, y, cursor, GroundMask)) cursor -= SolidStep;</c>,
+        /// which is what the walk used to run, and what the tests hold this to.
+        ///
+        /// That loop was most of the floor walk's cost. On rp_downtown_tits_v25 it asked
+        /// <see cref="IsPointSolid"/> 392 million times, 99.7% of them answered by the BSP leaf alone being
+        /// solid, and 99.5% of them in runs of more than sixteen steps. Nine in ten were the 12,000
+        /// units of solid between a floor spanning the map at z = 12,192 and the city under it, and
+        /// most of the rest the solid under the lowest floor, down to the bottom of the world; on
+        /// cp_badlands, nine in ten were the latter. Each was a full descent of the tree, about
+        /// fifteen planes, to land in the same leaf as the step before.
+        ///
+        /// So the steps are taken in batches, and the tree is walked once per batch rather than once
+        /// per step (<see cref="FirstOpenStep(ReadOnlySpan{float}, float, float, int)"/>). The steps are
+        /// still produced by subtracting <see cref="SolidStep"/> again and again, as the loop did, so
+        /// they are the same floats; only their answers are worked out differently. Batches start small
+        /// because the common case is a floor slab, left within a step or two, and grow eightfold while
+        /// the solid goes on.
+        /// </summary>
+        internal float StepOutOfSolid(float x, float y, float cursor, float bottomZ)
+        {
+            var steps = stepBuffer ??= new float[MaxStepBatch];
+            int batch = FirstStepBatch;
+
+            while (true)
+            {
+                int n = 0;
+                while (n < batch && cursor > bottomZ)
+                {
+                    steps[n++] = cursor;
+                    cursor -= SolidStep;
+                }
+
+                // Every step was solid, and the last left the column: where the loop would stop too.
+                if (n == 0)
+                    return cursor;
+
+                int open = FirstOpenStep(steps.AsSpan(0, n), x, y, GroundMask);
+                if (open < n)
+                    return steps[open];
+
+                batch = Math.Min(batch * 8, MaxStepBatch);
+            }
+        }
+
+        /// <summary>The steps <see cref="StepOutOfSolid"/> takes first: about what a floor slab needs.</summary>
+        private const int FirstStepBatch = 4;
+
+        /// <summary>The most steps <see cref="StepOutOfSolid"/> takes at once - 16,384 units of solid.</summary>
+        private const int MaxStepBatch = 2048;
+
+        /// <summary>
+        /// <see cref="StepOutOfSolid"/>'s batch of heights. Per thread because the walk runs on many at
+        /// once, and kept rather than allocated per call because it is called for every floor found.
+        /// </summary>
+        [ThreadStatic]
+        private static float[]? stepBuffer;
+
+        /// <summary>
+        /// The index of the first height in <paramref name="heights"/>, which must be descending, at
+        /// which the point over <paramref name="x"/>, <paramref name="y"/> is not
+        /// <see cref="IsPointSolid"/>; <c>heights.Length</c> if it is solid at all of them.
+        ///
+        /// The world tree is walked once for the whole run of points, the way a segment trace walks it,
+        /// with each node splitting the run where the points cross its plane. The split has to land
+        /// where a point descent would put each point, to the bit, or the answers differ - so it is not
+        /// worked out from where the segment crosses the plane, but searched for among the points
+        /// themselves, each tested with exactly the expression <see cref="Blocked"/> uses. Searching is
+        /// sound because that expression is monotonic in height: with the column's x and y fixed it is
+        /// <c>((nx*x + ny*y) + nz*z) - d</c>, and every rounded multiply, add and subtract in it is
+        /// monotonic in its operand, so as z falls the plane's side changes at most once along the run.
+        /// Splits that fall in the same place are found by bisection, and a run that stays on one side
+        /// costs two plane tests where the point descents cost one per point.
+        ///
+        /// A leaf whose contents block the mask answers for every point that reaches it. Anything else
+        /// - a leaf whose brushes may hold some points and not others, brush entities, displacements,
+        /// props - is asked point by point, in order, exactly as <see cref="IsPointSolid"/> asks it, and
+        /// only until one point comes out open.
+        /// </summary>
+        internal int FirstOpenStep(ReadOnlySpan<float> heights, float x, float y, int mask)
+        {
+            if (heights.Length == 0)
+                return 0;
+
+            int found;
+            if (nodes.Length == 0 || leafs.Length == 0)
+            {
+                // IsLineClear calls a line clear outright without a tree, props aside.
+                found = -1;
+                for (int k = 0; k < heights.Length && found < 0; k++)
+                {
+                    if (!IsInsideProp(new BspFile.Vector3(x, y, heights[k]), mask))
+                        found = k;
+                }
+            }
+            else
+            {
+                found = FirstOpenStep(0, heights, 0, heights.Length - 1, x, y, mask);
+            }
+
+            return found < 0 ? heights.Length : found;
+        }
+
+        /// <summary>
+        /// <see cref="FirstOpenStep(ReadOnlySpan{float}, float, float, int)"/> from node
+        /// <paramref name="num"/> down, for the points <paramref name="lo"/> to <paramref name="hi"/>
+        /// inclusive, all of which reach it; -1 when every one of them is solid. Only the upper part of a
+        /// split recurses, as in <see cref="Blocked"/>, so the stack is bounded by the tree's depth.
+        /// </summary>
+        private int FirstOpenStep(int num, ReadOnlySpan<float> heights, int lo, int hi, float x, float y,
+            int mask)
+        {
+            while (num >= 0)
+            {
+                ref readonly var node = ref nodes[num];
+
+                // Blocked gives up on a node it cannot read and calls the point not blocked by the world.
+                if ((uint)node.PlaneNum >= (uint)planes.Length)
+                    return FirstOpenPastWorld(-1, heights, lo, hi, x, y, mask);
+
+                ref readonly var plane = ref planes[node.PlaneNum];
+
+                bool first = InFront(in plane, x, y, heights[lo]);
+                if (InFront(in plane, x, y, heights[hi]) == first)
+                {
+                    num = first ? node.Child0 : node.Child1;
+                    continue;
+                }
+
+                // The run crosses the plane once: lo is on the first side, hi on the other. Find the
+                // last point on the first side.
+                int a = lo, b = hi;
+                while (b - a > 1)
+                {
+                    int mid = a + (b - a) / 2;
+                    if (InFront(in plane, x, y, heights[mid]) == first)
+                        a = mid;
+                    else
+                        b = mid;
+                }
+
+                int found = FirstOpenStep(first ? node.Child0 : node.Child1, heights, lo, a, x, y, mask);
+                if (found >= 0)
+                    return found;
+
+                num = first ? node.Child1 : node.Child0;
+                lo = b;
+            }
+
+            int leafIndex = -num - 1;
+            if ((uint)leafIndex >= (uint)leafs.Length)
+                return FirstOpenPastWorld(-1, heights, lo, hi, x, y, mask);
+
+            if ((leafs[leafIndex].Contents & mask) != 0)
+                return -1;
+
+            return FirstOpenPastWorld(leafIndex, heights, lo, hi, x, y, mask);
+        }
+
+        /// <summary>
+        /// Which side of a node's plane a point descent sends the point at this height to - the same
+        /// expression, term for term and in the same order, as <see cref="Blocked"/> and
+        /// <see cref="TryGetLeaf"/> evaluate, so that it rounds the same way.
+        /// </summary>
+        private static bool InFront(in BspFile.Plane plane, float x, float y, float z)
+            => plane.Normal.X * x + plane.Normal.Y * y + plane.Normal.Z * z - plane.Distance >= 0;
+
+        /// <summary>
+        /// The rest of <see cref="IsPointSolid"/> for points the world tree has not already called solid,
+        /// one at a time and in order: the brushes listed in their leaf (none when
+        /// <paramref name="leafIndex"/> is -1, the tree having given up before a leaf), then brush
+        /// entities, displacements and props. The first point none of them hold, or -1.
+        /// </summary>
+        private int FirstOpenPastWorld(int leafIndex, ReadOnlySpan<float> heights, int lo, int hi, float x,
+            float y, int mask)
+        {
+            for (int k = lo; k <= hi; k++)
+            {
+                var p = new BspFile.Vector3(x, y, heights[k]);
+
+                if (leafIndex >= 0 && HitsLeafBrush(leafIndex, p, p, mask, 0))
+                    continue;
+
+                if (BlockedPastWorld(p, p, mask, 0) || IsInsideProp(p, mask))
+                    continue;
+
+                return k;
+            }
+
+            return -1;
         }
 
         private struct SurfaceHit
