@@ -254,8 +254,8 @@ namespace Meshwright.Tests
 
         /// <summary>
         /// Brush entities on their own: the column gathers, for every vertical segment, the models the
-        /// full gather does - including none of those under a node with no heights, which a model with
-        /// a NaN bound makes.
+        /// full gather does. A model with a NaN bound is left out when the set is loaded, so the others
+        /// are still gathered.
         /// </summary>
         [Theory]
         [MemberData(nameof(Seeds))]
@@ -304,8 +304,8 @@ namespace Meshwright.Tests
                 }
             }
 
-            // A NaN anywhere reaches the root's bounds, and then nothing is gathered at all - by either.
-            Assert.True(spoilt || gathered > 200, $"only {gathered} models gathered");
+            // A NaN model is dropped at load rather than spoiling the hierarchy's bounds for the rest.
+            Assert.True(gathered > 200, $"only {gathered} models gathered");
             Assert.Contains(origins, o => o.X != 0 || o.Y != 0 || o.Z != 0);
         }
 
