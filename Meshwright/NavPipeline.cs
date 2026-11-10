@@ -154,6 +154,9 @@ namespace Meshwright
             /// <summary>What <see cref="ConnectionBuilder.Relink"/> added after the clip.</summary>
             public ConnectionBuilder.Result? Relinked;
 
+            /// <summary>What <see cref="ConnectionBuilder.DropStale"/> removed after the relink.</summary>
+            public ConnectionBuilder.StaleResult? Unlinked;
+
             public JumpAreaStitcher.Result? Stitched;
             public StairMarker.Result? Stairs;
             public ElevatorConnector.Result? Elevators;
@@ -435,6 +438,18 @@ namespace Meshwright
                         log($"Relinked: {relinked.Total:N0} connections across clipped edges " +
                             $"({relinked.Steps:N0} steps, {relinked.JumpsUp + relinked.CrouchJumpsUp:N0} jumps up, " +
                             $"{relinked.Drops:N0} drops)");
+                    }
+
+                    // And what the clip left with no way across, removed - after the relink, so a pair it
+                    // just linked on the new shapes is not tested twice, and before the fixup, which then
+                    // prunes shortcuts against the graph as it really is.
+                    var unlinked = ConnectionBuilder.DropStale(nav, vis, trimmed.Reshaped, trimmed.Before);
+                    result.Unlinked = unlinked;
+
+                    if (unlinked.Removed > 0)
+                    {
+                        log($"Unlinked: {unlinked.Removed:N0} connections across clipped edges no body gets across " +
+                            $"({unlinked.Refused:N0} of {unlinked.Tested:N0} re-tested now refused)");
                     }
                 }
             }

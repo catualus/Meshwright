@@ -279,7 +279,7 @@ down from 25 points on every area and reports the gap.
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
 | Areas | 2,271 | 2,640 | 19,577 | 17,323 |
-| Connections | 11,446 | 14,185 | 91,538 | 81,471 |
+| Connections | 11,446 | 14,176 | 91,538 | 81,337 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **49 (0.3%)** |
@@ -301,7 +301,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | Coverage of every reference area including stranded | 88.7% | 67.5% |
 | Areas on ground the reference does not have | 2.8% | 9.6% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 155 (0.9%) |
+| Areas no player spawn can reach | 3 (0.1%) | 156 (0.9%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -411,7 +411,14 @@ pulled back to a wall can otherwise pass on clearance lines that graze the wall 
 pairs the builder would link in the finished meshes, 28,941 of 29,684 are shortcuts the fixup removes on
 purpose; the pass adds 105 links across the twelve maps, 82 after the fixup, flagged by a hull checker
 about as often as the build's own. Routes and coverage do not move, and the pass takes under a second.
-Links the build made that fail its own test on the new shapes, 8,871 of them, are left in place.
+
+The links the build made on the old shapes are now tested again too. Failing the builder's test on the
+new shapes is not enough to go: 10,559 of the 85,484 on a reshaped area fail it, but a crouching body
+tried along the span at several depths crosses about 8,000, mostly gaps the clip opened over floor that
+carries on, and about 2,000 lead to a spot no body stands in, such as a crate top used as a step. The
+505 left are removed: drops through the floor over the landing, crossings through a wall the clip
+exposed. A hull checker flags 84% of them, against 4% of the links kept, and where Valve's meshes cover
+both ends they leave 28 of 58 unjoined, against 22 of 4,990. Routes and coverage do not move.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that

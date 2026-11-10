@@ -223,9 +223,10 @@ namespace Meshwright
         /// under a ledge is now tested from open floor. Those pairs had been tested once, on shapes that
         /// no longer exist, and refused.
         ///
-        /// Only adds. Every connection made before the clip stays: the clip opening a gap where two areas
-        /// used to touch is exactly what the build-first order exists to survive, and re-testing those
-        /// would undo it. A pair where neither area moved is skipped, because its geometry is what it was
+        /// Only adds. A connection made before the clip is not re-tested here: the clip opening a gap where
+        /// two areas used to touch is exactly what the build-first order exists to survive, and the
+        /// builder's test would undo it. <see cref="DropStale"/> removes those with no way across at all,
+        /// by a test of its own. A pair where neither area moved is skipped, because its geometry is what it was
         /// when it was built and the same tests give the same answer. Must run before
         /// <see cref="AreaConnectionFixer"/>, which is then free to prune what this adds like anything
         /// else.
@@ -243,6 +244,281 @@ namespace Meshwright
         public static Result Relink(NavFile nav, BspVisibility vis, IReadOnlySet<uint> reshaped,
             NavProgress? progress = null)
             => reshaped.Count == 0 ? new Result() : Link(nav, vis, progress, reshaped);
+
+        /// <summary>What <see cref="DropStale"/> looked at and what it did.</summary>
+        public sealed class StaleResult
+        {
+            /// <summary>Links made before the clip, between two areas that faced each other then, at least one of them reshaped.</summary>
+            public int Tested;
+
+            /// <summary>Of those, the ones the builder's own test now refuses on the new shapes.</summary>
+            public int Refused;
+
+            /// <summary>Of those, the ones no body gets across either, which are removed.</summary>
+            public int Removed;
+        }
+
+        /// <summary>
+        /// The other half of <see cref="Relink"/>: the links made before the clip that it left with no
+        /// way across, removed.
+        ///
+        /// The clip moves edges, so a link made on the old shapes can fail the builder's own test on the
+        /// new ones. That alone does not make it wrong. The build runs first precisely so that a crossing
+        /// survives the clip opening a gap where two areas used to touch, and a walker still crosses where
+        /// the floor runs on between them. So a link the test now refuses is put to a second one: a
+        /// crouching body, swept as well as the clearance lines, tried at every point along the span the
+        /// two areas now share - or, where they no longer face each other, along the span they shared
+        /// before - from a unit to 32 units inside each area. A link is removed only when no body gets
+        /// across anywhere and a body does stand at both ends of at least one of those crossings. Trying
+        /// several depths matters because the areas the clip leaves are often strips narrower than a body
+        /// against a wall: six units in, the depth the builder uses, a body sticks into the wall, while a
+        /// unit in it stands half over the neighbour and crosses.
+        ///
+        /// The second condition is what keeps this from deleting ground. Measured on the twelve benchmark
+        /// maps, 10,559 of the 85,484 links made before the clip on a reshaped area fail the builder's test
+        /// on the new shapes, and a body crosses about 8,000 of them. About 2,000 more lead to or from a
+        /// spot no crouching body stands in at any of the depths tried: a 10 unit crate top used as a step,
+        /// a strip in a corner. A hull checker flags 71% of those, nearly all because no body fits at one
+        /// end, but where Valve's TF2 meshes have ground at both ends they join the two spots for 32 of 33,
+        /// and removing them cut off a ledge on ctf_2fort that Valve's mesh reaches. The 505 removed are
+        /// crossings blocked outright - drops through the floor over the landing, links through a wall the
+        /// clip exposed. In the finished meshes the hull checker flags 330 of the 391 of them it can test,
+        /// against 4% of the links kept, and where Valve's TF2 meshes have ground at both ends they leave 28
+        /// of 58 unjoined, against 22 of 4,990 kept links.
+        ///
+        /// Links between two areas that did not face each other before the clip are left alone: they are
+        /// not the builder's, but the jump-area stitcher's or someone's hand edit. Parallel over areas and
+        /// safe for the same reason <see cref="Build"/> is - an iteration only removes from the area it
+        /// was handed, and reads nothing but geometry - so the result does not depend on thread order.
+        /// </summary>
+        public static StaleResult DropStale(NavFile nav, BspVisibility vis, IReadOnlySet<uint> reshaped,
+            IReadOnlyDictionary<uint, NavGeometry.Bounds> before)
+        {
+            var result = new StaleResult();
+            if (reshaped.Count == 0)
+                return result;
+
+            var byId = new Dictionary<uint, NavArea>(nav.Areas.Count);
+            foreach (var area in nav.Areas)
+                byId[area.Id] = area;
+
+            object gate = new();
+
+            Parallel.For(0, nav.Areas.Count, NavConcurrency.Options, () => new StaleResult(), (i, state, local) =>
+            {
+                var area = nav.Areas[i];
+                var bounds = NavGeometry.GetBounds(area);
+                var oldBounds = before.TryGetValue(area.Id, out var ob) ? ob : bounds;
+
+                for (int direction = 0; direction < NavGeometry.DirectionCount; direction++)
+                {
+                    List<uint>? broken = null;
+
+                    foreach (uint id in area.Connections[direction])
+                    {
+                        if (!reshaped.Contains(area.Id) && !reshaped.Contains(id))
+                            continue;
+
+                        if (!byId.TryGetValue(id, out var other))
+                            continue;
+
+                        var otherBounds = NavGeometry.GetBounds(other);
+                        var otherOld = before.TryGetValue(id, out var oo) ? oo : otherBounds;
+
+                        // Only what the builder could have made: a pair facing each other across a span
+                        // it would test, on the shapes it was tested on.
+                        if (!SharedEdge(oldBounds, otherOld, direction, out _, out _, out float oldOverlap) ||
+                            oldOverlap < MinimumOverlap)
+                        {
+                            continue;
+                        }
+
+                        local.Tested++;
+
+                        if (Accepts(vis, area, other, bounds, otherBounds, direction))
+                            continue;
+
+                        local.Refused++;
+
+                        if (BodyCrosses(vis, area, other, bounds, otherBounds, oldBounds, otherOld, direction) !=
+                            BodyVerdict.Blocked)
+                        {
+                            continue;
+                        }
+
+                        (broken ??= []).Add(id);
+                    }
+
+                    if (broken is not null)
+                    {
+                        area.Connections[direction].RemoveAll(broken.Contains);
+                        local.Removed += broken.Count;
+                    }
+                }
+
+                return local;
+            },
+            local =>
+            {
+                lock (gate)
+                {
+                    result.Tested += local.Tested;
+                    result.Refused += local.Refused;
+                    result.Removed += local.Removed;
+                }
+            });
+
+            return result;
+        }
+
+        /// <summary>
+        /// The builder's own test for one directed pair, as <see cref="Build"/> applies it: the edges face
+        /// each other across a span of at least <see cref="MinimumOverlap"/>, the climb at its middle is in
+        /// reach, and a walker gets across at the middle or somewhere else along it.
+        /// </summary>
+        private static bool Accepts(BspVisibility vis, NavArea area, NavArea other,
+            NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction)
+        {
+            if (!SharedEdge(bounds, otherBounds, direction, out float centreA, out float centreB, out float overlap) ||
+                overlap < MinimumOverlap)
+            {
+                return false;
+            }
+
+            var (fromX, fromY) = EdgePoint(bounds, direction, centreA, -Inset);
+            var (toX, toY) = EdgePoint(otherBounds, NavGeometry.Opposite(direction), centreB, -Inset);
+            float fromZ = NavGeometry.SurfaceZ(area, fromX, fromY);
+            float toZ = NavGeometry.SurfaceZ(other, toX, toY);
+
+            if (!Reachable(toZ - fromZ))
+                return false;
+
+            return TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _) == Refusal.Clear ||
+                   CrossesElsewhere(vis, area, other, bounds, otherBounds, direction, centreA, overlap, out _);
+        }
+
+        /// <summary>How far inside each area a body crossing a stale link is tried from (<see cref="DropStale"/>).</summary>
+        private static readonly float[] BodyDepths = [1f, Inset, 16f, 32f];
+
+        /// <summary>What <see cref="BodyCrosses"/> found.</summary>
+        private enum BodyVerdict
+        {
+            /// <summary>A body gets across somewhere.</summary>
+            Crosses,
+
+            /// <summary>A body stands at both ends somewhere, and gets across nowhere.</summary>
+            Blocked,
+
+            /// <summary>No pair of ends was found where a body stands at both, so there is nothing to judge.</summary>
+            NoRoom,
+        }
+
+        /// <summary>
+        /// Whether a crouching body gets from one area to the other anywhere along the span they share,
+        /// or along the span they shared before the clip if they no longer face each other - each end tried
+        /// at every one of <see cref="BodyDepths"/> that fits inside its area, with the body swept as well
+        /// as the clearance lines. In a fixed order, so the answer does not depend on thread timing.
+        ///
+        /// <see cref="BodyVerdict.Blocked"/> only when a body also stands at both ends of at least one of
+        /// the crossings tried. Where it stands at no pair of them, the crossing is not what fails: one of
+        /// the areas is too tight for a body near this edge, and refusing the crossing for that is a
+        /// verdict on the area. Those are left alone (see <see cref="DropStale"/>).
+        /// </summary>
+        private static BodyVerdict BodyCrosses(BspVisibility vis, NavArea area, NavArea other,
+            NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds,
+            NavGeometry.Bounds oldBounds, NavGeometry.Bounds otherOld, int direction)
+        {
+            if (!SharedEdge(bounds, otherBounds, direction, out float centre, out _, out float overlap) &&
+                !SharedEdge(oldBounds, otherOld, direction, out centre, out _, out overlap))
+            {
+                return BodyVerdict.NoRoom;
+            }
+
+            float low = centre - overlap / 2f + SpanEnd, high = centre + overlap / 2f - SpanEnd;
+            float depth = Depth(bounds, direction), otherDepth = Depth(otherBounds, direction);
+            var tried = new HashSet<(float, float, float, float)>();
+            bool stood = false;
+
+            // The middle first, then the same grid as CrossesElsewhere, pinned to both ends.
+            int steps = high > low ? (int)MathF.Ceiling((high - low) / SpanStep) : 0;
+            for (int k = -1; k <= steps; k++)
+            {
+                float c = k < 0 ? centre : MathF.Min(low + k * SpanStep, high);
+
+                foreach (float into in BodyDepths)
+                {
+                    if (into > 1f && into > depth - 1f)
+                        continue;
+
+                    foreach (float intoOther in BodyDepths)
+                    {
+                        if (intoOther > 1f && intoOther > otherDepth - 1f)
+                            continue;
+
+                        var (fromX, fromY) = EdgePoint(bounds, direction, Along(bounds, direction, c),
+                            -InsetWithin(into, depth));
+                        var (toX, toY) = EdgePoint(otherBounds, NavGeometry.Opposite(direction),
+                            Along(otherBounds, direction, c), -InsetWithin(intoOther, otherDepth));
+
+                        if (!tried.Add((fromX, fromY, toX, toY)))
+                            continue;
+
+                        float fromZ = NavGeometry.SurfaceZ(area, fromX, fromY);
+                        float toZ = NavGeometry.SurfaceZ(other, toX, toY);
+
+                        if (!Reachable(toZ - fromZ))
+                            continue;
+
+                        if (TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _,
+                                sweepBody: true) == Refusal.Clear)
+                        {
+                            return BodyVerdict.Crosses;
+                        }
+
+                        stood = stood ||
+                                BodyFits(vis, fromX, fromY, GroundAt(vis, fromX, fromY, fromZ)) &&
+                                BodyFits(vis, toX, toY, GroundAt(vis, toX, toY, toZ));
+                    }
+                }
+            }
+
+            return stood ? BodyVerdict.Blocked : BodyVerdict.NoRoom;
+        }
+
+        /// <summary>
+        /// Whether a crouching body, the full 32 units wide, stands on the floor at a point: a plate swept
+        /// up from half a step to the crouching height, as the generator's crouch sampler does, and refused
+        /// if it starts inside something.
+        /// </summary>
+        private static bool BodyFits(BspVisibility vis, float x, float y, float z)
+        {
+            const float Lift = NavConstants.StepHeight / 2f;
+            const float Half = NavConstants.HalfHumanWidth;
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(x, y, z + Lift),
+                new BspFile.Vector3(x, y, z + NavConstants.HumanCrouchHeight),
+                new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, 0f),
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
+
+            return !startSolid && (!hit || fraction >= 1f);
+        }
+
+        /// <summary>A depth into an area, kept half a unit short of its far side.</summary>
+        private static float InsetWithin(float into, float depth) => MathF.Min(into, MathF.Max(depth - 0.5f, depth / 2f));
+
+        /// <summary>An area's extent across the direction of travel.</summary>
+        private static float Depth(NavGeometry.Bounds b, int direction)
+            => direction is NavGeometry.North or NavGeometry.South ? b.Depth : b.Width;
+
+        /// <summary>A position along an edge, kept a unit inside the area's own extent along it.</summary>
+        private static float Along(NavGeometry.Bounds b, int direction, float c)
+        {
+            bool alongX = direction is NavGeometry.North or NavGeometry.South;
+            float lo = alongX ? b.MinX : b.MinY, hi = alongX ? b.MaxX : b.MaxY;
+            float mid = (lo + hi) / 2f;
+            return Math.Clamp(c, MathF.Min(lo + SpanEnd, mid), MathF.Max(hi - SpanEnd, mid));
+        }
 
         private static Result Link(NavFile nav, BspVisibility vis, NavProgress? progress,
             IReadOnlySet<uint>? reshaped)
