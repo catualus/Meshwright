@@ -771,6 +771,22 @@ The searches recorded from a run and replayed one thread at a time, old and new 
 a quarter to a third of the time they did: 6.7 to 1.8 microseconds each on the city, 7.5 to 2.4 on
 `cp_badlands`, 5.0 to 1.5 on `gm_construct`. The mesh is byte-identical on all twelve benchmark maps.
 
+The visibility pass's corner sweep - sixteen corner-to-corner lines for every pair the cheaper lines
+could not settle - was 62% of the pass's lines on `rp_downtown_tits_v25` and decided 9.7% of its
+links, because nearly all of its work is proving that two areas cannot see each other. Two things
+now make that proof cheaper without changing any answer. The PVS, which used to be asked only
+whether two areas might see each other at all, is now asked about each line: a line between eyes
+whose clusters the PVS keeps apart, or from an eye inside solid, cannot be clear, and is not traced.
+That rules out 3% of the sweep's lines on the city and on `gm_construct`, and 10-14% on
+`cp_badlands` and `ctf_2fort`. And each line now asks first about whatever stopped the pair's
+previous line: on the city 60% of the sweep's lines got through the world tree and were then stopped
+by displacement terrain, each after a full walk of the tree and a test of every brush entity. Run
+side by side with the old build at 4 threads on a busy machine, the pass took 75-79 seconds on the
+city against 102-103, and 5.1-7.8 seconds on `cp_badlands` against 5.9-9.3; measured as CPU time in
+one process, old and new alternated, the city fell from about 275 to 184 seconds and `cp_badlands`
+from 19.3 to 15.7. `gm_construct`, where the world stops most lines, gains little. The mesh is
+byte-identical on all twelve benchmark maps.
+
 Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
 gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
 the same three.
