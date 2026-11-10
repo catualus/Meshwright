@@ -572,6 +572,31 @@ removed pocket, and no body fits at that centre in the reference either. The pas
 on the largest map. Still in place are pockets with a link out and none in, like a 32 by 10 area on
 pl_badwater, and two groups under cp_badlands' bridge deck that a body does fit in.
 
+Each cut-off group kept for having room was then traced to a cause. Of the 62 on the twelve maps, 12
+were one floor sampled twice. The flood files a cell under its column and its height in eight-unit
+bands, and the sewers of both RP maps are terrain laid 1.3 units over its brush face, at z=-195.7 over
+z=-197, either side of a band edge: both became cells, and areas lay one over the other - 365 and 381
+pairs on the RP maps, up to 12 on the TF2 maps - with a copy nothing linked to kept as a group a body
+fits in, inside an area the spawns reach. Two floors of a column within four units are now one cell
+wherever the band edges fall, and 0 to 2 such pairs are left on any map. One more, on ctf_2fort, had
+room only for a body standing on a small prop over the floor the area lies on: the floor search starts
+a step over the area, inside the prop, and reports its underside. Room is no longer found on ground
+with something solid a unit above it, and that area goes as a pocket. The RP maps lose 271 and 284
+areas and the TF2 maps up to 9, islands fall from 28 to 21 and 29 to 22 on the RP maps and from 1 to 0
+on ctf_2fort, and areas no spawn reaches from 44 to 33, 309 to 285 and 2 to 1. No area left with the
+same shape loses its way in, routes, coverage, floating and over-air areas do not move, and none of
+the 34 links gained or 24 lost between areas of the same shape is one a hull checker flags.
+gm_construct, gm_flatgrass and ctf_turbine come out byte-identical. The other 49 are kept: 12 that a
+body walks out of across the shared edge, refused by the builder's test (its body is swept at the
+height of the floor under its middle on a slope, positions near the middle of a narrow span are never
+tried, and slivers are tried only six units in; loosening each linked links the checker flags more
+often than the links kept); 11 left on foot only across floor no area covers or just past a span's end;
+10 behind 46 to 48 unit fences and railings, which a jump clears; 10 beyond thin bars and kerbs 10 to
+19 units high, which a walker steps over and the builder's lowest clearance line does not; and 6 no
+player reaches - a strip behind a row of containers on cp_granary and a recess under a 32 unit lintel,
+a gap behind a displacement rock face on cp_badlands, a terrain shell on each RP map, and a room on
+rp_downtown_meowy with no way out within 256 units.
+
 A line traced from inside a static prop is not told so. The line traces have no start-solid flag: one
 starting inside a brush is blocked because it starts inside, but a prop is triangles, and a segment
 starting inside one crosses nothing until it leaves - nothing at all if it never does. The point test
