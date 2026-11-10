@@ -725,6 +725,32 @@ and what it allocates from 650 MB to 180 MB; in a pair of runs at 8 threads its 
 `gm_construct` fell from about 10 seconds of CPU to 8. The mesh is byte-identical on all twelve
 benchmark maps.
 
+Most of a run is line traces: does a sight line or a clearance line cross a brush, a displacement or
+a prop. Profiled on `rp_downtown_tits_v25`, the displacement and prop test alone was 43% of the run,
+205.7 million queries in visibility. Both halves have been made faster without changing a single
+answer, and the mesh is byte-identical on all twelve benchmark maps.
+
+- **Displacements and props.** The box test down the triangle tree used to take three divisions per
+  node; the line's reciprocals are now worked out once per query, and a node's three axes are tested
+  side by side with no branches. Children are tested before they are pushed and the nearer is walked
+  first, which only the yes-or-no test may do, since it does not care which triangle it finds. A
+  leaf's triangles are tested eight at a time, with the same arithmetic in the same order as one at
+  a time and nothing fused.
+- **World brushes.** Each tree node is read with its plane beside it, and an axis-aligned plane, 97-99%
+  of node visits on the benchmark maps, is one subtraction rather than a dot product. A brush's
+  planes are read from consecutive memory. A brush is clipped at most once per line, as the engine
+  does it: detail brushes are listed in every leaf they touch, and 7.1% of brush tests on the city,
+  8.7% on `cp_badlands` and 2.9% on `gm_construct` repeated one the same line had already made.
+
+The trees are walked the same way, so the counts barely move: on the city, 28.5 nodes and 3.84 brush
+tests per world line become 28.5 and 3.56, and a displacement query visits 3.16 leaves rather than
+3.45. What changed is the cost of each step. Timed one thread at a time on `cp_badlands` sight lines,
+a displacement test fell from about 6,100 cycles to 3,800, a prop test from 3,100 to 2,000, and the
+world from 3,200 to 2,900. Whole runs at 4 threads, four of each alternated on a busy machine, took
+113-141 seconds on the city against 155-175 before, with the visibility pass at 56-73 seconds
+against 70-96. On `cp_badlands` the visibility pass is a fifth shorter, but the whole run is too
+short to rise above the noise.
+
 Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
 gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
 the same three.
