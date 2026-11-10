@@ -1240,13 +1240,21 @@ namespace Meshwright
                 // line is one trace; IsLevelEnough is four floor probes, each of which is a descending
                 // sweep. A sample with no room above it at all is the common rejection, so paying one
                 // trace to rule it out before paying four is worth the slightly awkward shape.
-                bool stand = vis.IsLineClear(
-                    new BspFile.Vector3(x, y, z + 2f),
+                //
+                // A line starting inside a brush is blocked; one starting inside a prop crosses nothing
+                // until it leaves, so the foot of the line is asked about props first. Without that, a
+                // sample under a prop's underside - or on floor the prop stands in - had all the room
+                // in the world wherever the prop was taller than a player.
+                var foot = new BspFile.Vector3(x, y, z + 2f);
+                bool buried = vis.IsInsideProp(foot, BspVisibility.GenerationMask);
+
+                bool stand = !buried && vis.IsLineClear(
+                    foot,
                     new BspFile.Vector3(x, y, z + RequiredHeadroom),
                     BspVisibility.GenerationMask);
 
-                bool crouch = stand || vis.IsLineClear(
-                    new BspFile.Vector3(x, y, z + 2f),
+                bool crouch = stand || !buried && vis.IsLineClear(
+                    foot,
                     new BspFile.Vector3(x, y, z + NavConstants.HumanCrouchHeight),
                     BspVisibility.GenerationMask);
 

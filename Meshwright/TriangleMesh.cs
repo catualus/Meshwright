@@ -359,6 +359,10 @@ namespace Meshwright
         /// Brushes need none of this - they are solids, and a segment starting on a brush face already
         /// starts inside it - and neither does <see cref="TryTraceHull"/>, which counts a box touching a
         /// triangle at the start of a sweep as starting solid.
+        ///
+        /// The price is that a segment starting *inside* a prop's hull is not told so either: it
+        /// crosses nothing until it leaves, and nothing at all if it never does. A caller that needs to
+        /// know asks <see cref="BspVisibility.IsInsideProp"/> first; see <see cref="ConvexSolids"/>.
         /// </summary>
         private const float SegmentEpsilon = 1e-6f;
 

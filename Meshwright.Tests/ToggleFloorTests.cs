@@ -23,7 +23,7 @@ namespace Meshwright.Tests
         /// Ground at z = 0, and a brush entity over it: a 100-unit slab from z = 16 to z = 64, its tree
         /// a subtree of its own (head node 1) beside the world's, as vbsp lays out a brush model. <paramref name="entity"/> is the keyvalues of the entity owning model *1.
         /// </summary>
-        private static BspVisibility WorldWithBlock(string entity)
+        internal static BspVisibility WorldWithBlock(string entity)
         {
             var planes = new[]
             {

@@ -643,6 +643,15 @@ namespace Meshwright
         /// Static props are traced last of all, against the collision hulls read from each model's
         /// `.phy`. A prop whose model could not be found contributes nothing and is invisible to this;
         /// `meshwright props` reports how many there are.
+        ///
+        /// There is no start-solid flag, and the geometry classes answer a start inside them
+        /// differently. A line starting inside a brush or a brush entity is blocked - it starts inside
+        /// - which is the right answer for a sight line or a clearance line alike. A line starting on or
+        /// inside a displacement or a prop ignores the surface it starts on (see
+        /// <see cref="TriangleMesh"/>): headroom lines from a floor point depend on that, but a line
+        /// lying wholly inside a prop reads clear. Sight lines can live with it - an eye inside a prop
+        /// sees out only if the line never leaves the prop - but a caller asking whether a body fits
+        /// has to ask <see cref="IsInsideProp"/> or <see cref="IsPointSolid"/> about the start first.
         /// </summary>
         public bool IsLineClear(BspFile.Vector3 a, BspFile.Vector3 b) => IsLineClear(a, b, MaskBlockLos);
 
@@ -773,6 +782,11 @@ namespace Meshwright
         /// All three geometry classes can supply one: a brush yields the side plane the segment enters
         /// through, world geometry the BSP split plane it crosses into solid, and a displacement the
         /// face normal of the triangle hit.
+        ///
+        /// A segment starting inside a brush hits at its own start, with an upward normal, which reads
+        /// exactly like a floor there; one starting inside a prop finds the face it leaves through, its
+        /// normal turned upwards too. Neither is a surface anyone stands on, so a caller whose start
+        /// can be buried asks <see cref="IsPointSolid"/> first.
         /// </summary>
         public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b,
             out BspFile.Vector3 point, out BspFile.Vector3 normal)
@@ -1295,12 +1309,40 @@ namespace Meshwright
             public bool Nodraw => (SurfaceFlags & SurfNodraw) != 0;
         }
 
-        /// <summary>Whether a point is inside brush contents matching the mask.</summary>
+        /// <summary>
+        /// Whether a point is inside solid matching the mask: a brush, a brush entity, or a static prop's
+        /// collision hull.
+        ///
+        /// This is the start-solid test the line traces do not have. A line starting inside a brush is
+        /// blocked, but one starting inside a prop is not - triangles only stop a segment that crosses
+        /// them past its start (see <see cref="TriangleMesh"/>), so a line lying wholly inside a prop
+        /// reads as clear and one leaving it reports the face it leaves through. Callers that need to
+        /// know they began inside something ask this first.
+        ///
+        /// The props are asked separately because a zero-length line, which is all the brush half of
+        /// this is, never crosses a triangle. Before they were, every caller using this as its guard
+        /// was blind to props: the floor walk below stepped 0.25 units into a prop it had landed on,
+        /// was told it was in the open, and sampled the prop's underside - or the floor it stood on -
+        /// as ground *inside* it, with headroom to stand wherever the prop was taller than a player.
+        /// Displacements need nothing here; they are surfaces with no inside.
+        /// </summary>
         public bool IsPointSolid(float x, float y, float z, int mask)
         {
             var p = new BspFile.Vector3(x, y, z);
-            return !IsLineClear(p, p, mask);
+            return !IsLineClear(p, p, mask) || IsInsideProp(p, mask);
         }
+
+        /// <summary>
+        /// Whether a point is inside a static prop's collision hull - the half of
+        /// <see cref="IsPointSolid"/> a line trace cannot answer for itself.
+        ///
+        /// For a caller about to trace a line from <paramref name="point"/> that needs to know whether
+        /// it began inside something. A line starting inside a brush is already blocked, so asking the
+        /// brushes again would only cost a second walk of the tree; one starting inside a prop is not,
+        /// and this is the cheap way to ask about that alone.
+        /// </summary>
+        public bool IsInsideProp(BspFile.Vector3 point, int mask)
+            => staticProps is not null && staticProps.Contains(point, mask);
 
         /// <summary>
         /// Every floor surface in a vertical column, highest first.
@@ -1317,7 +1359,16 @@ namespace Meshwright
         /// it - 4,716 of the 5,080 areas missing against the in-game mesh - unsampled.
         ///
         /// Walking down instead is straightforward as long as each hit is followed *through* the solid
-        /// it landed on rather than merely past its face.
+        /// it landed on rather than merely past its face - a prop's included, which
+        /// <see cref="IsPointSolid"/> now sees.
+        ///
+        /// The first trace is the one exception to recording what it finds. The top of a column is
+        /// usually inside the brush sealing the top of the map, and a trace starting in solid reports a
+        /// hit where it starts, facing up, or the face of some brush further into the solid: either
+        /// way nowhere anyone could stand, and it was every such column's first "floor", taking one of
+        /// the caller's slots. gm_construct has 118 columns that fill all sixteen. The trace still
+        /// runs, and the walk still carries on below what it found, so the floors after it are the
+        /// ones they always were.
         /// </summary>
         public int EnumerateFloors(float x, float y, float topZ, float bottomZ, Span<FloorSample> into)
         {
@@ -1325,6 +1376,7 @@ namespace Meshwright
 
             int count = 0;
             float cursor = topZ;
+            bool buried = IsPointSolid(x, y, cursor, GroundMask);
 
             while (count < into.Length && cursor > bottomZ)
             {
@@ -1335,7 +1387,11 @@ namespace Meshwright
                         out int flags))
                     break;
 
-                into[count++] = new FloorSample(point.Z, normal, flags);
+                if (!buried)
+                    into[count++] = new FloorSample(point.Z, normal, flags);
+
+                // Every later trace starts where the walk below has just left solid.
+                buried = false;
 
                 // Descend through whatever was just landed on. Stepping a fixed amount below the face
                 // is not enough on its own - a floor slab is usually thicker than any fixed step worth

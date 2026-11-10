@@ -839,6 +839,12 @@ namespace Meshwright
             // the ramp descending, only for the ground disappearing from under it.
             float claimed = NavGeometry.SurfaceZ(area, x, y);
 
+            // A search starting inside a brush reports floor at its start, a step up, and that passes:
+            // solid where the area runs is not the ground disappearing from under it, and walls are
+            // Reach's to clip. One starting inside a prop searches on through it, finds the floor
+            // under it, and fails when that is more than a step down - which is what clips an area
+            // running into a prop that too few of Reach's lines meet to move its median. Kept so on
+            // purpose; see StairMarker.TryFindFloor.
             if (StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
                     NavConstants.StepHeight * 3f, out float actual)
                 && MathF.Abs(actual - claimed) <= NavConstants.StepHeight)

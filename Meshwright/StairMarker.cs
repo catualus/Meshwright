@@ -450,6 +450,19 @@ namespace Meshwright
 
             z = 0;
 
+            // A start inside solid is answered two ways, and the difference is kept on purpose. Inside
+            // a brush the first segment is blocked from its first point, so the bisection never moves
+            // and the floor is reported at the start. Inside a prop the segments cross nothing until
+            // the prop's underside, so the search carries on through the prop and reports what is
+            // under it - the prop's underside, or the floor it stands on.
+            //
+            // Making a prop answer like a brush was tried and measured worse. AreaClipper's floor
+            // check is what notices an area running into a prop the wall clip's median misses: from
+            // inside the prop it finds the floor far below the area's surface and pulls the edge
+            // back. Told "floor right here" instead, it kept those edges, and floating areas rose on
+            // four TF2 maps (cp_granary 21 to 24, pl_upward 46 to 51). Callers that must not mistake
+            // the inside of a prop for open air ask IsPointSolid first, as they do for brushes.
+
             for (float d = 0; d < depth; d += CoarseStep)
             {
                 bool last = d + CoarseStep >= depth;

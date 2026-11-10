@@ -68,6 +68,16 @@ namespace Meshwright
         /// <summary>How many convex hulls the tree walk reached.</summary>
         public int LedgeCount { get; private set; }
 
+        /// <summary>
+        /// How many of <see cref="Triangles"/> each convex hull contributed, in order: the first hull's
+        /// triangles come first, then the next one's. Zero-triangle hulls are left out.
+        ///
+        /// The soup alone is enough to trace a line against, but not to ask whether a point is
+        /// *inside* the collision - see <see cref="ConvexSolids"/>. That needs the hulls apart again,
+        /// because "behind every face" is only a containment test for a single convex piece.
+        /// </summary>
+        public int[] LedgeSizes { get; private set; } = [];
+
         /// <summary>How many solids the file declared, against how many parsed.</summary>
         public int SolidsDeclared { get; private set; }
         public int SolidsParsed { get; private set; }
@@ -76,6 +86,7 @@ namespace Meshwright
         {
             var result = new PhyFile();
             var tris = new List<BspFile.Vector3>();
+            var ledges = new List<int>();
 
             if (bytes.Length < 16) return result;
 
@@ -103,7 +114,7 @@ namespace Meshwright
 
                 if (solidSize <= 0 || at + 4 + solidSize > bytes.Length) break;
 
-                if (result.ReadSolid(r, ms, at + 4, bytes.Length, tris))
+                if (result.ReadSolid(r, ms, at + 4, bytes.Length, tris, ledges))
                     result.SolidsParsed++;
 
                 // Solids are laid end to end, each preceded by its own length. Advancing by the declared
@@ -113,10 +124,12 @@ namespace Meshwright
             }
 
             result.Triangles = tris.ToArray();
+            result.LedgeSizes = ledges.ToArray();
             return result;
         }
 
-        private bool ReadSolid(BinaryReader r, MemoryStream ms, long start, long length, List<BspFile.Vector3> tris)
+        private bool ReadSolid(BinaryReader r, MemoryStream ms, long start, long length, List<BspFile.Vector3> tris,
+            List<int> ledges)
         {
             if (start + CompactSurfaceHeaderSize + LegacySurfaceHeaderSize > length) return false;
 
@@ -146,10 +159,10 @@ namespace Meshwright
             {
                 // No usable tree. The surface may still be a single ledge sitting where the tree would
                 // have been, which is how the simplest models are written.
-                return ReadLedge(r, ms, surfaceStart, length, tris);
+                return ReadLedge(r, ms, surfaceStart, length, tris, ledges);
             }
 
-            return WalkTree(r, ms, root, length, tris, 0);
+            return WalkTree(r, ms, root, length, tris, ledges, 0);
         }
 
         /// <summary>
@@ -160,7 +173,7 @@ namespace Meshwright
         /// infinite loop that would otherwise hang the whole build on one bad model.
         /// </summary>
         private bool WalkTree(BinaryReader r, MemoryStream ms, long node, long length,
-            List<BspFile.Vector3> tris, int depth)
+            List<BspFile.Vector3> tris, List<int> ledges, int depth)
         {
             if (depth > 64 || node < 0 || node + LedgeNodeSize > length) return false;
 
@@ -169,17 +182,17 @@ namespace Meshwright
             int ledgeOffset = r.ReadInt32();
 
             if (rightOffset == 0)
-                return ReadLedge(r, ms, node + ledgeOffset, length, tris);
+                return ReadLedge(r, ms, node + ledgeOffset, length, tris, ledges);
 
             // The left child sits immediately after this node; the right one is where the offset says.
-            bool left = WalkTree(r, ms, node + LedgeNodeSize, length, tris, depth + 1);
-            bool right = WalkTree(r, ms, node + rightOffset, length, tris, depth + 1);
+            bool left = WalkTree(r, ms, node + LedgeNodeSize, length, tris, ledges, depth + 1);
+            bool right = WalkTree(r, ms, node + rightOffset, length, tris, ledges, depth + 1);
 
             return left || right;
         }
 
         private bool ReadLedge(BinaryReader r, MemoryStream ms, long ledge, long length,
-            List<BspFile.Vector3> tris)
+            List<BspFile.Vector3> tris, List<int> ledges)
         {
             if (ledge < 0 || ledge + LedgeHeaderSize > length) return false;
 
@@ -201,6 +214,8 @@ namespace Meshwright
 
             LedgeCount++;
 
+            int before = tris.Count;
+
             for (int t = 0; t < triangleCount; t++)
             {
                 ms.Seek(triangles + (long)t * TriangleSize + 4, SeekOrigin.Begin);
@@ -220,6 +235,9 @@ namespace Meshwright
                 tris.Add(pb);
                 tris.Add(pc);
             }
+
+            if (tris.Count > before)
+                ledges.Add((tris.Count - before) / 3);
 
             return true;
         }

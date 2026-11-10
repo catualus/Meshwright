@@ -355,7 +355,7 @@ namespace Meshwright
         /// no floor at all to them. Five points across the footprint, taking the middle height, so a
         /// railing along an edge or a control box in the centre does not stand in for the floor.
         /// </summary>
-        private static float? StandingSurface(BspVisibility? vis, BspFile.Vector3 mins, BspFile.Vector3 maxs)
+        internal static float? StandingSurface(BspVisibility? vis, BspFile.Vector3 mins, BspFile.Vector3 maxs)
         {
             if (vis is null)
                 return null;
@@ -371,6 +371,13 @@ namespace Meshwright
 
             foreach (var (x, y) in points)
             {
+                // A probe that begins inside something says nothing about the floor. The trace reports
+                // a start in solid as a hit right there, facing up, which this took for a floor a unit
+                // above the platform's own top whenever whatever sits on the platform's top face is
+                // solid: 180 of the 210 probes on ctf_2fort, 825 of 1,050 on rp_downtown_tits_v25.
+                if (vis.IsPointSolid(x, y, maxs.Z + 1f, BspVisibility.MaskBlockLos))
+                    continue;
+
                 if (!vis.TryTraceSurface(new BspFile.Vector3(x, y, maxs.Z + 1f), new BspFile.Vector3(x, y, mins.Z - 1f),
                         BspVisibility.MaskBlockLos, out var hit, out var normal))
                 {
@@ -393,7 +400,7 @@ namespace Meshwright
         /// <see cref="StopTolerance"/> of the stop, a short way out from the middle of one of its edges.
         /// Without geometry to look at, nothing can be confirmed and the answer is no.
         /// </summary>
-        private static bool HasLandings(BspVisibility? vis, BspFile.Vector3 mins, BspFile.Vector3 maxs,
+        internal static bool HasLandings(BspVisibility? vis, BspFile.Vector3 mins, BspFile.Vector3 maxs,
             float[] stops)
         {
             if (vis is null)
@@ -414,6 +421,14 @@ namespace Meshwright
 
                     foreach (var (x, y) in probes)
                     {
+                        // A probe that starts inside something is beside a wall, not a landing. The
+                        // floor search reports a start in solid as floor right there, a step above the
+                        // stop - well inside the tolerance - so a hatch dropping into a recess found
+                        // "landings" in the recess walls at the bottom of its travel, the very shape
+                        // this check is here to turn away.
+                        if (vis.IsPointSolid(x, y, stop + NavConstants.StepHeight, BspVisibility.GroundMask))
+                            continue;
+
                         if (StairMarker.TryFindFloor(vis, x, y, stop + NavConstants.StepHeight,
                                 NavConstants.StepHeight + StopTolerance, out float z) &&
                             MathF.Abs(z - stop) <= StopTolerance)

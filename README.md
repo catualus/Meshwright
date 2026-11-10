@@ -301,7 +301,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | Coverage of every reference area including stranded | 89.2% | 67.6% |
 | Areas on ground the reference does not have | 2.4% | 9.4% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 48 (0.3%) |
+| Areas no player spawn can reach | 3 (0.1%) | 40 (0.2%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -550,6 +550,25 @@ and rp_downtown_tits_v25, 98.4% to 98.3% and 67.6% to 67.5%: the reference area'
 removed pocket, and no body fits at that centre in the reference either. The pass takes under a second
 on the largest map. Still in place are pockets with a link out and none in, like a 32 by 10 area on
 pl_badwater, and two groups under cp_badlands' bridge deck that a body does fit in.
+
+A line traced from inside a static prop is not told so. The line traces have no start-solid flag: one
+starting inside a brush is blocked because it starts inside, but a prop is triangles, and a segment
+starting inside one crosses nothing until it leaves - nothing at all if it never does. The point test
+the generator guards its traces with is a zero-length line, which never crosses a triangle, so it
+answered "open air" anywhere inside a prop. The floor walk stepped a quarter unit into a prop it had
+landed on, was told it was in the open, and sampled the floor the prop stands on as ground inside it,
+with headroom wherever the prop was taller than a player; the clipper's buried-edge and floor checks,
+the connection builder's room, overhang and side-floor guards, its clearance lines and fall columns
+and the lip search all read the inside of a prop the same way. The point test now also asks whether
+the point is inside one of the props' convex hulls, and the line callers that ask whether a body fits
+check the start of the line against them. Two start-in-solid misreadings of brushes went too: every
+column the floor walk sampled began inside the brush sealing the top of the map and recorded a "floor"
+there, taking one of its sixteen slots, and the lift finder took a probe starting in solid for a floor
+or a landing. 143 areas and 720 links go across the twelve maps, 46 areas on rp_downtown_tits_v25;
+gm_construct and gm_flatgrass come out byte-identical. Routes, coverage and over-air areas do not move,
+floating areas fall from 266 to 249, islands from 91 to 82 and areas no spawn reaches from 1,561 to
+1,549, and no area a spawn reached is lost but a slot on pl_badwater no crouching body fits. A hull
+checker flags 140 of the 194 removed links it can test, against 1.3% to 31% of the links kept.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
