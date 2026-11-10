@@ -443,7 +443,8 @@ namespace Meshwright
                     // And what the clip left with no way across, removed - after the relink, so a pair it
                     // just linked on the new shapes is not tested twice, and before the fixup, which then
                     // prunes shortcuts against the graph as it really is.
-                    var unlinked = ConnectionBuilder.DropStale(nav, vis, trimmed.Reshaped, trimmed.Before);
+                    var unlinked = ConnectionBuilder.DropStale(nav, vis, trimmed.Reshaped, trimmed.Before,
+                        result.Connections?.AtSpanEnds);
                     result.Unlinked = unlinked;
 
                     if (unlinked.Removed > 0)
