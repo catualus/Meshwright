@@ -115,14 +115,17 @@ namespace Meshwright.Tests
         /// down the fall wants its first sample clear of the edge being stepped off - eight units along.
         /// That used to clamp, collapsing all three samples onto the landing point, which is precisely
         /// the single column in the wrong place the sweep was written to replace. The run being too
-        /// short to sample is not a licence to sample once; it means the landing is not past the edge,
-        /// and there is no fall.
+        /// short to sample is not a licence to sample once; it means the landing is not past the edge.
+        ///
+        /// A walker that steps off the edge lands past it, so a lower area that carries on past the edge
+        /// is landed in there instead. This one is ten units wide and ends five units past the edge,
+        /// too close for a walker to have left the ledge, so there is no fall.
         /// </summary>
         [Fact]
         public void AFallWithNoRoomToLeaveTheEdgeIsRefused()
         {
             var upper = Area(1, 0, 0, 500, 200, 200f);
-            var lower = Area(2, 495, 0, 1000, 200, 0f);
+            var lower = Area(2, 495, 0, 505, 200, 0f);
 
             var log = ConnectionBuilder.Explain(Ground(), upper, lower);
 
