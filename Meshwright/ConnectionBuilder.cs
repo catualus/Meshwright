@@ -1063,7 +1063,7 @@ namespace Meshwright
         /// wall, is not. A probe that starts inside something finds no floor, so a wall the span ends
         /// against cannot pass for one.
         /// </summary>
-        private static bool OverhangSupported(BspVisibility vis, int direction, float outward,
+        internal static bool OverhangSupported(BspVisibility vis, int direction, float outward,
             float fromX, float fromY, float fromGround, float toX, float toY, float toGround)
         {
             bool alongX = direction is NavGeometry.North or NavGeometry.South;
@@ -1077,8 +1077,7 @@ namespace Meshwright
                     float x = fromX + (toX - fromX) * k / 2f, y = fromY + (toY - fromY) * k / 2f;
                     if (alongX) x += outward * past; else y += outward * past;
 
-                    var start = new BspFile.Vector3(x, y, top);
-                    if (!vis.IsLineClear(start, start, BspVisibility.GroundMask))
+                    if (vis.IsPointSolid(x, y, top, BspVisibility.GroundMask))
                         return false;
 
                     if (!StairMarker.TryFindFloor(vis, x, y, top, high - low + 2f * NavConstants.StepHeight,
@@ -1243,7 +1242,7 @@ namespace Meshwright
         /// than a walker can step onto is not a floor that lifts the line over itself. Only the outer
         /// columns, because the middle one is already measured from the floor under it.
         /// </summary>
-        private static bool LinesClear(BspVisibility vis, float fromX, float fromY, float toX, float toY,
+        internal static bool LinesClear(BspVisibility vis, float fromX, float fromY, float toX, float toY,
             float high, float sideX, float sideY, bool sideFloors)
         {
             Span<float> bases = [high, high, high];
@@ -1283,7 +1282,13 @@ namespace Meshwright
 
                     // Whether a body fits through the gap, not whether a bot can see through it -
                     // GenerationMask throughout, matching what Valve traces movement against.
-                    if (!vis.IsLineClear(a, b, BspVisibility.GenerationMask))
+                    //
+                    // A line that starts inside a prop is refused as one starting in a brush is. The
+                    // trace alone cannot say so: lying wholly inside the prop it crosses no triangle
+                    // and reads clear, which passed crossings straight through a prop both ends of it
+                    // stood in - 615 such lines on cp_badlands, 3,446 on rp_downtown_tits_v25.
+                    if (vis.IsInsideProp(a, BspVisibility.GenerationMask) ||
+                        !vis.IsLineClear(a, b, BspVisibility.GenerationMask))
                         return false;
                 }
             }
@@ -1297,12 +1302,11 @@ namespace Meshwright
         /// when that point is inside something - a floor found from in there would be the floor under
         /// a wall, and lifting a line onto it would carry the line over the wall.
         /// </summary>
-        private static float SideFloor(BspVisibility vis, float x, float y, float high)
+        internal static float SideFloor(BspVisibility vis, float x, float y, float high)
         {
             float top = high + NavConstants.StepHeight;
-            var start = new BspFile.Vector3(x, y, top);
 
-            if (!vis.IsLineClear(start, start, BspVisibility.GroundMask))
+            if (vis.IsPointSolid(x, y, top, BspVisibility.GroundMask))
                 return high;
 
             return StairMarker.TryFindFloor(vis, x, y, top, NavConstants.StepHeight, out float floor)
@@ -1380,6 +1384,11 @@ namespace Meshwright
         ///
         /// Searched only a step either side, so this corrects the quad-versus-tread discrepancy without
         /// wandering onto a different storey through a gap beside the area.
+        ///
+        /// A search starting inside a brush a step over the claim answers with its own start, and one
+        /// inside a prop with the floor under the prop (see <see cref="StairMarker.TryFindFloor"/>).
+        /// Both are left to stand: every caller tests for a body at the ground it is given, and a body
+        /// there starts in solid.
         /// </summary>
         internal static float GroundAt(BspVisibility vis, float x, float y, float claimed)
             => StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
@@ -1387,14 +1396,16 @@ namespace Meshwright
                 ? ground
                 : claimed;
 
-        private static bool HasRoom(BspVisibility vis, float x, float y, float z, out bool startedSolid)
+        internal static bool HasRoom(BspVisibility vis, float x, float y, float z, out bool startedSolid)
         {
             var foot = new BspFile.Vector3(x, y, z + 4f);
 
-            // A degenerate zero-length trace is a point-in-solid test, which separates "there is a
-            // ceiling here" from "this point is inside the floor" - and only the first is about the
-            // world. The second means the area's own surface is wrong here.
-            startedSolid = !vis.IsLineClear(foot, foot, BspVisibility.GenerationMask);
+            // A point-in-solid test separates "there is a ceiling here" from "this point is inside the
+            // floor" - and only the first is about the world. The second means the area's own surface
+            // is wrong here. Asked of IsPointSolid rather than of a zero-length line, which never
+            // crosses a prop's triangles: a foot inside a prop taller than a crouch read as standing
+            // in the open, with the line up from it lying wholly inside the prop and so clear.
+            startedSolid = vis.IsPointSolid(foot.X, foot.Y, foot.Z, BspVisibility.GenerationMask);
 
             return !startedSolid && vis.IsLineClear(foot,
                 new BspFile.Vector3(x, y, z + NavConstants.HumanCrouchHeight),
@@ -1460,6 +1471,9 @@ namespace Meshwright
             float midY = (fromY + toY) / 2f;
             float low = MathF.Min(fromZ, toZ);
 
+            // A search starting inside a brush reports floor where it starts, and one inside a prop the
+            // floor under it; both pass. That is the right reading here: solid between the two areas is
+            // not a chasm, and whether a body gets past it is the clearance lines' question.
             if (!StairMarker.TryFindFloor(vis, midX, midY, MathF.Max(fromZ, toZ) + 8f,
                     NavConstants.DeathDrop, out float groundZ))
             {
@@ -1502,7 +1516,7 @@ namespace Meshwright
         /// off and refuse every drop on the map. The lateral offsets run parallel to the shared edge, so
         /// all three columns in a sample stand the same distance past it.
         /// </summary>
-        private static bool CanFallTo(BspVisibility vis, NavArea to,
+        internal static bool CanFallTo(BspVisibility vis, NavArea to,
             float fromX, float fromY, float fromZ, float toX, float toY, float toZ, float high)
         {
             float dx = toX - fromX, dy = toY - fromY;
@@ -1558,7 +1572,11 @@ namespace Meshwright
                     var top = new BspFile.Vector3(x + sideX * side, y + sideY * side, fromZ - 1f);
                     var bottom = new BspFile.Vector3(x + sideX * side, y + sideY * side, toZ + 4f);
 
-                    if (vis.IsLineClear(top, bottom, BspVisibility.GenerationMask))
+                    // Starting inside a brush - the slab of a floor that carries on - is blocked, and
+                    // is meant to be. Starting inside a prop has to be asked: a column lying wholly in
+                    // one crosses nothing and read as open air to fall through.
+                    if (!vis.IsInsideProp(top, BspVisibility.GenerationMask) &&
+                        vis.IsLineClear(top, bottom, BspVisibility.GenerationMask))
                         continue;
 
                     // The centre line is the fall itself, so anything in its way settles the question.
@@ -1597,7 +1615,7 @@ namespace Meshwright
         /// The floor carrying on all the way to the landing point is the slab the fall test exists to
         /// catch - the landing is underneath it - and leaves no fall to test.
         /// </summary>
-        private static float Lip(BspVisibility vis, float fromX, float fromY, float fromZ,
+        internal static float Lip(BspVisibility vis, float fromX, float fromY, float fromZ,
             float dx, float dy, float run, float limit)
         {
             float ux = dx / run, uy = dy / run;
@@ -1609,8 +1627,13 @@ namespace Meshwright
                 float along = Inset + k * LipStep;
                 float x = fromX + ux * along, y = fromY + uy * along;
 
-                if (vis.IsLineClear(new BspFile.Vector3(x, y, fromZ + 2f),
-                        new BspFile.Vector3(x, y, fromZ - NavConstants.StepHeight), BspVisibility.GroundMask))
+                // Inside a prop is floor carrying on, as inside a brush is: the probe would otherwise
+                // cross nothing and call it the lip.
+                var probe = new BspFile.Vector3(x, y, fromZ + 2f);
+
+                if (!vis.IsInsideProp(probe, BspVisibility.GroundMask) &&
+                    vis.IsLineClear(probe, new BspFile.Vector3(x, y, fromZ - NavConstants.StepHeight),
+                        BspVisibility.GroundMask))
                 {
                     return along;
                 }

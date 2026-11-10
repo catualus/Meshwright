@@ -1173,6 +1173,8 @@ namespace Meshwright
                 var points = filter.SightPoints(i);
                 int buried = 0;
 
+                // Brushes only, as a zero-length line is: kept that way so the count stays comparable
+                // with every earlier run of it. IsPointSolid would add the eye points inside props.
                 foreach (var p in points)
                     if (!vis.IsLineClear(p, p, BspVisibility.GenerationMask)) buried++;
 
@@ -3663,6 +3665,8 @@ namespace Meshwright
 
                         // Knee height. Low enough that a doorway's floor still reads as open, high
                         // enough to clear the surface itself and anything sitting flush on it.
+                        // Brushes only, as a zero-length line is, so the figure stays comparable with
+                        // the earlier measurements quoted against it; IsPointSolid would add props.
                         var point = new BspFile.Vector3(x, y, z + 18f);
                         if (!vis.IsLineClear(point, point, BspVisibility.GenerationMask))
                             inside++;
