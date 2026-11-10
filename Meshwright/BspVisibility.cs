@@ -485,7 +485,27 @@ namespace Meshwright
         /// <summary>Static prop collision. Null until <see cref="AttachStaticProps"/> is called.</summary>
         private StaticProps? staticProps;
 
-        public void AttachModels(BspModels models) => entityModels = models;
+        /// <summary>
+        /// Brush entities that block a player's body: <see cref="entityModels"/> without doors,
+        /// breakables and switched-off toggle brushes, which a player walks through. Falls back to
+        /// <see cref="entityModels"/> when only one set was attached.
+        /// </summary>
+        private BspModels? movementModels;
+
+        public void AttachModels(BspModels models, BspModels? forMovement = null)
+        {
+            entityModels = models;
+            movementModels = forMovement ?? models;
+        }
+
+        /// <summary>
+        /// The brush entities a trace against <paramref name="mask"/> should meet. Movement masks (both
+        /// generation masks carry <see cref="GroundMask"/>'s windows and grates, which sight passes)
+        /// get the walk-through set; sight gets every blocking entity, so a closed door still hides
+        /// what is behind it.
+        /// </summary>
+        private BspModels? ModelsFor(int mask)
+            => (mask & GroundMask) == GroundMask ? movementModels : entityModels;
 
         public void AttachDisplacements(BspDisplacements disp) => displacements = disp;
 
@@ -556,19 +576,32 @@ namespace Meshwright
             if (Blocked(0, a, b, mask, a, b, ignoreContents))
                 return false;
 
-            if (entityModels is null || entityModels.BlockingModelCount == 0)
-                return true;
+            // No return here when there are no brush entities to test. There used to be one, and it
+            // skipped the displacement and prop tests below with it: on a map whose brush entities are
+            // all non-blocking, every line through terrain or a prop read as clear, and the clipper then
+            // deleted most of the mesh (koth_viaduct kept 762 of 6,270 areas).
+            var models = ModelsFor(mask);
+            if (models is not null && models.BlockingModelCount > 0 && BlockedByModels(models, a, b, mask, ignoreContents))
+                return false;
 
-            int gathered = Math.Min(entityModels.BlockingModelCount, GatherBuffer);
+            if (displacements is not null && displacements.Blocks(a, b, mask)) return false;
+
+            return staticProps is null || !staticProps.Blocks(a, b, mask);
+        }
+
+        /// <summary>Whether any of <paramref name="models"/> blocks the segment.</summary>
+        private bool BlockedByModels(BspModels models, BspFile.Vector3 a, BspFile.Vector3 b, int mask, int ignoreContents)
+        {
+            int gathered = Math.Min(models.BlockingModelCount, GatherBuffer);
 
             Span<int> heads = stackalloc int[gathered];
 
             Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[gathered];
-            int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+            int count = models.Gather(a, b, heads, origins, out bool overflowed);
 
             if (overflowed)
             {
-                var all = GatherAll(a, b);
+                var all = GatherAll(models, a, b);
                 heads = all.Heads;
                 origins = all.Origins;
                 count = all.Count;
@@ -579,12 +612,10 @@ namespace Meshwright
                 var o = origins[i];
                 if (Blocked(heads[i], Shift(a, o), Shift(b, o), mask,
                         Shift(a, o), Shift(b, o), ignoreContents))
-                    return false;
+                    return true;
             }
 
-            if (displacements is not null && displacements.Blocks(a, b, mask)) return false;
-
-            return staticProps is null || !staticProps.Blocks(a, b, mask);
+            return false;
         }
 
         /// <summary>Moves a world point into a model's local space.</summary>
@@ -615,14 +646,14 @@ namespace Meshwright
         /// ceiling - a segment cannot touch more models than exist - so this is guaranteed to be the
         /// last attempt rather than the first of several.
         /// </summary>
-        private (int[] Heads, BspFile.Vector3[] Origins, int Count) GatherAll(
-            BspFile.Vector3 a, BspFile.Vector3 b)
+        private static (int[] Heads, BspFile.Vector3[] Origins, int Count) GatherAll(
+            BspModels models, BspFile.Vector3 a, BspFile.Vector3 b)
         {
-            int capacity = entityModels!.BlockingModelCount;
+            int capacity = models.BlockingModelCount;
             var heads = new int[capacity];
             var origins = new BspFile.Vector3[capacity];
 
-            return (heads, origins, entityModels.Gather(a, b, heads, origins, out _));
+            return (heads, origins, models.Gather(a, b, heads, origins, out _));
         }
 
         /// <summary>
@@ -699,16 +730,17 @@ namespace Meshwright
                 }
             }
 
-            if (entityModels is not null)
+            var surfaceModels = ModelsFor(mask);
+            if (surfaceModels is not null)
             {
-                int gathered = Math.Min(entityModels.BlockingModelCount, GatherBuffer);
+                int gathered = Math.Min(surfaceModels.BlockingModelCount, GatherBuffer);
                 Span<int> heads = stackalloc int[gathered];
                 Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[gathered];
-                int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+                int count = surfaceModels.Gather(a, b, heads, origins, out bool overflowed);
 
                 if (overflowed)
                 {
-                    var all = GatherAll(a, b);
+                    var all = GatherAll(surfaceModels, a, b);
                     heads = all.Heads;
                     origins = all.Origins;
                     count = all.Count;
@@ -848,16 +880,17 @@ namespace Meshwright
             bool solid = false;
             bool found = HullTrace(0, a, b, 0f, 1f, ref hit, ref solid, mask, a, b, mins, maxs);
 
-            if (entityModels is not null && entityModels.BlockingModelCount > 0)
+            var hullModels = ModelsFor(mask);
+            if (hullModels is not null && hullModels.BlockingModelCount > 0)
             {
-                int gathered = Math.Min(entityModels.BlockingModelCount, GatherBuffer);
+                int gathered = Math.Min(hullModels.BlockingModelCount, GatherBuffer);
                 Span<int> heads = stackalloc int[gathered];
                 Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[gathered];
-                int count = entityModels.Gather(a, b, heads, origins, out bool overflowed);
+                int count = hullModels.Gather(a, b, heads, origins, out bool overflowed);
 
                 if (overflowed)
                 {
-                    var all = GatherAll(a, b);
+                    var all = GatherAll(hullModels, a, b);
                     heads = all.Heads;
                     origins = all.Origins;
                     count = all.Count;
@@ -1499,7 +1532,7 @@ namespace Meshwright
 
             if (overflowed)
             {
-                var all = GatherAll(a, b);
+                var all = GatherAll(entityModels, a, b);
                 heads = all.Heads;
                 origins = all.Origins;
                 count = all.Count;

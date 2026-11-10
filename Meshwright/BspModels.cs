@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.RegularExpressions;
 
 namespace Meshwright
 {
@@ -46,7 +45,75 @@ namespace Meshwright
             "env_",
             "point_",
             "filter_",
+
+            // Other games' trigger volumes, which are not named trigger_ but are just as non-solid.
+            // TF2 puts every spawn inside a func_respawnroom, so with these solid the flood started
+            // from 30 spawns on ctf_2fort reached 32 cells and the map got no mesh at all.
+            // func_respawnroom also covers func_respawnroomvisualizer, which is solid only to the
+            // other team; Valve's own TF2 meshes run through it.
+            "func_respawnroom",
+            "func_regenerate",
+            "func_capturezone",
+            "func_nobuild",
+            "func_nogrenades",
+            "func_flagdetectionzone",
+            "func_powerupvolume",
+            "func_suggested_build",
+            "func_upgradestation",
+            "func_croc",
+            "func_tfbot_hint",
+            "func_achievement",
+            "func_passtime",
+            "dispenser_touch_trigger",
+            "func_bomb_target",
+            "func_buyzone",
+            "func_hostage_rescue",
+            "func_dustmotes",
         ];
+
+        /// <summary>
+        /// Whether a solid brush entity is one a player walks through as far as the mesh is concerned:
+        /// what the engine's own generator passes with <c>WALK_THRU_EVERYTHING</c> (IsEntityWalkable).
+        ///
+        /// Doors open, breakables break and toggle brushes switch off, so Valve's nav_generate links the
+        /// ground on either side of them. Treated as walls here, every room behind a brush door went
+        /// unsampled on a fresh run and unconnected on a seeded one: 42 of 47 func_door doorways on
+        /// rp_downtown_tits_v25, and every spawn exit on TF2. They still block sight, which is how the
+        /// engine's visibility pass sees a closed door, so this applies to movement traces only.
+        ///
+        /// Glass (func_breakable_surf) is left solid on purpose, unlike the engine: on a roleplay map a
+        /// path through a shop window is not one a bot or NPC should take.
+        /// </summary>
+        private static bool WalksThrough(string classname, Dictionary<string, string> entity)
+        {
+            if (classname.StartsWith("func_door", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // A breakable with no health cannot be broken, and the engine treats it as a wall.
+            if (classname.Equals("func_breakable", StringComparison.OrdinalIgnoreCase))
+                return !entity.TryGetValue("health", out string? health) ||
+                       !int.TryParse(health, out int h) || h > 0;
+
+            // Solidity 0 toggle (the default), 1 never (handled in Blocks), 2 always. The engine walks
+            // through every toggle brush. That is right for the ones map logic switches off - TF2's
+            // round gates and spawn doors are func_brush toggles (cp_dustbowl's gate_2nd_spawn cut
+            // 525 of 2,000 routes while it was solid) - but roleplay maps use plain func_brush walls
+            // with the default solidity everywhere. A toggle with no name can never be switched off,
+            // since nothing can target it, so it stays a wall; a named one, or one that starts off,
+            // is walked through.
+            if (classname.Equals("func_brush", StringComparison.OrdinalIgnoreCase))
+            {
+                string solidity = entity.TryGetValue("solidity", out string? s) ? s : "0";
+                if (solidity != "0")
+                    return false;
+
+                bool startsOff = entity.TryGetValue("StartDisabled", out string? off) && off == "1";
+                bool switchable = entity.TryGetValue("targetname", out string? name) && name.Length > 0;
+                return startsOff || switchable;
+            }
+
+            return false;
+        }
 
         public readonly struct Model
         {
@@ -80,7 +147,12 @@ namespace Meshwright
             public int First, Count; // model range when a leaf
         }
 
-        public static BspModels Load(string path, BspFile bsp)
+        /// <summary>
+        /// The map's blocking brush entities. With <paramref name="forMovement"/>, leaves out the ones a
+        /// player walks through (<see cref="WalksThrough"/>): that set is for the traces that decide where
+        /// a body can stand and go, and the full set is for sight.
+        /// </summary>
+        public static BspModels Load(string path, BspFile bsp, bool forMovement = false)
         {
             var result = new BspModels();
 
@@ -98,7 +170,7 @@ namespace Meshwright
             }
 
             var raw = ReadModels(r, offsets[LumpModels]);
-            var blocking = SelectBlocking(bsp.EntityLump, raw.Length);
+            var blocking = SelectBlocking(bsp.EntityLump, raw.Length, forMovement);
 
             var kept = new List<Model>(blocking.Count);
             foreach (var (index, origin) in blocking)
@@ -150,16 +222,17 @@ namespace Meshwright
         /// their authored position, which is where they sit when the map spawns and therefore what the
         /// engine's own visibility pass traced against.
         /// </summary>
-        private static List<(int Index, BspFile.Vector3 Origin)> SelectBlocking(string entityLump, int modelCount)
+        internal static List<(int Index, BspFile.Vector3 Origin)> SelectBlocking(string entityLump, int modelCount,
+            bool forMovement = false)
         {
             var result = new List<(int, BspFile.Vector3)>();
 
-            foreach (Match block in Regex.Matches(entityLump, @"\{(.*?)\}", RegexOptions.Singleline))
+            // The quote-aware reader rather than a \{(.*?)\} regex, which cut an entity short at the
+            // first brace inside a value (lua_run code, say) and read the rest as a separate entity.
+            foreach (var entity in BspEntities.Parse(entityLump))
             {
-                string body = block.Groups[1].Value;
-
-                string classname = KeyValue(body, "classname");
-                string model = KeyValue(body, "model");
+                string classname = entity.TryGetValue("classname", out string? c) ? c : "";
+                string model = entity.TryGetValue("model", out string? m) ? m : "";
 
                 if (!model.StartsWith('*') || !int.TryParse(model[1..], out int index))
                     continue;
@@ -167,16 +240,19 @@ namespace Meshwright
                 if (index <= 0 || index >= modelCount)
                     continue;
 
-                if (!Blocks(classname, body))
+                if (!Blocks(classname, entity))
                     continue;
 
-                result.Add((index, ParseVector(KeyValue(body, "origin"))));
+                if (forMovement && WalksThrough(classname, entity))
+                    continue;
+
+                result.Add((index, ParseVector(entity.TryGetValue("origin", out string? o) ? o : "")));
             }
 
             return result;
         }
 
-        private static bool Blocks(string classname, string body)
+        private static bool Blocks(string classname, Dictionary<string, string> entity)
         {
             foreach (string prefix in NeverBlocks)
             {
@@ -186,7 +262,7 @@ namespace Meshwright
 
             // func_brush carries its own solidity: 0 toggle, 1 never, 2 always
             if (classname.Equals("func_brush", StringComparison.OrdinalIgnoreCase) &&
-                KeyValue(body, "solidity") == "1")
+                entity.TryGetValue("solidity", out string? solidity) && solidity == "1")
             {
                 return false;
             }
@@ -205,12 +281,6 @@ namespace Meshwright
                 && float.TryParse(parts[2], c, out float z)
                 ? new BspFile.Vector3(x, y, z)
                 : default;
-        }
-
-        private static string KeyValue(string body, string key)
-        {
-            var match = Regex.Match(body, $"\"{Regex.Escape(key)}\"\\s*\"([^\"]*)\"", RegexOptions.IgnoreCase);
-            return match.Success ? match.Groups[1].Value : string.Empty;
         }
 
         private void BuildBvh()
