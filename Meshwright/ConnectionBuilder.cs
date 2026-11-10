@@ -274,6 +274,13 @@ namespace Meshwright
             /// stands at both ends of any crossing on the new shapes.
             /// </summary>
             public int RemovedAtEnds;
+
+            /// <summary>
+            /// Of those, the ones removed although no body stands at both ends of any crossing, because not
+            /// even a walker of no width gets across anywhere: something solid stands in the crossing
+            /// itself wherever it is tried (<see cref="BodyVerdict.Walled"/>).
+            /// </summary>
+            public int RemovedWalled;
         }
 
         /// <summary>
@@ -312,6 +319,14 @@ namespace Meshwright
         /// not on a middle crossing that never asked, so when the clip leaves no body standing at both
         /// ends of any crossing - the corner pulled back into a strip a body no longer fits in beside the
         /// wall - there is nothing left to give it the benefit of the doubt for, and it goes too.
+        ///
+        /// Nor is a link given it whose crossing is shut to a walker of no width wherever it is tried
+        /// (<see cref="CrossingShut"/>): a line through its middle runs into something, or it drops onto
+        /// ground under the floor it leaves. The ends being too tight for a body is then not why nothing
+        /// gets across. On the twelve maps that removes 180 more links and the finished
+        /// meshes lose 175, 148 on the roleplay maps - window sills behind glass linked to the street, strips
+        /// beside rails and between props - and a hull checker flags 159 of the 169 it can test. Valve's TF2
+        /// meshes have ground at both ends of none of the 23 removed there.
         ///
         /// Links between two areas that did not face each other before the clip are left alone: they are
         /// not the builder's, but the jump-area stitcher's or someone's hand edit. Parallel over areas and
@@ -376,6 +391,8 @@ namespace Meshwright
 
                         if (verdict == BodyVerdict.NoRoom)
                             local.RemovedAtEnds++;
+                        else if (verdict == BodyVerdict.Walled)
+                            local.RemovedWalled++;
 
                         (broken ??= []).Add(id);
                     }
@@ -397,6 +414,7 @@ namespace Meshwright
                     result.Refused += local.Refused;
                     result.Removed += local.Removed;
                     result.RemovedAtEnds += local.RemovedAtEnds;
+                    result.RemovedWalled += local.RemovedWalled;
                 }
             });
 
@@ -443,6 +461,12 @@ namespace Meshwright
 
             /// <summary>No pair of ends was found where a body stands at both, so there is nothing to judge.</summary>
             NoRoom,
+
+            /// <summary>
+            /// As <see cref="NoRoom"/>, but not even a walker of no width gets across anywhere, refused by
+            /// something in the crossing itself and not by the room at its ends.
+            /// </summary>
+            Walled,
         }
 
         /// <summary>
@@ -470,6 +494,7 @@ namespace Meshwright
             float low = centre - overlap / 2f + SpanEnd, high = centre + overlap / 2f - SpanEnd;
             float depth = Depth(bounds, direction), otherDepth = Depth(otherBounds, direction);
             var tried = new HashSet<(float, float, float, float)>();
+            var reachable = new List<(float FromX, float FromY, float FromZ, float ToX, float ToY, float ToZ)>();
             bool stood = false;
 
             // The middle first, then the same grid as CrossesElsewhere, pinned to both ends.
@@ -508,6 +533,8 @@ namespace Meshwright
                             return BodyVerdict.Crosses;
                         }
 
+                        reachable.Add((fromX, fromY, fromZ, toX, toY, toZ));
+
                         stood = stood ||
                                 BodyFits(vis, fromX, fromY, GroundAt(vis, fromX, fromY, fromZ)) &&
                                 BodyFits(vis, toX, toY, GroundAt(vis, toX, toY, toZ));
@@ -523,7 +550,66 @@ namespace Meshwright
                 return BodyVerdict.Crosses;
             }
 
-            return stood || stoodAtEnd ? BodyVerdict.Blocked : BodyVerdict.NoRoom;
+            if (stood || stoodAtEnd)
+                return BodyVerdict.Blocked;
+
+            // No body stands at both ends of anything tried, so a body's refusals say nothing about the
+            // crossing. Where the crossing itself is shut at every one of them, the ends being too tight
+            // for a body is not why nothing gets across (CrossingShut).
+            return reachable.Count > 0 && reachable.TrueForAll(c =>
+                    CrossingShut(vis, other, c.FromX, c.FromY, c.FromZ, c.ToX, c.ToY, c.ToZ))
+                ? BodyVerdict.Walled
+                : BodyVerdict.NoRoom;
+        }
+
+        /// <summary>
+        /// Whether a crossing is shut to a walker of no width, by something in the crossing itself rather
+        /// than by the room at either end: its middle clearance column, the one under the walker's middle,
+        /// runs into something at one of <see cref="ClearanceHeights"/>, or it drops onto a landing that
+        /// lies under the floor it is stepped off, with no lip short of it to step off and no landing past
+        /// one (<see cref="CanFallTo"/>).
+        ///
+        /// For <see cref="DropStale"/>'s links that no body stands at both ends of, which it leaves alone
+        /// because the ends being too tight for a body is not the crossing's fault. That stops being true
+        /// when the crossing is shut as well, and on the roleplay maps it is the usual shape: a window sill
+        /// ten to eighteen units deep behind a pane of glass, linked before the clip to the street outside
+        /// across a crossing that started past the pane. The clip pulls the sill back behind the glass, and
+        /// no body stands on a sill that narrow, so the link was kept with the pane in the way - once the
+        /// hull sweep saw brush entities beside a body as well as under its middle, no body stood beside the
+        /// glass, and 24 such drops and climbs on rp_downtown_tits_v25 and rp_downtown_meowy came back.
+        ///
+        /// Narrower than <see cref="TestCrossing"/> on purpose. The side columns of a crossing next to a
+        /// strip narrower than a body graze the wall beside it, which is the area's shape again. A fall
+        /// column that lands on something partway down is as often a ledge the walker steps off again as a
+        /// slab in the way - ctf_2fort has a 171 unit drop off a battlement that a body makes by way of a
+        /// block 131 units down, and a hull checker passed four of the seven such links on it and
+        /// rp_downtown_tits_v25. Headroom is about the ends.
+        /// </summary>
+        private static bool CrossingShut(BspVisibility vis, NavArea to,
+            float fromX, float fromY, float fromZ, float toX, float toY, float toZ)
+        {
+            // Measured from the real floor and at the height of the higher surface, as TestCrossing does.
+            float fromGround = GroundAt(vis, fromX, fromY, fromZ);
+            float toGround = GroundAt(vis, toX, toY, toZ);
+            float high = MathF.Max(MathF.Max(fromZ, toZ), MathF.Max(fromGround, toGround));
+
+            if (!LinesClear(vis, fromX, fromY, toX, toY, high, 0f, 0f, sideFloors: false))
+                return true;
+
+            if (toGround >= fromGround - NavConstants.StepHeight)
+                return false;
+
+            float dx = toX - fromX, dy = toY - fromY;
+            float run = MathF.Sqrt(dx * dx + dy * dy);
+
+            if (run <= 0.01f)
+                return false;
+
+            float lip = Lip(vis, fromX, fromY, fromGround, dx, dy, run, run + LandingReach);
+
+            return run <= lip + 2f &&
+                   !LandingPastLip(vis, to, fromX, fromY, fromGround, toX, toY, dx / run, dy / run, lip,
+                       run + LandingReach, high, 0f, 0f, out _, out _);
         }
 
         /// <summary>
@@ -1185,6 +1271,10 @@ namespace Meshwright
             {
                 for (int side = -1; side <= 1; side++)
                 {
+                    // No width, so the outer columns are the middle one again.
+                    if (side != 0 && sideX == 0f && sideY == 0f)
+                        continue;
+
                     float ox = sideX * side, oy = sideY * side;
                     float z = bases[side + 1] + height;
 
