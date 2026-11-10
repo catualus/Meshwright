@@ -14,6 +14,9 @@ namespace Meshwright.Tests
     /// is the difference: two strips the clip leaves against a wall, each narrower than a body, are
     /// crossed by a body standing at their open side, and a unit further along its far side is in the
     /// wall.
+    ///
+    /// The same goes for a drop or a climb at a corner, as long as a body stands at the foot of it beside
+    /// the corner and at the top.
     /// </summary>
     public class CornerCrossingTests
     {
@@ -135,8 +138,127 @@ namespace Meshwright.Tests
             Assert.False(Linked(nav, 2, 1));
         }
 
-        /// <summary>A strip 16 units wide and 100 long, along the wall at x = 16.5, from y.</summary>
-        private static NavArea Strip(uint id, float y) => TestWorlds.Area(id, 0f, y, 16f, y + 100f, 0f);
+        /// <summary>
+        /// The two strips along the wall again, the first now on top of a ledge 40 units high that ends
+        /// where the second begins, at y = 100, with the ledge running on past their open side. A body
+        /// steps off the ledge only centred on the corner, x = 0, half of it over the ledge beyond, and
+        /// lands far enough out to clear the ledge's face; anywhere further along, its far side is in the
+        /// wall.
+        /// </summary>
+        [Fact]
+        public void ADropAtTheCornerIsLinked()
+        {
+            var world = DropWorld();
+
+            var log = ConnectionBuilder.Explain(world, Strip(1, 0f, 40f), Strip(2, 100f));
+
+            Assert.Contains(log, line => line.StartsWith("south:") &&
+                                         line.Contains("would connect further along") && line.EndsWith("at an end of the span"));
+        }
+
+        /// <summary>
+        /// The control: a block 30 units high stands on the floor at the foot of the ledge beside the
+        /// corner, from x = -30 to -2. The body stepping off the corner has nowhere to land beside it - its
+        /// outer half comes down on the block - so nothing is linked, though the fall's middle column and
+        /// one of its side columns are clear.
+        /// </summary>
+        [Fact]
+        public void ADropAtTheCornerWithNoRoomAtTheFootIsNotLinked()
+        {
+            var world = DropWorld((new(-30, 100, 0), new(-2, 400, 30)));
+
+            var log = ConnectionBuilder.Explain(world, Strip(1, 0f, 40f), Strip(2, 100f));
+
+            Assert.DoesNotContain(log, line => line.Contains("would connect"));
+        }
+
+        /// <summary>
+        /// The other way round: the second strip on top of a ledge 40 units high that starts at y = 100 and
+        /// runs on past their open side. A body jumps up onto it only centred on the corner, from far
+        /// enough back to clear the ledge's face.
+        /// </summary>
+        [Fact]
+        public void AClimbAtTheCornerIsLinked()
+        {
+            var world = ClimbWorld();
+
+            var log = ConnectionBuilder.Explain(world, Strip(1, 0f), Strip(2, 100f, 40f));
+
+            Assert.Contains(log, line => line.StartsWith("south:") &&
+                                         line.Contains("would connect further along") && line.EndsWith("at an end of the span"));
+        }
+
+        /// <summary>
+        /// The control: a rail along the top of the ledge beside the corner, from x = -7 to -2, with floor
+        /// under the body's overhanging half on either side of it. A body centred on the corner at the top
+        /// stands in the rail, so nothing is linked.
+        /// </summary>
+        [Fact]
+        public void AClimbAtTheCornerWithNoRoomAtTheTopIsNotLinked()
+        {
+            var world = ClimbWorld((new(-7, 100, 40), new(-2, 400, 120)));
+
+            var log = ConnectionBuilder.Explain(world, Strip(1, 0f), Strip(2, 100f, 40f));
+
+            Assert.DoesNotContain(log, line => line.Contains("would connect"));
+        }
+
+        /// <summary>
+        /// The drop and the climb back that the build makes at the corner are recorded as made at an end of
+        /// the span, and go when the clip pulls both strips back four units from their open side, leaving
+        /// no body standing at either end of any crossing between them. Without the record, both stay.
+        /// </summary>
+        [Fact]
+        public void ADropMadeAtACornerGoesWhenTheClipLeavesNoRoomThere()
+        {
+            var world = DropWorld();
+            var built = new NavFile();
+            built.Areas.Add(Strip(1, 0f, 40f));
+            built.Areas.Add(Strip(2, 100f));
+
+            var made = ConnectionBuilder.Build(built, world);
+
+            Assert.Equal(1, made.Drops);
+            Assert.Equal(1, made.JumpsUp);
+            Assert.Contains((1u, NavGeometry.South, 2u), made.AtSpanEnds);
+            Assert.Contains((2u, NavGeometry.North, 1u), made.AtSpanEnds);
+
+            var before = new Dictionary<uint, NavGeometry.Bounds> { [1] = new(0, 0, 16, 100), [2] = new(0, 100, 16, 200) };
+
+            var kept = Linked(TestWorlds.Area(1, 4, 0, 16, 100, 40), Area(2, 4, 100, 16, 200));
+            var left = ConnectionBuilder.DropStale(kept, world, before.Keys.ToHashSet(), before);
+
+            Assert.Equal(2, left.Refused);
+            Assert.Equal(0, left.Removed);
+
+            var nav = Linked(TestWorlds.Area(1, 4, 0, 16, 100, 40), Area(2, 4, 100, 16, 200));
+            var dropped = ConnectionBuilder.DropStale(nav, world, before.Keys.ToHashSet(), before, made.AtSpanEnds);
+
+            Assert.Equal(2, dropped.Removed);
+            Assert.Equal(2, dropped.RemovedAtEnds);
+            Assert.False(Linked(nav, 1, 2));
+            Assert.False(Linked(nav, 2, 1));
+        }
+
+        /// <summary>
+        /// The wall at x = 16.5 and a ledge 40 units high on the near side of y = 100, running on past the
+        /// strips' open side, with any further boxes.
+        /// </summary>
+        private static BspVisibility DropWorld(params (BspFile.Vector3 Mins, BspFile.Vector3 Maxs)[] more)
+            => StartSolidTests.Boxes([
+                (new(16.5f, -400, 0), new(400, 400, 200)),
+                (new(-400, -400, 0), new(16.5f, 100, 40)),
+                .. more]);
+
+        /// <summary>The wall at x = 16.5 and a ledge 40 units high on the far side of y = 100, with any further boxes.</summary>
+        private static BspVisibility ClimbWorld(params (BspFile.Vector3 Mins, BspFile.Vector3 Maxs)[] more)
+            => StartSolidTests.Boxes([
+                (new(16.5f, -400, 0), new(400, 400, 200)),
+                (new(-400, 100, 0), new(16.5f, 400, 40)),
+                .. more]);
+
+        /// <summary>A strip 16 units wide and 100 long, along the wall at x = 16.5, from y, at height z.</summary>
+        private static NavArea Strip(uint id, float y, float z = 0f) => TestWorlds.Area(id, 0f, y, 16f, y + 100f, z);
 
         private static NavArea Area(uint id, float minX, float minY, float maxX, float maxY)
             => TestWorlds.Area(id, minX, minY, maxX, maxY, 0f);
