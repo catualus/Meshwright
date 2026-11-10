@@ -528,6 +528,22 @@ namespace Meshwright
         /// </summary>
         public int Gather(BspFile.Vector3 a, BspFile.Vector3 b, Span<int> heads,
             Span<BspFile.Vector3> origins, out bool truncated)
+            => Gather(a, b, default, default, heads, origins, out truncated);
+
+        /// <summary>
+        /// <see cref="Gather(BspFile.Vector3, BspFile.Vector3, Span{int}, Span{BspFile.Vector3}, out bool)"/>
+        /// for a box swept along the segment rather than a point: every model whose bounds the box, offset
+        /// by <paramref name="mins"/> and <paramref name="maxs"/> from the point, could touch.
+        ///
+        /// The hull sweep used to gather with the bare segment, so a brush entity the box ran into but
+        /// the line through its origin missed was never traced against at all. A body dragged past the
+        /// end of a thin func_brush panel, its middle clear of the panel and one side straight through
+        /// it, came back clear: on ctf_2fort the respawn-room door panels read as open to a 32 unit body
+        /// anywhere its centre line passed a unit beyond their ends. Each model's bounds are grown by the
+        /// box instead (a Minkowski sum), which is exact for an axis-aligned box.
+        /// </summary>
+        public int Gather(BspFile.Vector3 a, BspFile.Vector3 b, BspFile.Vector3 mins, BspFile.Vector3 maxs,
+            Span<int> heads, Span<BspFile.Vector3> origins, out bool truncated)
         {
             truncated = false;
 
@@ -549,7 +565,7 @@ namespace Meshwright
                 int index = stack[--top];
                 var node = bvh[index];
 
-                if (!SegmentHitsBox(a, b, node.Mins, node.Maxs))
+                if (!SegmentHitsBox(a, b, Sub(node.Mins, maxs), Sub(node.Maxs, mins)))
                     continue;
 
                 if (node.Count == 0)
@@ -570,7 +586,7 @@ namespace Meshwright
                 for (int i = node.First; i < node.First + node.Count; i++)
                 {
                     var model = models[i];
-                    if (!SegmentHitsBox(a, b, model.Mins, model.Maxs))
+                    if (!SegmentHitsBox(a, b, Sub(model.Mins, maxs), Sub(model.Maxs, mins)))
                         continue;
 
                     // Flagged only once a model has actually been dropped, not merely because the
@@ -590,6 +606,8 @@ namespace Meshwright
 
             return found;
         }
+
+        private static BspFile.Vector3 Sub(BspFile.Vector3 a, BspFile.Vector3 b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
 
         /// <summary>Slab test of a finite segment against an axis-aligned box.</summary>
         private static bool SegmentHitsBox(BspFile.Vector3 a, BspFile.Vector3 b,

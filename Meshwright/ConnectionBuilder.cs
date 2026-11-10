@@ -82,6 +82,13 @@ namespace Meshwright
             public int Drops;
             public int Rejected;
 
+            /// <summary>
+            /// The links made only at an end of their shared span (<see cref="CrossesAtEnds"/>), from, the
+            /// direction and to, for <see cref="DropStale"/>: they stand on a body standing at a corner,
+            /// and are not given the benefit of the doubt a link to a spot no body stands in gets.
+            /// </summary>
+            public readonly HashSet<(uint From, int Direction, uint To)> AtSpanEnds = [];
+
             // split by direction so a systematic asymmetry cannot hide behind a single total
             public int UpCandidates, UpRejectedByReach, UpRejectedByTrace;
             public int DownCandidates, DownRejectedByReach, DownRejectedByTrace;
@@ -126,6 +133,7 @@ namespace Meshwright
                 RejectedByFall += other.RejectedByFall;
                 HeadroomStartSolid += other.HeadroomStartSolid;
                 HeadroomLowCeiling += other.HeadroomLowCeiling;
+                AtSpanEnds.UnionWith(other.AtSpanEnds);
             }
         }
 
@@ -191,8 +199,12 @@ namespace Meshwright
                 var refusal = TestCrossing(vis, from, to, fromX, fromY, fromZ, toX, toY, toZ, out _);
                 if (refusal == Refusal.Clear)
                     log.Add($"{name}:   would connect");
-                else if (CrossesElsewhere(vis, from, to, bounds, other, direction, centreA, overlap, out float elsewhere))
-                    log.Add($"{name}:   REFUSED by {refusal} at the middle, would connect further along (climb {elsewhere:F1})");
+                else if (CrossesElsewhere(vis, from, to, bounds, other, direction, centreA, overlap, out float elsewhere,
+                             out bool atEnd))
+                {
+                    log.Add($"{name}:   REFUSED by {refusal} at the middle, would connect further along (climb {elsewhere:F1})" +
+                            (atEnd ? ", at an end of the span" : ""));
+                }
                 else
                     log.Add($"{name}:   REFUSED by {refusal} at the middle and everywhere along the span");
             }
@@ -256,6 +268,12 @@ namespace Meshwright
 
             /// <summary>Of those, the ones no body gets across either, which are removed.</summary>
             public int Removed;
+
+            /// <summary>
+            /// Of those, the ones the build made only at an end of their span, removed although no body
+            /// stands at both ends of any crossing on the new shapes.
+            /// </summary>
+            public int RemovedAtEnds;
         }
 
         /// <summary>
@@ -272,7 +290,10 @@ namespace Meshwright
         /// across anywhere and a body does stand at both ends of at least one of those crossings. Trying
         /// several depths matters because the areas the clip leaves are often strips narrower than a body
         /// against a wall: six units in, the depth the builder uses, a body sticks into the wall, while a
-        /// unit in it stands half over the neighbour and crosses.
+        /// unit in it stands half over the neighbour and crosses. The two ends of the span are tried as well,
+        /// with the body centred on each and half of it past it over floor (<see cref="CrossesAtEnds"/>),
+        /// and count as any other crossing does: a body that gets across there keeps the link, and one
+        /// that stands at both ends of one there counts as standing.
         ///
         /// The second condition is what keeps this from deleting ground. Measured on the twelve benchmark
         /// maps, 10,559 of the 85,484 links made before the clip on a reshaped area fail the builder's test
@@ -286,13 +307,20 @@ namespace Meshwright
         /// against 4% of the links kept, and where Valve's TF2 meshes have ground at both ends they leave 28
         /// of 58 unjoined, against 22 of 4,990 kept links.
         ///
+        /// The exception is a link <paramref name="atSpanEnds"/> says the build made only at an end of the
+        /// span (<see cref="CrossesAtEnds"/>). It was made because a body stood at both ends at a corner,
+        /// not on a middle crossing that never asked, so when the clip leaves no body standing at both
+        /// ends of any crossing - the corner pulled back into a strip a body no longer fits in beside the
+        /// wall - there is nothing left to give it the benefit of the doubt for, and it goes too.
+        ///
         /// Links between two areas that did not face each other before the clip are left alone: they are
         /// not the builder's, but the jump-area stitcher's or someone's hand edit. Parallel over areas and
         /// safe for the same reason <see cref="Build"/> is - an iteration only removes from the area it
         /// was handed, and reads nothing but geometry - so the result does not depend on thread order.
         /// </summary>
         public static StaleResult DropStale(NavFile nav, BspVisibility vis, IReadOnlySet<uint> reshaped,
-            IReadOnlyDictionary<uint, NavGeometry.Bounds> before)
+            IReadOnlyDictionary<uint, NavGeometry.Bounds> before,
+            IReadOnlySet<(uint From, int Direction, uint To)>? atSpanEnds = null)
         {
             var result = new StaleResult();
             if (reshaped.Count == 0)
@@ -340,11 +368,14 @@ namespace Meshwright
 
                         local.Refused++;
 
-                        if (BodyCrosses(vis, area, other, bounds, otherBounds, oldBounds, otherOld, direction) !=
-                            BodyVerdict.Blocked)
-                        {
+                        var verdict = BodyCrosses(vis, area, other, bounds, otherBounds, oldBounds, otherOld, direction);
+                        bool atEnd = atSpanEnds is not null && atSpanEnds.Contains((area.Id, direction, id));
+
+                        if (verdict == BodyVerdict.Crosses || verdict == BodyVerdict.NoRoom && !atEnd)
                             continue;
-                        }
+
+                        if (verdict == BodyVerdict.NoRoom)
+                            local.RemovedAtEnds++;
 
                         (broken ??= []).Add(id);
                     }
@@ -365,6 +396,7 @@ namespace Meshwright
                     result.Tested += local.Tested;
                     result.Refused += local.Refused;
                     result.Removed += local.Removed;
+                    result.RemovedAtEnds += local.RemovedAtEnds;
                 }
             });
 
@@ -394,7 +426,7 @@ namespace Meshwright
                 return false;
 
             return TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _) == Refusal.Clear ||
-                   CrossesElsewhere(vis, area, other, bounds, otherBounds, direction, centreA, overlap, out _);
+                   CrossesElsewhere(vis, area, other, bounds, otherBounds, direction, centreA, overlap, out _, out _);
         }
 
         /// <summary>How far inside each area a body crossing a stale link is tried from (<see cref="DropStale"/>).</summary>
@@ -417,7 +449,8 @@ namespace Meshwright
         /// Whether a crouching body gets from one area to the other anywhere along the span they share,
         /// or along the span they shared before the clip if they no longer face each other - each end tried
         /// at every one of <see cref="BodyDepths"/> that fits inside its area, with the body swept as well
-        /// as the clearance lines. In a fixed order, so the answer does not depend on thread timing.
+        /// as the clearance lines - and last, at the two ends of the span itself (<see cref="CrossesAtEnds"/>).
+        /// In a fixed order, so the answer does not depend on thread timing.
         ///
         /// <see cref="BodyVerdict.Blocked"/> only when a body also stands at both ends of at least one of
         /// the crossings tried. Where it stands at no pair of them, the crossing is not what fails: one of
@@ -482,7 +515,15 @@ namespace Meshwright
                 }
             }
 
-            return stood ? BodyVerdict.Blocked : BodyVerdict.NoRoom;
+            // Then the two ends of the span themselves, with half the body past them over floor
+            // (CrossesAtEnds), which count for where a body stands as well as for where it crosses.
+            if (CrossesAtEnds(vis, area, other, bounds, otherBounds, direction,
+                    centre - overlap / 2f, centre + overlap / 2f, BodyDepths, out _, out bool stoodAtEnd))
+            {
+                return BodyVerdict.Crosses;
+            }
+
+            return stood || stoodAtEnd ? BodyVerdict.Blocked : BodyVerdict.NoRoom;
         }
 
         /// <summary>
@@ -590,10 +631,13 @@ namespace Meshwright
                             out bool startedSolid, sweepBody: sweepMiddle);
                         if (refusal != Refusal.Clear &&
                             CrossesElsewhere(vis, area, other, bounds, NavGeometry.GetBounds(other), direction,
-                                centreA, overlap, out float elsewhere))
+                                centreA, overlap, out float elsewhere, out bool atEnd))
                         {
                             refusal = Refusal.Clear;
                             climb = elsewhere;
+
+                            if (atEnd)
+                                local.AtSpanEnds.Add((area.Id, direction, other.Id));
                         }
 
                         if (refusal != Refusal.Clear)
@@ -734,12 +778,15 @@ namespace Meshwright
         ///
         /// Where the body does hang past the span, the space it hangs into belongs to neither area, so
         /// nothing else vouches for it and it gets a real body swept through it, not only the lines.
+        ///
+        /// The ends themselves, with the body centred on them, are tried last (<see cref="CrossesAtEnds"/>).
         /// </summary>
         private static bool CrossesElsewhere(BspVisibility vis, NavArea area, NavArea other,
             NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
-            float centre, float overlap, out float climb)
+            float centre, float overlap, out float climb, out bool atEnd)
         {
             climb = 0;
+            atEnd = false;
             float spanLow = centre - overlap / 2f, spanHigh = centre + overlap / 2f;
             float low = spanLow + SpanEnd;
             float high = spanHigh - SpanEnd;
@@ -777,7 +824,195 @@ namespace Meshwright
                 }
             }
 
+            atEnd = CrossesAtEnds(vis, area, other, bounds, otherBounds, direction, spanLow, spanHigh, EndDepths,
+                out climb, out _);
+            return atEnd;
+        }
+
+        /// <summary>
+        /// How deep into each area a crossing at the very end of a shared span is tried from by
+        /// <see cref="CrossesElsewhere"/>: the builder's own <see cref="Inset"/>, then a unit.
+        /// </summary>
+        private static readonly float[] EndDepths = [Inset, SpanEnd];
+
+        /// <summary>
+        /// Whether a walker gets across at either end of the shared span itself, the body centred on the
+        /// end and half of it hanging past, over whatever lies beyond: tried last, after every position on
+        /// the span has failed, so it only ever adds.
+        ///
+        /// Every other position stops a unit short of the end (<see cref="SpanEnd"/>), and that unit is the
+        /// whole corner. Two strips the clip pulls back against a wall, each narrower than a body and
+        /// sharing an edge as long as they are wide, are crossed by a body that stands at their open side,
+        /// half over the area they both run along; a unit further in, its far side is in the wall. On the
+        /// twelve benchmark maps, of the 39,889 adjacent pairs the builder refused and left unlinked, a hull
+        /// checker gets a body across 956 only with it centred on an end of the span - 737 of them level -
+        /// and the builder's own test, run there, clears 570. Of the 425 links <see cref="DropStale"/>
+        /// removed, 9 were the same. Each end is tried from <see cref="Inset"/> and from a unit inside each
+        /// area (<paramref name="depths"/>), as the strips are often too shallow for a body six units in
+        /// to clear the wall behind it.
+        ///
+        /// Only where the ground under the overhanging half is real floor (<see cref="OverhangSupported"/>):
+        /// the half of the body past the end is over neither area, and nothing else here vouches for it.
+        /// That floor is the third area the two both run along, or what it stands on; a neighbouring area
+        /// is not asked for as such, as the floor is what holds a body up and the meshes leave strips of it
+        /// unmeshed along walls. A crouching body has to stand at both ends (<see cref="BodyStands"/>), and
+        /// it is always swept as well as the clearance lines, start-solid aware, as off the middle
+        /// (<see cref="BodyCrosses(BspVisibility, float, float, float, float, float)"/>), so a corner is no
+        /// way round a wall.
+        ///
+        /// Level crossings only, the two floors within a step. A drop or a climb at a corner hangs half the
+        /// body over a third area whose floor belongs to one level or the other, and nothing the fall and
+        /// headroom tests look at is there. Tried at the ends as well, they added 84 drops and 3 climbs on
+        /// the twelve maps; a hull checker flagged 22 of the drops, about the rate it flags the drops kept,
+        /// and those were the shape no test here sees - pl_upward has a 33 unit drop off a slope, linked at
+        /// the corner, where a body cannot stand at the foot beside it.
+        ///
+        /// <paramref name="stood"/> says whether a body stood at both ends of a crossing tried here, for
+        /// <see cref="DropStale"/>'s verdict.
+        /// </summary>
+        private static bool CrossesAtEnds(BspVisibility vis, NavArea area, NavArea other,
+            NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
+            float spanLow, float spanHigh, float[] depths, out float climb, out bool stood)
+        {
+            climb = 0;
+            stood = false;
+            float depth = Depth(bounds, direction), otherDepth = Depth(otherBounds, direction);
+
+            for (int end = 0; end < 2; end++)
+            {
+                float c = end == 0 ? spanLow : spanHigh;
+                float outward = end == 0 ? -1f : 1f;
+
+                // Where the two areas no longer face each other across this span (DropStale tries the span
+                // they shared before the clip), an end one of them has since been pulled back from is not
+                // on it, and there is no corner of it to stand at.
+                if (!WithinAlong(bounds, direction, c) || !WithinAlong(otherBounds, direction, c))
+                    continue;
+
+                foreach (float into in depths)
+                {
+                    if (into > 1f && into > depth - 1f)
+                        continue;
+
+                    foreach (float intoOther in depths)
+                    {
+                        if (intoOther > 1f && intoOther > otherDepth - 1f)
+                            continue;
+
+                        var (fromX, fromY) = EdgePoint(bounds, direction, c, -InsetWithin(into, depth));
+                        var (toX, toY) = EdgePoint(otherBounds, NavGeometry.Opposite(direction), c,
+                            -InsetWithin(intoOther, otherDepth));
+                        float fromZ = NavGeometry.SurfaceZ(area, fromX, fromY);
+                        float toZ = NavGeometry.SurfaceZ(other, toX, toY);
+                        float fromGround = GroundAt(vis, fromX, fromY, fromZ);
+                        float toGround = GroundAt(vis, toX, toY, toZ);
+
+                        // Level crossings only, within a step: see the summary.
+                        if (MathF.Abs(toGround - fromGround) > NavConstants.StepHeight)
+                            continue;
+
+                        if (!OverhangSupported(vis, direction, outward, fromX, fromY, fromGround, toX, toY, toGround))
+                            continue;
+
+                        if (!BodyStands(vis, fromX, fromY, fromGround) || !BodyStands(vis, toX, toY, toGround))
+                            continue;
+
+                        stood = true;
+
+                        if (TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _,
+                                sweepBody: true) == Refusal.Clear)
+                        {
+                            climb = toZ - fromZ;
+                            return true;
+                        }
+                    }
+                }
+            }
+
             return false;
+        }
+
+        /// <summary>
+        /// Whether a crouching body stands at one end of a crossing at the end of a span
+        /// (<see cref="CrossesAtEnds"/>): <see cref="BodyFits"/>, from the height a body resting on the floor
+        /// there comes to rest at rather than from the floor under its middle.
+        ///
+        /// <see cref="TestCrossing"/> sweeps the body across at the higher floor and asks only for a line's
+        /// headroom at each end. At a corner half the body is over neither area, on whatever the third one
+        /// is - a kerb, a stair tread, a slope - and a body rests on the highest of it, up to a step above
+        /// the floor under its middle, so that is the height it has to fit from.
+        /// </summary>
+        private static bool BodyStands(BspVisibility vis, float x, float y, float ground)
+        {
+            const float Half = NavConstants.HalfHumanWidth;
+            const float Drop = NavConstants.StepHeight + 1f;
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(x, y, ground + NavConstants.StepHeight),
+                new BspFile.Vector3(x, y, ground - 1f),
+                new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, 0f),
+                BspVisibility.GroundMask, out float fraction, out _, out bool startSolid);
+
+            float rest = !startSolid && hit ? ground + NavConstants.StepHeight - fraction * Drop : ground;
+            return BodyFits(vis, x, y, MathF.Max(rest, ground));
+        }
+
+        /// <summary>Whether a position along an edge lies on an area's own extent along it.</summary>
+        private static bool WithinAlong(NavGeometry.Bounds b, int direction, float c)
+        {
+            bool alongX = direction is NavGeometry.North or NavGeometry.South;
+            return c >= (alongX ? b.MinX : b.MinY) && c <= (alongX ? b.MaxX : b.MaxY);
+        }
+
+        /// <summary>Where past a span's end the floor under a body's overhanging half is probed.</summary>
+        private static readonly float[] OverhangProbes =
+            [NavConstants.HalfHumanWidth / 2f, NavConstants.HalfHumanWidth - 1f];
+
+        /// <summary>
+        /// Whether there is floor under the half of a body that hangs past the end of a shared span, for a
+        /// crossing at that end (<see cref="CrossesAtEnds"/>): probed halfway out and at the body's edge,
+        /// beside both ends of the crossing and its middle. Beside each end the probe has to find floor
+        /// within a step of that end's own ground, and between them within a step of either. That is the
+        /// third area the two both touch, or the floor it stands on; a ledge's corner over a drop, or a
+        /// wall, is not. A probe that starts inside something finds no floor, so a wall the span ends
+        /// against cannot pass for one.
+        /// </summary>
+        private static bool OverhangSupported(BspVisibility vis, int direction, float outward,
+            float fromX, float fromY, float fromGround, float toX, float toY, float toGround)
+        {
+            bool alongX = direction is NavGeometry.North or NavGeometry.South;
+            float low = MathF.Min(fromGround, toGround), high = MathF.Max(fromGround, toGround);
+            float top = high + NavConstants.StepHeight;
+
+            foreach (float past in OverhangProbes)
+            {
+                for (int k = 0; k <= 2; k++)
+                {
+                    float x = fromX + (toX - fromX) * k / 2f, y = fromY + (toY - fromY) * k / 2f;
+                    if (alongX) x += outward * past; else y += outward * past;
+
+                    var start = new BspFile.Vector3(x, y, top);
+                    if (!vis.IsLineClear(start, start, BspVisibility.GroundMask))
+                        return false;
+
+                    if (!StairMarker.TryFindFloor(vis, x, y, top, high - low + 2f * NavConstants.StepHeight,
+                            out float floor))
+                    {
+                        return false;
+                    }
+
+                    // Beside each end, that end's own floor: the corner of a ledge, with the drop it
+                    // overlooks a long way below, is not floor under the half of a body standing on it.
+                    // Between them, either.
+                    bool nearFrom = MathF.Abs(floor - fromGround) <= NavConstants.StepHeight;
+                    bool nearTo = MathF.Abs(floor - toGround) <= NavConstants.StepHeight;
+
+                    if (k == 0 ? !nearFrom : k == 2 ? !nearTo : !nearFrom && !nearTo)
+                        return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>
