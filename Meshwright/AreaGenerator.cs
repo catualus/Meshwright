@@ -156,14 +156,19 @@ namespace Meshwright
             // what it produced. Ordinary BFS is sequential, and nearly all the cost here is the floor
             // probing each cell triggers - many traces per column - so the frontier is where the time
             // goes and where the parallelism belongs.
-            var visited = new System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float>();
-            var accepted = new System.Collections.Concurrent.ConcurrentBag<Cell>();
+            //
+            // Nothing here is a concurrent collection. The visited set is only ever written between
+            // the parallel loops, each level's output is gathered per thread, and accepted cells are
+            // appended in order after the coverage test - so the parallel loops share nothing they
+            // write. The world's column caches are the one shared, written state; see World.
+            var visited = new Visited(world.Columns, world.Rows);
+            var accepted = new List<Cell>();
             int uncovered = 0;
 
             var frontier = new List<Cell>();
             foreach (var seed in Seeds(nav, bsp, vis, world, result))
             {
-                if (!Claim(visited, seed.Cell))
+                if (!visited.Claim(seed.Cell))
                     continue;
 
                 frontier.Add(seed.Cell);
@@ -190,9 +195,15 @@ namespace Meshwright
             result.Seeds = frontier.Count;
             int visitedCount = 0;
 
+            var reached = new List<Cell>();
+            var next = new List<Cell>();
+            var uncoveredAt = Array.Empty<bool>();
+            Expansion? spare = null;
+
             while (frontier.Count > 0 && visited.Count < MaxVisited)
             {
-                var reached = new System.Collections.Concurrent.ConcurrentBag<Cell>();
+                reached.Clear();
+                Expansion? finished = null;
 
                 // Expansion only reads the visited set; nothing is claimed until the whole level is in.
                 // Claiming inside the parallel loop made the first thread to arrive the winner, and two
@@ -200,37 +211,97 @@ namespace Meshwright
                 // the cell - and so which height its node, its links and its area got - depended on
                 // thread timing. rp_downtown_tits_v25 came out 17,189 areas on one run and 17,191 on
                 // the next, from the same build at the same thread count.
-                Parallel.ForEach(frontier, NavConcurrency.Options, cell =>
-                {
-                    Interlocked.Increment(ref visitedCount);
-
-                    foreach (var neighbour in Neighbours(world, cell))
+                //
+                // Each worker gathers what it reaches into its own lists and hands them over once, at
+                // the end of the level, by pushing them onto a chain with a compare-exchange. This used
+                // to be a ConcurrentBag created afresh every level and never disposed: its per-thread
+                // storage is a ThreadLocal, and finalising those cost the finalizer thread a tenth of
+                // the stage's CPU on the benchmark maps. The lists are kept for the next level.
+                Parallel.ForEach(frontier, NavConcurrency.Options,
+                    () =>
                     {
-                        if (!Seen(visited, neighbour))
-                            reached.Add(neighbour);
-                    }
-                });
+                        // Popped lock-free. Nothing is pushed back while the loop runs, so a list
+                        // cannot leave the chain and return to it under a racing pop.
+                        while (true)
+                        {
+                            var top = Volatile.Read(ref spare);
+                            if (top is null)
+                                return new Expansion();
+
+                            if (Interlocked.CompareExchange(ref spare, top.Next, top) == top)
+                                return top;
+                        }
+                    },
+                    (cell, _, local) =>
+                    {
+                        local.Neighbours.Clear();
+                        Neighbours(world, cell, local.Neighbours, local.Passed);
+
+                        foreach (var neighbour in local.Neighbours)
+                        {
+                            if (!visited.Seen(neighbour))
+                                local.Reached.Add(neighbour);
+                        }
+
+                        return local;
+                    },
+                    local =>
+                    {
+                        do local.Next = Volatile.Read(ref finished);
+                        while (Interlocked.CompareExchange(ref finished, local, local.Next) != local.Next);
+                    });
+
+                while (finished is not null)
+                {
+                    var local = finished;
+                    finished = local.Next;
+
+                    reached.AddRange(local.Reached);
+                    local.Reached.Clear();
+
+                    local.Next = spare;
+                    spare = local;
+                }
+
+                visitedCount += frontier.Count;
 
                 // Settled in a fixed order, so the same cell wins a shared key every run: the lowest
-                // floor, which is the order the result is sorted in further down.
-                var next = reached.ToList();
-                next.Sort(CompareCells);
-                next.RemoveAll(cell => !Claim(visited, cell));
+                // floor, which is the order the result is sorted in further down. The order the
+                // workers handed their lists over in is gone after the sort - every element is
+                // ordered by its whole value, and two that compare equal are the same cell.
+                reached.Sort(CompareCells);
+
+                next.Clear();
+                foreach (var cell in reached)
+                {
+                    if (visited.Claim(cell))
+                        next.Add(cell);
+                }
 
                 // Cells already represented still propagate - the flood has to be able to cross existing
-                // mesh to reach the far side of it - but they contribute no new area.
-                Parallel.ForEach(next, NavConcurrency.Options, neighbour =>
-                {
-                    var at = world.PositionOf(neighbour.Gx, neighbour.Gy, neighbour.Z);
+                // mesh to reach the far side of it - but they contribute no new area. Tested in
+                // parallel into a flag per cell, then appended in the order the cells were claimed.
+                if (uncoveredAt.Length < next.Count)
+                    uncoveredAt = new bool[Math.Max(next.Count, uncoveredAt.Length * 2)];
 
-                    if (index.FindAt(at.X, at.Y, neighbour.Z, CoveredTolerance) < 0)
-                    {
-                        accepted.Add(neighbour);
-                        Interlocked.Increment(ref uncovered);
-                    }
+                Parallel.For(0, next.Count, NavConcurrency.Options, i =>
+                {
+                    var cell = next[i];
+                    var at = world.PositionOf(cell.Gx, cell.Gy, cell.Z);
+
+                    uncoveredAt[i] = index.FindAt(at.X, at.Y, cell.Z, CoveredTolerance) < 0;
                 });
 
-                frontier = next;
+                for (int i = 0; i < next.Count; i++)
+                {
+                    if (!uncoveredAt[i])
+                        continue;
+
+                    accepted.Add(next[i]);
+                    uncovered++;
+                }
+
+                (frontier, next) = (next, frontier);
 
                 // No denominator exists here - the flood finds out how much ground there is by walking
                 // it - so this reports what it has found rather than inventing a percentage.
@@ -243,9 +314,9 @@ namespace Meshwright
             if (visited.Count >= MaxVisited)
                 result.Notes.Add($"flood hit the {MaxVisited:N0} cell ceiling; output may be incomplete");
 
-            // Sorted so the node grid, and therefore the mesh, is identical run to run: a ConcurrentBag
-            // returns its contents in whatever order threads happened to add them.
-            var ordered = accepted.ToList();
+            // Sorted so the node grid, and therefore the mesh, is built column by column, lowest floor
+            // first, rather than in the order the flood happened to reach the cells.
+            var ordered = accepted;
             ordered.Sort(CompareCells);
 
             // Accepted cells become nodes carrying the ground normal already sampled for them, and
@@ -359,8 +430,7 @@ namespace Meshwright
         /// so the reference point fell just outside an area that was otherwise right. Centring areas on
         /// their nodes took that category from 348 to 2 on that map.
         /// </summary>
-        private static void Classify(NavFile reference, NavFile generated, World world,
-            System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float> visited,
+        private static void Classify(NavFile reference, NavFile generated, World world, Visited visited,
             HashSet<(int, int, int)> accepted, Result result)
         {
             var generatedIndex = new NavGeometry.Index(generated.Areas);
@@ -414,7 +484,7 @@ namespace Meshwright
 
                 if (!world.IsStandable(cell.Gx, cell.Gy, floor.Value))
                     Note("floor found but not standable");
-                else if (!Seen(visited, new Cell(cell.Gx, cell.Gy, floor.Value)))
+                else if (!visited.Seen(new Cell(cell.Gx, cell.Gy, floor.Value)))
                     Note("standable but the flood never reached it");
                 else if (!accepted.Contains(key))
                     Note("reached, but treated as already covered");
@@ -511,7 +581,10 @@ namespace Meshwright
         }
 
         /// <summary>Height is quantised so two probes of the same surface hash to the same cell.</summary>
-        private static (int, int, int) Key(Cell c) => (c.Gx, c.Gy, (int)MathF.Round(c.Z / 8f));
+        private static (int, int, int) Key(Cell c) => (c.Gx, c.Gy, Band(c.Z));
+
+        /// <summary>The eight-unit height band a cell's <see cref="Key"/> files it under.</summary>
+        private static int Band(float z) => (int)MathF.Round(z / 8f);
 
         /// <summary>
         /// How close two floors of one column have to be to count as one cell even when they fall either
@@ -521,37 +594,107 @@ namespace Meshwright
         private const float SameFloor = NavNodeGrid.HeightGranularity / 2f;
 
         /// <summary>
-        /// Whether the flood has already claimed this cell: its own band, or a floor of the same column in
-        /// the band either side within <see cref="SameFloor"/> of it.
+        /// The cells the flood has claimed: at most one per <see cref="Key"/>, with the height it was
+        /// claimed at.
         ///
-        /// The band alone was the test, so two floors of one column a unit apart were one cell or two
-        /// depending on where the band edges fell between them. The sewers of both roleplay maps are
-        /// terrain laid 1.3 units over the brush face it was built from, at z=-195.7 over z=-197, with
-        /// the edge between two bands at z=-196: the flood took both floors of every column there, the
-        /// generator gave each its own node, and areas were laid one over the other. On
-        /// rp_downtown_tits_v25 it handed the connection builder 371 pairs of areas overlapping by more
-        /// than two units both ways at heights within a step, 288 of them within a unit. The finished
-        /// meshes of the twelve benchmark maps held 365 and 381 such pairs on the roleplay maps and up to
-        /// 12 on the TF2 maps; with this they hold 0 to 2. Where one copy was a strip nothing linked to,
-        /// it was kept as a cut-off group a body fits in - six on each roleplay map, every one lying
-        /// inside an area the spawns reach.
+        /// A chain of claims per grid column, in flat arrays, rather than a dictionary keyed on the cell.
+        /// It used to be a ConcurrentDictionary, read from every core during expansion, and spinning on
+        /// its locks - with those of the world's caches - was two thirds of the sampling stage's CPU;
+        /// every entry was also a heap node the GC carried through each generation. Nothing about this
+        /// set needs a concurrent collection: it is written only by <see cref="Claim"/>, which runs on
+        /// one thread between the parallel loops, and only read inside them, so the readers never
+        /// overlap a writer. A column holds one claim per floor, which is one or two almost everywhere,
+        /// so walking its chain costs less than hashing the key did.
+        ///
+        /// Every cell asked about is inside the grid - seeds are placed with <see cref="World.TryCell"/>
+        /// and neighbours come out of columns that exist - and a cell outside it is refused outright,
+        /// since its index would land in some other column.
         /// </summary>
-        private static bool Seen(System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float> visited, Cell c)
+        private sealed class Visited
         {
-            var (gx, gy, band) = Key(c);
+            private readonly int columns;
+            private readonly int rows;
 
-            return visited.ContainsKey((gx, gy, band)) ||
-                   visited.TryGetValue((gx, gy, band - 1), out float below) && c.Z - below < SameFloor ||
-                   visited.TryGetValue((gx, gy, band + 1), out float above) && above - c.Z < SameFloor;
+            /// <summary>Per column, one more than the index of its latest claim; zero for none.</summary>
+            private readonly int[] heads;
+
+            private Claimed[] claims = new Claimed[4096];
+
+            private readonly record struct Claimed(int Band, float Z, int Next);
+
+            public Visited(int columns, int rows)
+            {
+                this.columns = columns;
+                this.rows = rows;
+                heads = new int[checked(columns * rows)];
+            }
+
+            /// <summary>How many cells have been claimed.</summary>
+            public int Count { get; private set; }
+
+            private int ColumnOf(Cell c)
+            {
+                if (c.Gx < 0 || c.Gy < 0 || c.Gx >= columns || c.Gy >= rows)
+                    throw new ArgumentOutOfRangeException(nameof(c), c, "cell is outside the sampling grid");
+
+                return c.Gy * columns + c.Gx;
+            }
+
+            /// <summary>
+            /// Whether the flood has already claimed this cell: its own band, or a floor of the same column in
+            /// the band either side within <see cref="SameFloor"/> of it.
+            ///
+            /// The band alone was the test, so two floors of one column a unit apart were one cell or two
+            /// depending on where the band edges fell between them. The sewers of both roleplay maps are
+            /// terrain laid 1.3 units over the brush face it was built from, at z=-195.7 over z=-197, with
+            /// the edge between two bands at z=-196: the flood took both floors of every column there, the
+            /// generator gave each its own node, and areas were laid one over the other. On
+            /// rp_downtown_tits_v25 it handed the connection builder 371 pairs of areas overlapping by more
+            /// than two units both ways at heights within a step, 288 of them within a unit. The finished
+            /// meshes of the twelve benchmark maps held 365 and 381 such pairs on the roleplay maps and up to
+            /// 12 on the TF2 maps; with this they hold 0 to 2. Where one copy was a strip nothing linked to,
+            /// it was kept as a cut-off group a body fits in - six on each roleplay map, every one lying
+            /// inside an area the spawns reach.
+            /// </summary>
+            public bool Seen(Cell c)
+            {
+                int band = Band(c.Z);
+                var all = claims;
+
+                for (int i = heads[ColumnOf(c)] - 1; i >= 0; i = all[i].Next - 1)
+                {
+                    ref readonly var claim = ref all[i];
+
+                    if (claim.Band == band ||
+                        claim.Band == band - 1 && c.Z - claim.Z < SameFloor ||
+                        claim.Band == band + 1 && claim.Z - c.Z < SameFloor)
+                        return true;
+                }
+
+                return false;
+            }
+
+            /// <summary>
+            /// Claims a cell for the flood unless <see cref="Seen"/> already, recording the height it was
+            /// claimed at. Called only from one thread at a time, in a fixed order, so the same floor of a
+            /// pair always wins - and never while anything is reading.
+            /// </summary>
+            public bool Claim(Cell c)
+            {
+                if (Seen(c))
+                    return false;
+
+                // Not Seen means nothing holds this cell's band in its column, so there is no claim to
+                // replace: one claim per key, as the dictionary's TryAdd kept it.
+                if (Count == claims.Length)
+                    Array.Resize(ref claims, claims.Length * 2);
+
+                int column = ColumnOf(c);
+                claims[Count] = new Claimed(Band(c.Z), c.Z, heads[column]);
+                heads[column] = ++Count;
+                return true;
+            }
         }
-
-        /// <summary>
-        /// Claims a cell for the flood unless <see cref="Seen"/> already, recording the height it was
-        /// claimed at. Called only from one thread at a time, in a fixed order, so the same floor of a
-        /// pair always wins.
-        /// </summary>
-        private static bool Claim(System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float> visited, Cell c)
-            => !Seen(visited, c) && visited.TryAdd(Key(c), c.Z);
 
         /// <summary>Column by column, lowest floor first: the one order cells are ever settled in.</summary>
         private static int CompareCells(Cell a, Cell b)
@@ -577,25 +720,133 @@ namespace Meshwright
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int gx, int gy, float z)
         {
             var world = new World(vis, mins, maxs);
-            var found = new List<(int, int, float)>();
+            var cells = new List<Cell>();
+            Neighbours(world, new Cell(gx, gy, z), cells, []);
 
-            foreach (var cell in Neighbours(world, new Cell(gx, gy, z)))
-                found.Add((cell.Gx, cell.Gy, cell.Z));
-
-            return found;
+            return [.. cells.Select(cell => (cell.Gx, cell.Gy, cell.Z))];
         }
 
         /// <summary>
         /// How much room the sampler finds at one cell, for tests - the same seam as
         /// <see cref="SampleNeighbours"/>, for the question of whether a player fits there at all.
         /// Several heights are asked of one world, in order, so its cache sits between them as it
-        /// does in the flood.
+        /// does in the flood - for the heights that are floors of the column, which are the only ones
+        /// it keeps.
         /// </summary>
         internal static Clearance[] SampleClearance(BspVisibility vis,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int gx, int gy, params float[] heights)
         {
             var world = new World(vis, mins, maxs);
             return [.. heights.Select(z => world.ClearanceAt(gx, gy, z))];
+        }
+
+        /// <summary>
+        /// For tests: every floor of every column of the grid, with the clearance there, asked of one
+        /// world by <paramref name="threads"/> threads at once.
+        ///
+        /// The threads start together and walk the columns in the same order, so they race for each
+        /// column and each floor's clearance slot as they would on a busy frontier. What the caches
+        /// promise is that the race is invisible: every thread gets the same answers, and the very same
+        /// array of floors for a column, as one thread asking alone would. <paramref name="agreed"/> is
+        /// whether they did; the answers returned are the first thread's.
+        /// </summary>
+        internal static (float Z, Clearance Clearance)[][] SampleColumns(BspVisibility vis,
+            BspFile.Vector3 mins, BspFile.Vector3 maxs, int threads, out bool agreed)
+        {
+            var world = new World(vis, mins, maxs);
+            int count = world.Columns * world.Rows;
+
+            var answers = new (float Z, Clearance Clearance)[threads][][];
+            var arrays = new World.Surface[threads][][];
+            var failures = new Exception?[threads];
+
+            using var start = new Barrier(threads);
+            var workers = new Thread[threads];
+
+            for (int t = 0; t < threads; t++)
+            {
+                int me = t;
+                workers[t] = new Thread(() =>
+                {
+                    var mine = answers[me] = new (float, Clearance)[count][];
+                    var got = arrays[me] = new World.Surface[count][];
+                    start.SignalAndWait();
+
+                    try
+                    {
+                        for (int i = 0; i < count; i++)
+                        {
+                            int gx = i % world.Columns, gy = i / world.Columns;
+                            var floors = got[i] = world.SurfacesIn(gx, gy);
+
+                            mine[i] = [.. floors.Select(f => (f.Position.Z, world.ClearanceAt(gx, gy, f.Position.Z)))];
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        failures[me] = e;
+                    }
+                });
+
+                workers[t].Start();
+            }
+
+            foreach (var worker in workers)
+                worker.Join();
+
+            if (failures.FirstOrDefault(e => e is not null) is { } failure)
+                throw new AggregateException(failure);
+
+            agreed = true;
+            for (int t = 1; t < threads; t++)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    agreed &= ReferenceEquals(arrays[t][i], arrays[0][i]) &&
+                              answers[t][i].AsSpan().SequenceEqual(answers[0][i]);
+                }
+            }
+
+            return answers[0];
+        }
+
+        /// <summary>
+        /// For tests: records the steps out of each of <paramref name="expanded"/>, split across
+        /// <paramref name="threads"/> threads recording at once, then asks the world whether each of
+        /// <paramref name="asked"/> was swept - the record LinkNodes reads instead of sweeping again.
+        /// </summary>
+        internal static bool[] SamplePassages(BspVisibility vis, BspFile.Vector3 mins, BspFile.Vector3 maxs,
+            IReadOnlyList<(int Gx, int Gy, float Z, (int Dx, int Dy, float Z)[] Steps)> expanded, int threads,
+            IReadOnlyList<(int Gx, int Gy, float Z, int Dx, int Dy, float ToZ)> asked)
+        {
+            var world = new World(vis, mins, maxs);
+
+            Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, t =>
+            {
+                for (int i = t; i < expanded.Count; i += threads)
+                {
+                    var (gx, gy, z, steps) = expanded[i];
+                    world.RecordPassages(new Cell(gx, gy, z), [.. steps]);
+                }
+            });
+
+            return [.. asked.Select(a => world.Passed(a.Gx, a.Gy, a.Z, a.Dx, a.Dy, a.ToZ))];
+        }
+
+        /// <summary>
+        /// For tests: claims each of <paramref name="claimed"/> in order in a fresh visited set over a
+        /// grid of <paramref name="columns"/> by <paramref name="rows"/>, and returns whether each claim
+        /// was granted, then whether each of <paramref name="asked"/> counts as seen.
+        /// </summary>
+        internal static (bool[] Claimed, bool[] Seen) SampleClaims(int columns, int rows,
+            IReadOnlyList<(int Gx, int Gy, float Z)> claimed, IReadOnlyList<(int Gx, int Gy, float Z)> asked)
+        {
+            var visited = new Visited(columns, rows);
+
+            bool[] granted = [.. claimed.Select(c => visited.Claim(new Cell(c.Gx, c.Gy, c.Z)))];
+            bool[] seen = [.. asked.Select(c => visited.Seen(new Cell(c.Gx, c.Gy, c.Z)))];
+
+            return (granted, seen);
         }
 
         /// <summary>
@@ -829,18 +1080,41 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// Four-way only. Diagonal movement was tried and made no difference whatsoever - identical
+        /// visited count, byte-identical output - because anywhere a diagonal step reaches, the two
+        /// orthogonal steps already reached. Not worth the extra work per cell.
+        /// </summary>
+        private static readonly (int Dx, int Dy)[] Directions = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+        /// <summary>
+        /// One worker's scratch for a level of the flood: the cells it reached that the visited set had
+        /// not, and the lists <see cref="Neighbours"/> fills, reused from cell to cell.
+        /// </summary>
+        private sealed class Expansion
+        {
+            public readonly List<Cell> Reached = [];
+            public readonly List<Cell> Neighbours = [];
+            public readonly List<(int Dx, int Dy, float Z)> Passed = [];
+
+            /// <summary>The next in whichever chain this is on: spare, or handed over this level.</summary>
+            public Expansion? Next;
+        }
+
+        /// <summary>
         /// Cells a walker could move to from here: the four grid neighbours, at whichever storey is
         /// within reach. Reach is asymmetric on purpose - up is capped by a crouch jump, down by the
         /// drop the engine treats as survivable.
+        ///
+        /// Appends to <paramref name="into"/>, in direction order and top down within a column, rather
+        /// than returning a sequence: this runs for every cell the flood expands, on every core, and an
+        /// iterator plus the array of directions it used to build each time were garbage made at the
+        /// busiest point in the sampler. <paramref name="passed"/> is scratch, cleared here.
         /// </summary>
-        private static IEnumerable<Cell> Neighbours(World world, Cell cell)
+        private static void Neighbours(World world, Cell cell, List<Cell> into, List<(int Dx, int Dy, float Z)> passed)
         {
-            List<(int Dx, int Dy, float Z)>? passed = null;
+            passed.Clear();
 
-            // Four-way only. Diagonal movement was tried and made no difference whatsoever - identical
-            // visited count, byte-identical output - because anywhere a diagonal step reaches, the two
-            // orthogonal steps already reached. Not worth the extra work per cell.
-            foreach (var (dgx, dgy) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+            foreach (var (dgx, dgy) in Directions)
             {
                 int gx = cell.Gx + dgx;
                 int gy = cell.Gy + dgy;
@@ -925,16 +1199,14 @@ namespace Meshwright
                     if (!world.CanReach(cell, gx, gy, z))
                         continue;
 
-                    (passed ??= []).Add((dgx, dgy, z));
-
-                    yield return new Cell(gx, gy, z);
+                    passed.Add((dgx, dgy, z));
+                    into.Add(new Cell(gx, gy, z));
                 }
             }
 
             // Kept so LinkNodes need not sweep the same steps again. Recorded once the cell has been
-            // fully expanded, which the flood always does; a caller that stops early only loses the
-            // saving, never the answer, since LinkNodes sweeps anything not recorded.
-            if (passed is not null)
+            // fully expanded; anything not recorded, LinkNodes simply sweeps.
+            if (passed.Count > 0)
                 world.RecordPassages(cell, passed);
         }
 
@@ -1062,17 +1334,92 @@ namespace Meshwright
         /// The sampled world: grid coordinates, floor heights per column, and standability. Results are
         /// cached because the flood revisits the same column from several directions, and a column costs
         /// a full set of traces to resolve.
+        ///
+        /// **The caches live in one array with an entry per grid column**, not in dictionaries. They
+        /// were three ConcurrentDictionaries - surfaces by column, clearance by column and exact height,
+        /// passages by cell - and the parallel frontier hammered them from every core: on the benchmark
+        /// maps two thirds of the sampling stage's CPU went to spinning on their locks, and the stage ran
+        /// barely four times faster on eight threads than on one. Their entries were also heap nodes
+        /// that lived for the whole stage, so the GC copied every one of them through each generation.
+        ///
+        /// Each part of a column's entry is filled lock-free, with a compare-exchange: whoever works it
+        /// out first publishes it, and anyone who raced them and lost throws their copy away and uses
+        /// the published one. That is safe because every cached value depends only on its key - which
+        /// column, and which floor of it - and on the world's geometry, which nothing writes to while the
+        /// flood runs; nothing else the traces read is shared or remembered between calls. Two threads
+        /// that both resolve a column get the same floors, and two that both judge a floor get the same
+        /// clearance, so the race costs the duplicated work and nothing else, and every reader sees the
+        /// one value that won.
         /// </summary>
         private sealed class World(BspVisibility vis, BspFile.Vector3 mins, BspFile.Vector3 maxs)
         {
-            // Concurrent rather than lock-guarded: the parallel frontier hammers these from every core,
-            // and a lock around the whole dictionary would serialise exactly the work being spread out.
-            // A duplicate computation on a race is harmless - the answer is the same either way.
-            private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int), Surface[]> surfaces = new();
-            private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), Clearance> clearance = new();
+            public int Columns { get; } = Extent(mins.X, maxs.X);
+            public int Rows { get; } = Extent(mins.Y, maxs.Y);
 
-            public int Columns { get; } = (int)MathF.Ceiling((maxs.X - mins.X) / StepSize);
-            public int Rows { get; } = (int)MathF.Ceiling((maxs.Y - mins.Y) / StepSize);
+            private static int Extent(float min, float max) => (int)MathF.Ceiling((max - min) / StepSize);
+
+            /// <summary>Each column's cached state, by <c>gy * Columns + gx</c>.</summary>
+            private readonly Column[] columns = new Column[checked(Extent(mins.X, maxs.X) * Extent(mins.Y, maxs.Y))];
+
+            /// <summary>
+            /// Everything cached about one grid column: its floors, the clearance of each, and the steps
+            /// the flood swept out of it. A struct in the one array, so a column costs no object of its
+            /// own - only its floors, when it has any, and its passages.
+            /// </summary>
+            private struct Column
+            {
+                /// <summary>
+                /// The column's floors, top down; null until resolved. Shared with every caller, so
+                /// never written to.
+                /// </summary>
+                public Surface[]? Surfaces;
+
+                /// <summary>
+                /// <see cref="ClearanceAt"/> for each of <see cref="Surfaces"/>, two bits apiece by
+                /// index: zero until judged, then the answer plus one. A column has at most
+                /// <see cref="MaxFloors"/> floors, so sixteen pairs of bits hold them all. Set with a
+                /// compare-exchange that only ever fills an empty pair, so the first answer stored for
+                /// a floor is the only one ever read.
+                /// </summary>
+                public uint Clearance;
+
+                /// <summary>The newest of the column's <see cref="Passage"/> records, pushed lock-free.</summary>
+                public Passage? Passages;
+            }
+
+            /// <summary>The most floors one column is searched for.</summary>
+            private const int MaxFloors = 16;
+
+            /// <summary>
+            /// The steps out of one expanded cell that passed <see cref="CanReach"/>, chained to the
+            /// column's previous record. <see cref="Band"/> is the cell's key within its column.
+            /// </summary>
+            private sealed class Passage(int band, float fromZ, (int Dx, int Dy, float Z)[] steps)
+            {
+                public readonly int Band = band;
+                public readonly float FromZ = fromZ;
+                public readonly (int Dx, int Dy, float Z)[] Steps = steps;
+                public Passage? Next;
+            }
+
+            private bool InGrid(int gx, int gy) => gx >= 0 && gy >= 0 && gx < Columns && gy < Rows;
+
+            /// <summary>A column's cached state. The column must be <see cref="InGrid"/>.</summary>
+            private ref Column ColumnAt(int gx, int gy) => ref columns[gy * Columns + gx];
+
+            /// <summary>
+            /// A column's floors, resolving them if nobody has yet. Lock-free: the first thread to
+            /// publish them wins, and a thread that raced it adopts the winner's.
+            /// </summary>
+            private Surface[] FloorsOf(ref Column column, int gx, int gy)
+            {
+                if (Volatile.Read(ref column.Surfaces) is { } cached)
+                    return cached;
+
+                var fresh = FindSurfaces(mins.X + gx * StepSize, mins.Y + gy * StepSize);
+
+                return Interlocked.CompareExchange(ref column.Surfaces, fresh, null) ?? fresh;
+            }
 
             public bool TryCell(float x, float y, float z, out Cell cell)
             {
@@ -1080,7 +1427,7 @@ namespace Meshwright
                 int gy = (int)MathF.Round((y - mins.Y) / StepSize);
                 cell = new Cell(gx, gy, z);
 
-                return gx >= 0 && gy >= 0 && gx < Columns && gy < Rows;
+                return InGrid(gx, gy);
             }
 
             /// <summary>The world position of a sampled cell.</summary>
@@ -1132,14 +1479,26 @@ namespace Meshwright
                     PositionOf(from.Gx, from.Gy, from.Z), PositionOf(gx, gy, z));
 
             /// <summary>
-            /// Steps out of each expanded cell that passed <see cref="CanReach"/>, by grid offset and
-            /// the exact destination height. One entry per cell the flood expanded - the visited set
-            /// guarantees that is once - and usually one step per direction.
+            /// Records the steps out of an expanded cell that passed <see cref="CanReach"/>, by grid
+            /// offset and the exact destination height. One record per cell the flood expanded - the
+            /// visited set guarantees that is once - and usually one step per direction.
+            ///
+            /// Kept on the cell's column, pushed onto its chain with a compare-exchange: two cells of
+            /// one column can be expanded by two threads in the same level. A cell outside the grid has
+            /// no column, and nothing records it; no node <see cref="Passed"/> is asked about lies
+            /// outside the grid, so nothing is lost.
             /// </summary>
-            private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), (float FromZ, (int Dx, int Dy, float Z)[] Steps)> passages = new();
-
             public void RecordPassages(Cell from, List<(int Dx, int Dy, float Z)> steps)
-                => passages[Key(from)] = (from.Z, [.. steps]);
+            {
+                if (!InGrid(from.Gx, from.Gy))
+                    return;
+
+                ref var column = ref ColumnAt(from.Gx, from.Gy);
+                var record = new Passage(Band(from.Z), from.Z, [.. steps]);
+
+                do record.Next = Volatile.Read(ref column.Passages);
+                while (Interlocked.CompareExchange(ref column.Passages, record, record.Next) != record.Next);
+            }
 
             /// <summary>
             /// Whether the flood already swept exactly this step and found it clear.
@@ -1154,7 +1513,17 @@ namespace Meshwright
             /// </summary>
             public bool Passed(int gx, int gy, float z, int dx, int dy, float toZ)
             {
-                if (!passages.TryGetValue(Key(new Cell(gx, gy, z)), out var entry) || entry.FromZ != z)
+                if (!InGrid(gx, gy))
+                    return false;
+
+                // The newest record under the cell's key, as the dictionary this replaced kept it.
+                int band = Band(z);
+                var entry = Volatile.Read(ref ColumnAt(gx, gy).Passages);
+
+                while (entry is not null && entry.Band != band)
+                    entry = entry.Next;
+
+                if (entry is null || entry.FromZ != z)
                     return false;
 
                 foreach (var step in entry.Steps)
@@ -1186,18 +1555,7 @@ namespace Meshwright
             /// slowdown for less coverage.
             /// </summary>
             public Surface[] SurfacesIn(int gx, int gy)
-            {
-                if (gx < 0 || gy < 0 || gx >= Columns || gy >= Rows)
-                    return [];
-
-                if (surfaces.TryGetValue((gx, gy), out var cached))
-                    return cached;
-
-                float x = mins.X + gx * StepSize;
-                float y = mins.Y + gy * StepSize;
-
-                return surfaces.GetOrAdd((gx, gy), FindSurfaces(x, y).ToArray());
-            }
+                => InGrid(gx, gy) ? FloorsOf(ref ColumnAt(gx, gy), gx, gy) : [];
 
             /// <summary>A sampled floor: where it is, which way it faces, and whether it is drawn.</summary>
             public readonly record struct Surface(
@@ -1209,18 +1567,19 @@ namespace Meshwright
             /// <see cref="BspVisibility.EnumerateFloors"/>, which documents why it is not built out of
             /// Valve's <c>GetGroundHeight</c> despite that being the obvious-looking reuse.
             /// </summary>
-            private List<Surface> FindSurfaces(float x, float y)
+            private Surface[] FindSurfaces(float x, float y)
             {
-                const int MaxFloors = 16;
-
                 Span<BspVisibility.FloorSample> samples = stackalloc BspVisibility.FloorSample[MaxFloors];
                 int count = vis.EnumerateFloors(x, y, maxs.Z, mins.Z, samples);
 
-                var found = new List<Surface>(count);
+                if (count == 0)
+                    return [];
+
+                var found = new Surface[count];
                 for (int i = 0; i < count; i++)
                 {
-                    found.Add(new Surface(
-                        new BspFile.Vector3(x, y, samples[i].Z), samples[i].Normal, samples[i].Nodraw));
+                    found[i] = new Surface(
+                        new BspFile.Vector3(x, y, samples[i].Z), samples[i].Normal, samples[i].Nodraw);
                 }
 
                 return found;
@@ -1243,13 +1602,56 @@ namespace Meshwright
                 // one column in the same bucket can have different answers - a tread and the landing a
                 // few units under it, one with room to stand and one without - and a bucketed cache
                 // handed both whichever answer was computed first, which on a parallel flood depends on
-                // thread timing. The heights asked about are the column's own sampled floors, so the
-                // cache still serves every repeat.
-                var key = (gx, gy, BitConverter.SingleToInt32Bits(z));
+                // thread timing.
+                //
+                // So the cache has a slot per floor of the column, and a height is matched to its floor
+                // bit for bit. Every height the flood asks about is one of the column's own sampled
+                // floors, so the slots serve every repeat; any other height - which only the test seam
+                // asks about - is simply worked out each time, which gives the same answer.
+                if (!InGrid(gx, gy))
+                    return Judge(gx, gy, z);
 
-                if (clearance.TryGetValue(key, out var cached))
-                    return cached;
+                ref var column = ref ColumnAt(gx, gy);
+                var floors = FloorsOf(ref column, gx, gy);
+                int bits = BitConverter.SingleToInt32Bits(z);
+                int floor = 0;
 
+                while (floor < floors.Length && BitConverter.SingleToInt32Bits(floors[floor].Position.Z) != bits)
+                    floor++;
+
+                if (floor == floors.Length || floor >= MaxFloors)
+                    return Judge(gx, gy, z);
+
+                int shift = floor * 2;
+                uint word = Volatile.Read(ref column.Clearance);
+                uint known = (word >> shift) & 3u;
+
+                if (known != 0)
+                    return (Clearance)(known - 1);
+
+                uint judged = (uint)Judge(gx, gy, z) + 1;
+
+                // Another floor of the column may be filled in between the read and the exchange, which
+                // fails it without touching this floor's bits; read again and retry until this floor's
+                // pair is either filled by us or found filled by someone else.
+                while (true)
+                {
+                    uint seen = Interlocked.CompareExchange(ref column.Clearance, word | judged << shift, word);
+
+                    if (seen == word)
+                        return (Clearance)(judged - 1);
+
+                    word = seen;
+                    known = (word >> shift) & 3u;
+
+                    if (known != 0)
+                        return (Clearance)(known - 1);
+                }
+            }
+
+            /// <summary><see cref="ClearanceAt"/> worked out from the geometry, uncached.</summary>
+            private Clearance Judge(int gx, int gy, float z)
+            {
                 float x = mins.X + gx * StepSize;
                 float y = mins.Y + gy * StepSize;
 
@@ -1328,7 +1730,7 @@ namespace Meshwright
                 if (result != Clearance.None && vis.IsInKillVolume(x, y, z))
                     result = Clearance.None;
 
-                return clearance.GetOrAdd(key, result);
+                return result;
             }
 
             /// <summary>
@@ -1588,6 +1990,8 @@ namespace Meshwright
 
             int deadEndsLogged = 0;
             Cell lowest = startCell;
+            var neighbours = new List<Cell>();
+            var passed = new List<(int Dx, int Dy, float Z)>();
 
             while (frontier.Count > 0)
             {
@@ -1599,7 +2003,10 @@ namespace Meshwright
 
                 bool anyNeighbour = false;
 
-                foreach (var neighbour in Neighbours(world, cell))
+                neighbours.Clear();
+                Neighbours(world, cell, neighbours, passed);
+
+                foreach (var neighbour in neighbours)
                 {
                     if (Math.Abs(neighbour.Gx - startCell.Gx) > radiusCells ||
                         Math.Abs(neighbour.Gy - startCell.Gy) > radiusCells)

@@ -713,6 +713,18 @@ on all twelve benchmark maps, and the plane tests fall to 95 million: 365 millio
 `gm_construct`, and 962 million to 12 million on `cp_badlands`. The plane tests were never the bulk
 of a run's time, so the saving in wall time is small, a few seconds on the city.
 
+The sampling flood used to keep what it had learned about each column - its floors, the room above
+each, the steps already swept out of it, and which cells it had visited - in concurrent
+dictionaries shared by every thread, and spent most of its time spinning on their locks: on eight
+threads it ran less than five times faster than on one. They are now an array with an entry per
+grid column, each part filled once without a lock, and the visited set is only written between the
+parallel steps, so it needs no lock either. On `rp_downtown_tits_v25` at 4 threads the flood's CPU
+time fell from about 28 seconds to about 19, its garbage-collection pauses from 3.6 seconds to 0.4,
+and what it allocates from 650 MB to 180 MB; in a pair of runs at 8 threads its wall time went from
+8.6 seconds to 3.4.
+`gm_construct` fell from about 10 seconds of CPU to 8. The mesh is byte-identical on all twelve
+benchmark maps.
+
 Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
 gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
 the same three.
