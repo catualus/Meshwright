@@ -184,5 +184,43 @@ namespace Meshwright.Tests
             Assert.Equal(0, Remove(nav, vis, firstGeneratedId: 11).Removed);
             Assert.Contains(nav.Areas, a => a.Id == 10);
         }
+
+        /// <summary>
+        /// Open ground with a prop over it like a low table: a slab from 10 to 22 units up, well wider
+        /// than the slot's footprint. Ten units under it is no room for a body; its top is.
+        /// </summary>
+        private static BspVisibility UnderATable()
+        {
+            var vis = TestWorlds.Ground();
+            vis.AttachStaticProps(StaticProps.FromHulls(LineTraceStartSolidTests.Box(
+                new BspFile.Vector3(-100, -100, 10), new BspFile.Vector3(110, 125, 22))));
+            return vis;
+        }
+
+        /// <summary>
+        /// The regression, ctf_2fort's shape: an area on the floor under a prop, where no body fits, is
+        /// not given room for the body that stands on the prop's top. The floor search starts a step over
+        /// the area, inside the prop, and reports the prop's underside; a body rested over that comes to
+        /// rest on the top, 22 units over the area it was asked about.
+        /// </summary>
+        [Fact]
+        public void ABodyOnAPropOverTheAreaIsNoRoomInIt()
+        {
+            var vis = UnderATable();
+            var nav = Mesh(Slot(10));
+
+            Assert.False(PocketRemover.HasRoom(vis, Slot(10)));
+            Assert.Equal([10u], Remove(nav, vis).RemovedIds);
+        }
+
+        /// <summary>The control: the same prop with the area on its top, where a body does stand.</summary>
+        [Fact]
+        public void AnAreaOnAPropsTopHasRoom()
+        {
+            var vis = UnderATable();
+            var top = TestWorlds.Area(10, 0f, 0f, 10f, 25f, 22f);
+
+            Assert.True(PocketRemover.HasRoom(vis, top));
+        }
     }
 }

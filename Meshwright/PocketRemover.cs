@@ -235,6 +235,14 @@ namespace Meshwright
         /// for a body only with its centre exactly on the area's boundary - mostly a corner, on rows of
         /// pockets along a diagonal wall - and none anywhere a unit inside it. A body that fits at one
         /// point of an area and nowhere else in it is the geometry's rounding, not a place to be.
+        ///
+        /// Nor from ground that is not open floor: a point of it with something solid a unit above. The
+        /// search for the floor goes down from a step over the area's surface, and where that starts inside
+        /// a prop it reports what is under the prop - the underside of a shelf, the floor under a stool -
+        /// and the body is then rested on whatever is highest within a step over that, which is the prop's
+        /// own top. On ctf_2fort an area 25 by 18 on the floor beside a small prop in a corner, where no body
+        /// fits, was kept as somewhere a body stands because a body stands on the prop, 22 units over the
+        /// area it was asked about.
         /// </summary>
         internal static bool HasRoom(BspVisibility vis, NavArea area)
         {
@@ -251,6 +259,10 @@ namespace Meshwright
                 {
                     float y = y0 + (y1 - y0) * j / (down - 1);
                     float ground = ConnectionBuilder.GroundAt(vis, x, y, NavGeometry.SurfaceZ(area, x, y));
+
+                    // Ground found from inside something is not floor - see the summary.
+                    if (vis.IsPointSolid(x, y, ground + 1f, BspVisibility.GenerationMask))
+                        continue;
 
                     if (ConnectionBuilder.BodyStands(vis, x, y, ground))
                         return true;
