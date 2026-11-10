@@ -39,13 +39,11 @@ namespace Meshwright
         /// <summary>
         /// The same triangles again, as one array per component, with the two edges precomputed.
         ///
-        /// This is the layout the nearest-hit trace wants and the interleaved one cannot give it. That
-        /// trace has to test every triangle in every leaf it reaches - it is looking for the closest
-        /// hit, so there is nothing to exit early for - which makes it the one query in this class that
-        /// is pure arithmetic over a known count, and the one worth doing eight at a time. Eight lanes
-        /// need eight triangles' worth of each component side by side; reading them out of
-        /// <see cref="vertices"/> would be a gather per lane and would cost more than the vector math
-        /// saves.
+        /// This is the layout the eight-wide triangle tests want and the interleaved one cannot give
+        /// them: eight lanes need eight triangles' worth of each component side by side, and reading
+        /// them out of <see cref="vertices"/> would be a gather per lane and would cost more than the
+        /// vector math saves. The nearest-hit trace (<see cref="NearestWide"/>) and the yes-or-no line
+        /// test (<see cref="Blocks"/>) both read them; only the box sweep still works from the vertices.
         ///
         /// The edges are stored rather than recomputed because Moller-Trumbore uses them and nothing
         /// else does, so subtracting them once at build time removes six subtractions per triangle per
@@ -53,7 +51,8 @@ namespace Meshwright
         /// happens once per trace rather than once per triangle, and reconstructing a vertex as
         /// <c>v0 + e1</c> is not bit-identical to the vertex that was read from the file.
         ///
-        /// Costs one more copy of the geometry - about 6MB on a map with 165,000 triangles.
+        /// Costs one more copy of the geometry - about 6MB on a map with 165,000 triangles. Each array
+        /// runs <see cref="LanePadding"/> past the last triangle.
         /// </summary>
         private float[] v0x = [], v0y = [], v0z = [];
         private float[] e1x = [], e1y = [], e1z = [];
@@ -190,7 +189,10 @@ namespace Meshwright
         private void ApplyOrder(int count)
         {
             var sortedVertices = new BspFile.Vector3[count * 3];
-            var sortedContents = new int[count];
+
+            // Padded past the last triangle with contents no mask matches, so a leaf near the end can
+            // be loaded eight lanes wide without reading off the array; see LanePadding.
+            var sortedContents = new int[count + LanePadding];
             var sortedOutward = outward is null ? null : new BspFile.Vector3[count];
 
             for (int i = 0; i < count; i++)
@@ -216,12 +218,22 @@ namespace Meshwright
             BuildEdgeArrays(count);
         }
 
-        /// <summary>Splits the permuted triangles into the per-component arrays the wide trace reads.</summary>
+        /// <summary>
+        /// How far the per-triangle arrays the wide tests read run past the last triangle: one vector
+        /// less one. A leaf holds at most eight triangles but often fewer, and <see cref="Blocks"/> tests
+        /// whatever a leaf holds as one eight-lane load, masking off the lanes past its end. Those lanes
+        /// read the next leaf's triangles, or this padding after the last leaf, and never decide
+        /// anything.
+        /// </summary>
+        private const int LanePadding = 7;
+
+        /// <summary>Splits the permuted triangles into the per-component arrays the wide traces read.</summary>
         private void BuildEdgeArrays(int count)
         {
-            v0x = new float[count]; v0y = new float[count]; v0z = new float[count];
-            e1x = new float[count]; e1y = new float[count]; e1z = new float[count];
-            e2x = new float[count]; e2y = new float[count]; e2z = new float[count];
+            int padded = count + LanePadding;
+            v0x = new float[padded]; v0y = new float[padded]; v0z = new float[padded];
+            e1x = new float[padded]; e1y = new float[padded]; e1z = new float[padded];
+            e2x = new float[padded]; e2y = new float[padded]; e2z = new float[padded];
 
             for (int i = 0; i < count; i++)
             {
@@ -389,12 +401,40 @@ namespace Meshwright
 
 
         /// <summary>
-        /// Whether the segment crosses any displacement surface matching <paramref name="mask"/>.
+        /// Whether the segment crosses any triangle matching <paramref name="mask"/>.
+        ///
+        /// The hottest query in the program on a map with much terrain or many props: on
+        /// rp_downtown_tits_v25 it ran 205.7 million times and was 43% of the whole run, at about 34
+        /// tree nodes and 24 triangles a query. So it is written for speed in three ways, none of which
+        /// changes an answer.
+        ///
+        /// The segment's half of the box test is worked out once (<see cref="SegmentBoxes"/>) rather
+        /// than three divisions per node. Nodes are read in place rather than copied. And a leaf's
+        /// triangles are tested eight at a time over the edge arrays (<see cref="LeafBlocksWide"/>),
+        /// with the same operations in the same order as the one-at-a-time test, so each lane comes
+        /// out bit for bit as that test would.
+        ///
+        /// Children are box-tested before they are pushed, and the one the segment enters first is
+        /// walked first. That changes the order leaves are visited in, which is safe here and nowhere
+        /// else in this class: the answer is whether *any* triangle is crossed, and that does not depend
+        /// on which is found first. The traces that report a fraction or a normal keep the order they
+        /// always had, because a tie between two hits at the same distance goes to the first found.
+        ///
+        /// The stack can never overflow - the tree is split at the median, so it is no deeper than
+        /// about log2 of the triangle count, and a depth-first walk holds at most one entry per level
+        /// plus one - so the guard on it is never what decides an answer, before or after.
         /// </summary>
         public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b, int mask)
         {
             if (bvh.Length == 0)
                 return false;
+
+            var segment = new SegmentBoxes(a, b);
+
+            if (!segment.Hits(in bvh[0], out _))
+                return false;
+
+            bool wide = Vector256.IsHardwareAccelerated;
 
             Span<int> stack = stackalloc int[64];
             int top = 0;
@@ -403,33 +443,336 @@ namespace Meshwright
             while (top > 0)
             {
                 int index = stack[--top];
-                var node = bvh[index];
+                ref readonly var node = ref bvh[index];
 
-                if (!SegmentHitsBox(a, b, node.Mins, node.Maxs))
-                    continue;
-
-                if (node.Count == 0)
+                if (node.Count != 0)
                 {
-                    if (top + 2 <= stack.Length)
+                    if (wide
+                            ? LeafBlocksWide(a, b, mask, node.First, node.Count)
+                            : LeafBlocksScalar(a, b, mask, node.First, node.Count))
                     {
-                        stack[top++] = index + 1;
-                        stack[top++] = node.Right;
+                        return true;
                     }
+
                     continue;
                 }
 
-                for (int i = node.First; i < node.First + node.Count; i++)
-                {
-                    if ((contents[i] & mask) == 0)
-                        continue;
+                int left = index + 1;
+                int right = node.Right;
 
-                    int t = i * 3;
-                    if (SegmentHitsTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2]))
-                        return true;
+                bool hitLeft = segment.Hits(in bvh[left], out float enterLeft);
+                bool hitRight = segment.Hits(in bvh[right], out float enterRight);
+
+                if (top + 2 > stack.Length)
+                    continue;
+
+                // The nearer child goes on last, so it comes off first.
+                if (hitLeft && hitRight)
+                {
+                    bool leftFirst = enterLeft <= enterRight;
+                    stack[top++] = leftFirst ? right : left;
+                    stack[top++] = leftFirst ? left : right;
+                }
+                else if (hitLeft)
+                {
+                    stack[top++] = left;
+                }
+                else if (hitRight)
+                {
+                    stack[top++] = right;
                 }
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// The tree as built, for the tests that hold <see cref="Blocks"/> to the walk it replaced:
+        /// each node's box, its right child (the left is the next node), and its triangle range, with
+        /// the triangles and their contents in the order the ranges index.
+        /// </summary>
+        internal (BspFile.Vector3 Mins, BspFile.Vector3 Maxs, int Right, int First, int Count)[] NodesForTests()
+        {
+            var nodes = new (BspFile.Vector3, BspFile.Vector3, int, int, int)[bvh.Length];
+            for (int i = 0; i < bvh.Length; i++)
+                nodes[i] = (bvh[i].Mins, bvh[i].Maxs, bvh[i].Right, bvh[i].First, bvh[i].Count);
+
+            return nodes;
+        }
+
+        /// <inheritdoc cref="NodesForTests"/>
+        internal BspFile.Vector3[] VerticesForTests() => vertices;
+
+        /// <inheritdoc cref="NodesForTests"/>
+        internal int[] ContentsForTests() => contents.AsSpan(0, TriangleCount).ToArray();
+
+        /// <summary>The box test every walk here runs, on its own, for the tests that hold it to the one it replaced.</summary>
+        internal static bool SegmentHitsBoxForTests(BspFile.Vector3 a, BspFile.Vector3 b,
+            BspFile.Vector3 mins, BspFile.Vector3 maxs)
+            => new SegmentBoxes(a, b).Hits(Vector128.Create(mins.X, mins.Y, mins.Z, 0f),
+                Vector128.Create(maxs.X, maxs.Y, maxs.Z, 0f), out _);
+
+        /// <summary>
+        /// Whether the segment crosses any of a leaf's triangles matching the mask, one at a time. The
+        /// whole of the leaf test where 256-bit vectors are not available, and the definition the wide
+        /// test reproduces.
+        /// </summary>
+        private bool LeafBlocksScalar(BspFile.Vector3 a, BspFile.Vector3 b, int mask, int first, int count)
+        {
+            for (int i = first; i < first + count; i++)
+            {
+                if ((contents[i] & mask) == 0)
+                    continue;
+
+                int t = i * 3;
+                if (SegmentHitsTriangle(a, b, vertices[t], vertices[t + 1], vertices[t + 2]))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>The lane numbers, for masking off the lanes past the end of a leaf.</summary>
+        private static readonly Vector256<int> LaneIndex = Vector256.Create(0, 1, 2, 3, 4, 5, 6, 7);
+
+        /// <summary>
+        /// <see cref="LeafBlocksScalar"/> eight triangles at a time: Moller-Trumbore as
+        /// <see cref="TryHitTriangle"/> writes it, operation for operation, over the precomputed edges.
+        ///
+        /// Bit-identical lane by lane, not merely close. The edges are the same subtractions the scalar
+        /// test does, done once at build time; every product, sum and quotient after that is the same
+        /// operation on the same operands in the same order; and nothing is fused - a vector multiply
+        /// and add are two roundings here exactly as they are in scalar code, because the JIT does not
+        /// contract them into a fused multiply-add on its own. The rejections are the scalar test's
+        /// comparisons negated rather than rewritten, so a NaN falls the same way in both: the scalar
+        /// test rejects a hit only when a comparison says to, and so does each lane.
+        ///
+        /// Unlike <see cref="NearestWide"/>, which has to look at every triangle anyway, this runs for
+        /// any leaf, full or not. A leaf holds four to eight triangles and is loaded as one vector
+        /// regardless; the lanes past its end read the next leaf, or <see cref="LanePadding"/>, and are
+        /// masked off before anything is decided. It exits as soon as no lane is left alive, as the
+        /// scalar loop exits on the first hit.
+        /// </summary>
+        private bool LeafBlocksWide(BspFile.Vector3 a, BspFile.Vector3 b, int mask, int first, int count)
+        {
+            const float Epsilon = 1e-6f;
+            int lanes = Vector256<float>.Count;
+
+            var maskLanes = Vector256.Create(mask);
+            var zero = Vector256<float>.Zero;
+            var one = Vector256<float>.One;
+
+            float sdx = b.X - a.X, sdy = b.Y - a.Y, sdz = b.Z - a.Z;
+            var dx = Vector256.Create(sdx);
+            var dy = Vector256.Create(sdy);
+            var dz = Vector256.Create(sdz);
+
+            var ax = Vector256.Create(a.X);
+            var ay = Vector256.Create(a.Y);
+            var az = Vector256.Create(a.Z);
+
+            for (int i = first, end = first + count; i < end; i += lanes)
+            {
+                var inLeaf = Vector256.LessThan(LaneIndex, Vector256.Create(end - i));
+                var wanted = Vector256.LoadUnsafe(ref contents[i]) & maskLanes;
+                var live = (inLeaf & ~Vector256.Equals(wanted, Vector256<int>.Zero)).AsSingle();
+
+                if (live.Equals(zero))
+                    continue;
+
+                var v1x = Vector256.LoadUnsafe(ref e1x[i]);
+                var v1y = Vector256.LoadUnsafe(ref e1y[i]);
+                var v1z = Vector256.LoadUnsafe(ref e1z[i]);
+
+                var v2x = Vector256.LoadUnsafe(ref e2x[i]);
+                var v2y = Vector256.LoadUnsafe(ref e2y[i]);
+                var v2z = Vector256.LoadUnsafe(ref e2z[i]);
+
+                // p = d x e2
+                var px = dy * v2z - dz * v2y;
+                var py = dz * v2x - dx * v2z;
+                var pz = dx * v2y - dy * v2x;
+
+                var det = v1x * px + v1y * py + v1z * pz;
+
+                live &= ~Vector256.LessThan(Vector256.Abs(det), Vector256.Create(Epsilon)).AsSingle();
+                if (live.Equals(zero))
+                    continue;
+
+                // A lane already dead may hold a zero determinant; whatever its quotient comes to, it
+                // is masked off and decides nothing. Live lanes divide exactly as the scalar test does.
+                var inverse = one / det;
+
+                var tx = ax - Vector256.LoadUnsafe(ref v0x[i]);
+                var ty = ay - Vector256.LoadUnsafe(ref v0y[i]);
+                var tz = az - Vector256.LoadUnsafe(ref v0z[i]);
+
+                var u = (tx * px + ty * py + tz * pz) * inverse;
+
+                live &= ~(Vector256.LessThan(u, zero) | Vector256.GreaterThan(u, one)).AsSingle();
+                if (live.Equals(zero))
+                    continue;
+
+                // q = t x e1
+                var qx = ty * v1z - tz * v1y;
+                var qy = tz * v1x - tx * v1z;
+                var qz = tx * v1y - ty * v1x;
+
+                var v = (dx * qx + dy * qy + dz * qz) * inverse;
+
+                live &= ~(Vector256.LessThan(v, zero) | Vector256.GreaterThan(u + v, one)).AsSingle();
+                if (live.Equals(zero))
+                    continue;
+
+                var at = (v2x * qx + v2y * qy + v2z * qz) * inverse;
+
+                // The segment's own half-open stretch; see SegmentEpsilon.
+                live &= ~(Vector256.LessThanOrEqual(at, Vector256.Create(SegmentEpsilon))
+                          | Vector256.GreaterThan(at, Vector256.Create(SegmentEnd))).AsSingle();
+
+                if (!live.Equals(zero))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// The slab test every tree walk here runs against node boxes, with the segment's half of it
+        /// worked out once per walk, and the three axes done side by side.
+        ///
+        /// The test is the usual one. Along each axis the segment is inside the box's slab between two
+        /// fractions, <c>(min - origin) / delta</c> and <c>(max - origin) / delta</c> taken in whichever
+        /// order is smaller first; it is inside the box where it is inside all three slabs, so it hits
+        /// the box when the latest entry, never before its start, comes no later than the earliest
+        /// exit, never past its far end. An axis the segment barely moves along has no fractions worth
+        /// dividing out, and asks only whether the start lies within the slab.
+        ///
+        /// It used to take the segment's two ends and work its half out afresh for every node - three
+        /// subtractions, three comparisons and three divisions, on values that never change for the
+        /// length of a walk - and then went axis by axis with a branch at every step. A division is the
+        /// slowest arithmetic there is and those branches go whichever way the geometry says, and the
+        /// profile put this test inside the most expensive query in the program. Now the reciprocals
+        /// are taken once, here, and a box is one subtraction and one multiplication per bound across
+        /// all three axes, a minimum and a maximum, and a single comparison at the end. A segment with
+        /// a flat axis - every trace down a column, which is most of the floor walk - asks about those
+        /// axes first, because that is where most boxes miss it and the old test, which reached them
+        /// first, answered in two comparisons; asking after the slabs measured slower than before.
+        ///
+        /// Every box answers exactly as it did. The reciprocals and each fraction are the same
+        /// operations on the same operands, so the same numbers. Ordering a pair by minimum and maximum
+        /// rather than by a swap, and gathering the three axes at the end rather than one at a time,
+        /// can only change which of two equal zeros is kept, which no comparison can see. And stopping
+        /// early on the first axis that misses was never more than a shortcut, in whatever order the
+        /// axes are taken: entry only rises and exit only falls as axes are added, and a flat axis
+        /// either fails outright or adds nothing, so the segment misses after one axis exactly when it
+        /// misses after all three. That holds for finite numbers, which a box and a segment always are:
+        /// a reciprocal is taken only of a length of at least a millionth.
+        /// </summary>
+        private readonly struct SegmentBoxes
+        {
+            private readonly Vector128<float> origin;
+            private readonly Vector128<float> inverse;
+
+            /// <summary>The axes the slabs are divided out on: every axis but the flat ones and the fourth lane.</summary>
+            private readonly Vector128<float> slabs;
+
+            /// <summary>
+            /// What stands in for a fraction where an axis has none: on the flat axes, a slab that
+            /// constrains nothing, and in the unused fourth lane the bounds of the segment itself -
+            /// so gathering the four lanes takes in where the old test started from, zero and the far
+            /// end, as well.
+            /// </summary>
+            private static readonly Vector128<float> IdleEntry =
+                Vector128.Create(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity, 0f);
+
+            /// <inheritdoc cref="IdleEntry"/>
+            private static readonly Vector128<float> IdleExit =
+                Vector128.Create(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity, SegmentEnd);
+
+            /// <summary>The flat axes, and whether there are any.</summary>
+            private readonly Vector128<float> flat;
+            private readonly bool anyFlat;
+
+            public SegmentBoxes(BspFile.Vector3 a, BspFile.Vector3 b)
+            {
+                float dx = b.X - a.X, dy = b.Y - a.Y, dz = b.Z - a.Z;
+
+                bool flatX = MathF.Abs(dx) < 1e-6f;
+                bool flatY = MathF.Abs(dy) < 1e-6f;
+                bool flatZ = MathF.Abs(dz) < 1e-6f;
+
+                origin = Vector128.Create(a.X, a.Y, a.Z, 0f);
+
+                flat = Vector128.Create(Lane(flatX), Lane(flatY), Lane(flatZ), 0).AsSingle();
+                slabs = Vector128.Create(Lane(!flatX), Lane(!flatY), Lane(!flatZ), 0).AsSingle();
+                anyFlat = flatX || flatY || flatZ;
+
+                // One division for all three, each lane the same correctly rounded quotient a scalar
+                // division gives. A flat axis divides by something under a millionth, or by zero, and
+                // its quotient is thrown away for zero.
+                var quotient = Vector128<float>.One / Vector128.Create(dx, dy, dz, 1f);
+                inverse = Vector128.ConditionalSelect(slabs, quotient, Vector128<float>.Zero);
+
+            }
+
+            private static int Lane(bool on) => on ? -1 : 0;
+
+            /// <summary>
+            /// A node's mins, in the first three lanes; the fourth holds whatever follows them in the
+            /// node and is never read. The node is laid out mins, maxs, then three ints, so both this
+            /// and <see cref="MaxsOf"/> load sixteen bytes that lie wholly inside it.
+            /// </summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static Vector128<float> MinsOf(in BvhNode node)
+                => Vector128.LoadUnsafe(ref Unsafe.As<BspFile.Vector3, float>(ref Unsafe.AsRef(in node.Mins)));
+
+            /// <inheritdoc cref="MinsOf"/>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static Vector128<float> MaxsOf(in BvhNode node)
+                => Vector128.LoadUnsafe(ref Unsafe.As<BspFile.Vector3, float>(ref Unsafe.AsRef(in node.Maxs)));
+
+            /// <summary>Whether the segment passes through a node's box, and where it enters; see <see cref="Hits(Vector128{float}, Vector128{float}, out float)"/>.</summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool Hits(in BvhNode node, out float enter) => Hits(MinsOf(in node), MaxsOf(in node), out enter);
+
+            /// <summary>
+            /// Whether the segment passes through the box, and the fraction along it where it enters.
+            /// Runs out to the same far end the triangle test does, or a flat node lying on the end point
+            /// could be culled by a rounding error before its triangles were asked. Only the first three
+            /// lanes of the bounds are read.
+            /// </summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool Hits(Vector128<float> mins, Vector128<float> maxs, out float enter)
+            {
+                if (anyFlat)
+                {
+                    // The start must lie inside the slab on every axis the segment does not move along -
+                    // asked as the old test asked it, and first, as the old test did for a segment down a
+                    // column, which most boxes miss on the first comparison.
+                    var inside = Vector128.GreaterThanOrEqual(origin, mins) & Vector128.LessThanOrEqual(origin, maxs);
+                    if ((flat & ~inside).ExtractMostSignificantBits() != 0)
+                    {
+                        enter = 0f;
+                        return false;
+                    }
+                }
+
+                var t0 = (mins - origin) * inverse;
+                var t1 = (maxs - origin) * inverse;
+
+                var entry = Vector128.ConditionalSelect(slabs, Vector128.MinNative(t0, t1), IdleEntry);
+                var exit = Vector128.ConditionalSelect(slabs, Vector128.MaxNative(t0, t1), IdleExit);
+
+                // Across the lanes: the latest entry and the earliest exit.
+                entry = Vector128.MaxNative(entry, Vector128.Shuffle(entry, Vector128.Create(2, 3, 0, 1)));
+                entry = Vector128.MaxNative(entry, Vector128.Shuffle(entry, Vector128.Create(1, 0, 3, 2)));
+                exit = Vector128.MinNative(exit, Vector128.Shuffle(exit, Vector128.Create(2, 3, 0, 1)));
+                exit = Vector128.MinNative(exit, Vector128.Shuffle(exit, Vector128.Create(1, 0, 3, 2)));
+
+                enter = entry.ToScalar();
+                return enter <= exit.ToScalar();
+            }
         }
 
         /// <summary>
@@ -453,6 +796,11 @@ namespace Meshwright
 
             bool found = false;
 
+            // The same box test as Blocks, but not its order: which of two hits at the same distance
+            // is reported depends on which leaf is reached first, so the walk keeps the order it has
+            // always had - children pushed left then right, untested until they come off.
+            var segment = new SegmentBoxes(a, b);
+
             Span<int> stack = stackalloc int[64];
             int top = 0;
             stack[top++] = 0;
@@ -460,9 +808,9 @@ namespace Meshwright
             while (top > 0)
             {
                 int index = stack[--top];
-                var node = bvh[index];
+                ref readonly var node = ref bvh[index];
 
-                if (!SegmentHitsBox(a, b, node.Mins, node.Maxs))
+                if (!segment.Hits(in node, out _))
                     continue;
 
                 if (node.Count == 0)
@@ -756,6 +1104,11 @@ namespace Meshwright
 
             bool found = false;
 
+            // Visited in the order it always has been, as in TryTraceSurface: the nearest hit wins,
+            // and a tie goes to whichever triangle was reached first.
+            var segment = new SegmentBoxes(from, to);
+            var reach = Vector128.Create(extent.X, extent.Y, extent.Z, 0f);
+
             Span<int> stack = stackalloc int[64];
             int top = 0;
             stack[top++] = 0;
@@ -763,14 +1116,12 @@ namespace Meshwright
             while (top > 0)
             {
                 int index = stack[--top];
-                var node = bvh[index];
+                ref readonly var node = ref bvh[index];
 
                 // The node's box grown by the moving box's half-extents: a swept box clips a node the
-                // traced centre line can miss entirely.
-                var grown = (new BspFile.Vector3(node.Mins.X - extent.X, node.Mins.Y - extent.Y, node.Mins.Z - extent.Z),
-                             new BspFile.Vector3(node.Maxs.X + extent.X, node.Maxs.Y + extent.Y, node.Maxs.Z + extent.Z));
-
-                if (!SegmentHitsBox(from, to, grown.Item1, grown.Item2))
+                // traced centre line can miss entirely. The same subtraction and addition per axis as
+                // ever, three lanes at a time.
+                if (!segment.Hits(SegmentBoxes.MinsOf(in node) - reach, SegmentBoxes.MaxsOf(in node) + reach, out _))
                     continue;
 
                 if (node.Count == 0)
@@ -1032,38 +1383,5 @@ namespace Meshwright
             return true;
         }
 
-        /// <summary>
-        /// Whether the segment passes through a node's box. Runs out to the same far end the triangle
-        /// test does, or a flat node lying on the end point could be culled by a rounding error before
-        /// its triangles were asked.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool SegmentHitsBox(BspFile.Vector3 a, BspFile.Vector3 b,
-            BspFile.Vector3 mins, BspFile.Vector3 maxs)
-        {
-            float tMin = 0f, tMax = SegmentEnd;
-
-            return Slab(a.X, b.X - a.X, mins.X, maxs.X, ref tMin, ref tMax)
-                && Slab(a.Y, b.Y - a.Y, mins.Y, maxs.Y, ref tMin, ref tMax)
-                && Slab(a.Z, b.Z - a.Z, mins.Z, maxs.Z, ref tMin, ref tMax);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool Slab(float origin, float delta, float min, float max, ref float tMin, ref float tMax)
-        {
-            if (MathF.Abs(delta) < 1e-6f)
-                return origin >= min && origin <= max;
-
-            float inverse = 1f / delta;
-            float t0 = (min - origin) * inverse;
-            float t1 = (max - origin) * inverse;
-
-            if (t0 > t1) (t0, t1) = (t1, t0);
-
-            tMin = MathF.Max(tMin, t0);
-            tMax = MathF.Min(tMax, t1);
-
-            return tMin <= tMax;
-        }
     }
 }
