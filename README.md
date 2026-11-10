@@ -751,6 +751,26 @@ world from 3,200 to 2,900. Whole runs at 4 threads, four of each alternated on a
 against 70-96. On `cp_badlands` the visibility pass is a fifth shorter, but the whole run is too
 short to rise above the noise.
 
+The floor search - how far down is the ground under a point, asked by the clip, the relink, the
+stale-link check and the connection tests - traces up to fourteen four-unit segments down a column,
+then eight more lines to place the surface, each from the root of the world tree and of both
+triangle trees. After the trace speed-ups above it was still about a tenth of a run: 7.6 million
+searches and 94 million lines on `rp_downtown_tits_v25`. Every line in a search runs down the same
+column, so the search now works out once what they share: how far down the world tree they all go
+undivided, which triangle-tree leaves and brush entities the column passes through within its
+heights, and - the first time a line meets them - which brushes, and which leaves' lists of brushes,
+stand beside the column where no line down it can touch them. Each line is then asked only about
+what is left, with the same tests, so every answer is the same to the bit.
+
+| per search | `rp_downtown_tits_v25` | `cp_badlands` | `gm_construct` |
+|---|---|---|---|
+| tree nodes and box tests | 640 to 142 | 702 to 153 | 612 to 121 |
+| brush clips | 50.6 to 2.0 | 163 to 2.6 | 18.9 to 1.8 |
+
+The searches recorded from a run and replayed one thread at a time, old and new alternately, take
+a quarter to a third of the time they did: 6.7 to 1.8 microseconds each on the city, 7.5 to 2.4 on
+`cp_badlands`, 5.0 to 1.5 on `gm_construct`. The mesh is byte-identical on all twelve benchmark maps.
+
 Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
 gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
 the same three.
