@@ -513,6 +513,23 @@ move, islands fall on seven maps (cp_badlands 46 to 41) and areas no spawn reach
 49 to 44), and no area a spawn reached before is cut off. A hull checker that also tries a span's exact
 end flags 2 of the 905 new level links, against 1.2% of the links kept.
 
+The swept-box gather also brought back 24 drops and climbs on the two RP maps, every one through a pane
+of glass. Before the clip, a window sill's area ran past the glass, so the build linked it to the street
+outside across a crossing that started beyond the pane; the clip pulls the sill back behind the glass,
+and the stale-link pass then tests the link again. It leaves a link alone when no body stands at both
+ends of any crossing, as the ends being too tight is not the crossing's fault. A sill 10 to 18 units
+deep is too tight, and once the sweep saw the glass beside a body no body stood there, so the links
+stayed. They now go when the crossing itself is shut to a walker of no width wherever it is tried: a
+line through its middle runs into something, or it drops onto ground under the floor it leaves. Across
+the twelve maps the pass removes 180 more links, and the finished meshes lose 175, 148 of them on the RP
+maps, and gain 5 that the shortcut fixup pruned before; ctf_2fort, ctf_turbine and gm_flatgrass come out
+byte-identical. A hull checker flags 159 of the 169 it can test, against 31% of the drops and climbs
+kept, and Valve's TF2 meshes have ground at both ends of none of the 23 removed there. Routes, coverage,
+floating and over-air areas do not move. Ten areas lose their last way in, every one through a removed
+link: a sliver or slot no body fits in on each RP map and pl_badwater, and seven areas on cp_badlands in
+two pockets under the bridge deck that Valve's mesh does not cover, reached before only by a 256 unit
+drop through the deck and a link through a wall.
+
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
 nothing could leave once it had fallen in. Without them pl_upward has 2,965 areas instead of 4,488,
