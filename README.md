@@ -704,6 +704,15 @@ previous version of the map, with the same passes:
 
 `gm_construct`, the same passes, takes 12 seconds.
 
+The floor walk, which lists every floor in each column of the map, used to step down through solid
+eight units at a time, testing each step on its own. On `rp_downtown_tits_v25` that came to 392
+million point tests and 5.8 billion BSP plane tests, nearly all of them inside 12,000 units of solid
+between the city and a floor spanning the map high above it. It now walks the tree once for a batch
+of steps rather than once per step. It stops at exactly the same step, so the mesh is byte-identical
+on all twelve benchmark maps, and the plane tests fall to 95 million: 365 million to 41 million on
+`gm_construct`, and 962 million to 12 million on `cp_badlands`. The plane tests were never the bulk
+of a run's time, so the saving in wall time is small, a few seconds on the city.
+
 Runs are reproducible. Repeating a run writes a byte-identical file, checked on ctf_2fort,
 gm_construct and rp_downtown_tits_v25, and so does running it at 4 threads instead of 8, checked on
 the same three.
