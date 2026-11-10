@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Threading;
 
 namespace Meshwright
 {
@@ -81,6 +82,7 @@ namespace Meshwright
             vertices = triangleVertices;
             contents = triangleContents;
             outward = triangleOutward;
+            identity = Interlocked.Increment(ref meshesBuilt);
             BuildBvh();
         }
         /// <summary>
@@ -162,6 +164,7 @@ namespace Meshwright
             bvh = nodes.ToArray();
 
             ApplyOrder(count);
+            BuildWideTree();
 
             // Only the tree is needed to trace. The build scratch is several megabytes on a large map
             // and there is no reason to hold it for the life of the process.
@@ -423,6 +426,29 @@ namespace Meshwright
         /// The stack can never overflow - the tree is split at the median, so it is no deeper than
         /// about log2 of the triangle count, and a depth-first walk holds at most one entry per level
         /// plus one - so the guard on it is never what decides an answer, before or after.
+        ///
+        /// After all that, the walk itself was most of the cost. Profiled on the visibility pass, a
+        /// displacement query box-tested 36 nodes on rp_downtown_tits_v25, 54 on cp_badlands and 61 on
+        /// gm_construct, against three or four leaves, and the leaves' triangle tests were about a
+        /// fifth of its time. And the walk was mostly finding what it had just found: 96% of those
+        /// queries on the city are blocked, and in 86% the leaf that blocked the same thread's previous
+        /// query blocks this one too, because the pass traces its lines in runs between neighbouring
+        /// areas, over the same hill. So two more things, neither of which changes an answer either:
+        ///
+        /// - Each thread remembers the last <see cref="RecentCount"/> leaves that blocked a segment in
+        ///   this mesh (<see cref="recentLeaves"/>) and asks them first, each with its own box test
+        ///   and its triangle test, exactly as a walk asks a leaf. A remembered leaf that says yes is
+        ///   one the walk would have reached and been told yes by, since a segment that passes a leaf's
+        ///   box passes every box above it (<see cref="BlocksWideTree"/> has why); one that says no is
+        ///   simply not the answer, and the walk follows. Answered so: 97% of the city's queries, 77%
+        ///   of cp_badlands' and 74% of gm_construct's.
+        /// - The walk that follows goes down the wide tree (<see cref="BlocksWideTree"/>): the same
+        ///   boxes and leaves, eight boxes tested in one go, about a third as many stops.
+        ///
+        /// Per query, replayed from recorded visibility passes: on the city, 36.0 box tests and 3.72
+        /// leaves become 2.2 box tests, 0.37 eight-box tests and 1.42 leaves; on cp_badlands, 53.8
+        /// and 3.64 become 3.0, 3.05 and 2.22; on gm_construct, 61.1 and 3.21 become 3.2, 3.47 and
+        /// 2.18.
         /// </summary>
         public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b, int mask)
         {
@@ -434,6 +460,116 @@ namespace Meshwright
             if (!segment.Hits(in bvh[0], out _))
                 return false;
 
+            if (!remembers)
+                return Walk(a, b, mask, in segment) >= 0;
+
+            ref var recent = ref (recentLeaves ??= new RecentLeaves[RecentSlots])[(int)identity & (RecentSlots - 1)];
+
+            if (recent.Mesh != identity)
+                recent = new RecentLeaves { Mesh = identity };
+
+            Span<int> leaves = recent.Leaves;
+            int remembered = recent.Count;
+
+            for (int k = 0; k < remembered; k++)
+            {
+                int leaf = leaves[k];
+                if (!LeafBlocks(leaf, a, b, mask, in segment))
+                    continue;
+
+                // To the front, the others moving down one to make room.
+                leaves[..k].CopyTo(leaves[1..]);
+                leaves[0] = leaf;
+                return true;
+            }
+
+            int blocker = Walk(a, b, mask, in segment);
+            if (blocker < 0)
+                return false;
+
+            // In front of the others, and the oldest forgotten if there is no room. Never one already
+            // there: each of those has just been asked, and has said no.
+            int kept = Math.Min(remembered, RecentCount - 1);
+            leaves[..kept].CopyTo(leaves[1..]);
+            leaves[0] = blocker;
+            recent.Count = kept + 1;
+            return true;
+        }
+
+        /// <summary>
+        /// The walk for <see cref="Blocks"/>: the leaf whose triangle it found crossed, as an index into
+        /// <see cref="bvh"/>, or -1 when none is.
+        /// </summary>
+        private int Walk(BspFile.Vector3 a, BspFile.Vector3 b, int mask, in SegmentBoxes segment)
+            => wideChildren.Length != 0
+                ? BlocksWideTree(a, b, mask, in segment)
+                : BlocksBinaryTree(a, b, mask, in segment);
+
+        /// <summary>
+        /// Whether the segment passes through leaf <paramref name="index"/>'s box and crosses one of its
+        /// triangles - the two tests every walk here puts a leaf to, on their own.
+        /// </summary>
+        private bool LeafBlocks(int index, BspFile.Vector3 a, BspFile.Vector3 b, int mask, in SegmentBoxes segment)
+        {
+            ref readonly var leaf = ref bvh[index];
+
+            return segment.Hits(in leaf, out _) && (Vector256.IsHardwareAccelerated
+                ? LeafBlocksWide(a, b, mask, leaf.First, leaf.Count)
+                : LeafBlocksScalar(a, b, mask, leaf.First, leaf.Count));
+        }
+
+        // ---- the leaves that blocked last ------------------------------------------------------
+
+        /// <summary>How many leaves a mesh remembers per thread.</summary>
+        private const int RecentCount = 4;
+
+        /// <summary>How many meshes a thread remembers leaves for at once; a power of two.</summary>
+        private const int RecentSlots = 8;
+
+        private static long meshesBuilt;
+
+        /// <summary>
+        /// This mesh as <see cref="Build"/> last left it, as far as <see cref="recentLeaves"/> is
+        /// concerned: a number no other build has, so leaves remembered from another mesh, or from this
+        /// one before it was rebuilt, are never taken for its own. It also picks the place a thread
+        /// keeps them in; meshes built a multiple of <see cref="RecentSlots"/> apart share one and push
+        /// each other's out, which costs only the shortcut.
+        /// </summary>
+        private long identity;
+
+        /// <summary>Whether <see cref="Blocks"/> asks the remembered leaves first; only the tests turn it off.</summary>
+        private bool remembers = true;
+
+        /// <summary>
+        /// The leaves that most recently blocked a segment, per mesh and per thread, the latest first,
+        /// as indices into <see cref="bvh"/>: what <see cref="Blocks"/> asks before it walks.
+        ///
+        /// Per thread so it needs no lock, and keyed by <see cref="identity"/> rather than holding the
+        /// mesh, so a thread that outlives a map - a map pack runs many on one pool - does not keep the
+        /// map's terrain alive.
+        /// </summary>
+        [ThreadStatic] private static RecentLeaves[]? recentLeaves;
+
+        private struct RecentLeaves
+        {
+            public long Mesh;
+            public LeafList Leaves;
+            public int Count;
+        }
+
+        [InlineArray(RecentCount)]
+        private struct LeafList
+        {
+            private int first;
+        }
+
+        /// <summary>
+        /// <see cref="Blocks"/>'s walk down the binary tree, one node's two children at a time, as it
+        /// was before the wide tree, but for saying which leaf blocked: the walk wherever there is no
+        /// <see cref="wideChildren"/> - a mesh of one leaf, or hardware without 256-bit vectors.
+        /// </summary>
+        private int BlocksBinaryTree(BspFile.Vector3 a, BspFile.Vector3 b, int mask, in SegmentBoxes segment)
+        {
             bool wide = Vector256.IsHardwareAccelerated;
 
             Span<int> stack = stackalloc int[64];
@@ -451,7 +587,7 @@ namespace Meshwright
                             ? LeafBlocksWide(a, b, mask, node.First, node.Count)
                             : LeafBlocksScalar(a, b, mask, node.First, node.Count))
                     {
-                        return true;
+                        return index;
                     }
 
                     continue;
@@ -483,7 +619,364 @@ namespace Meshwright
                 }
             }
 
-            return false;
+            return -1;
+        }
+
+        // ---- the wide tree ---------------------------------------------------------------------
+
+        /// <summary>How many children a node of the wide tree holds: one 256-bit vector of boxes.</summary>
+        private const int Width = 8;
+
+        /// <summary>Floats per wide node in <see cref="wideBounds"/>: each of six bounds for eight boxes.</summary>
+        private const int WideStride = 6 * Width;
+
+        /// <summary>
+        /// The most entries <see cref="BlocksWideTree"/>'s stack can need. A tree that would need more is
+        /// not given a wide form at all, and <see cref="Blocks"/> walks the binary tree instead.
+        /// </summary>
+        private const int WideStackLimit = 256;
+
+        /// <summary>
+        /// The binary tree again, with each node standing for a few of its levels: the boxes of up to
+        /// eight of a node's descendants side by side, one array per bound, so <see cref="Blocks"/>
+        /// tests eight boxes in one go rather than two at a time.
+        ///
+        /// **Not a new tree: the same boxes, fewer stops.** Every box here is a node of
+        /// <see cref="bvh"/>, copied as it is, and every leaf is one of its leaves with the same
+        /// triangle range. What the wide form leaves out is only the boxes in between - those of the
+        /// nodes between a wide node and the descendants it lists - and those never decide anything;
+        /// see <see cref="BlocksWideTree"/>.
+        ///
+        /// Built only where 256-bit vectors run in hardware, and only for a mesh of more than one leaf.
+        /// </summary>
+        private float[] wideBounds = [];
+
+        /// <summary>
+        /// Each wide node's eight slots: a wide node's index, or the bitwise complement of a leaf's
+        /// index in <see cref="bvh"/>. An empty slot holds zero and is never read; see
+        /// <see cref="wideFull"/>.
+        /// </summary>
+        private int[] wideChildren = [];
+
+        /// <summary>Which of a wide node's eight slots are in use, one bit each.</summary>
+        private byte[] wideFull = [];
+
+        /// <summary>
+        /// For each wide node and each of the eight octants a segment can point into, the order to try
+        /// its slots in, nearest first, one slot number a byte; see <see cref="SlotOrder"/>. Only how
+        /// soon a blocker is found depends on it.
+        /// </summary>
+        private ulong[] wideOrder = [];
+
+        /// <summary>
+        /// Folds <see cref="bvh"/> into <see cref="wideBounds"/> and its companions, or leaves them
+        /// empty where the wide walk is not to be used.
+        /// </summary>
+        private void BuildWideTree()
+        {
+            wideBounds = [];
+            wideChildren = [];
+            wideFull = [];
+            wideOrder = [];
+
+            if (!Vector256.IsHardwareAccelerated || bvh.Length == 0 || bvh[0].Count != 0)
+                return;
+
+            var bounds = new List<float>();
+            var children = new List<int>();
+            var full = new List<byte>();
+            var orders = new List<ulong>();
+
+            Fold(0, bounds, children, full, orders, out int depth);
+
+            // Each wide node taken off the stack puts at most eight back, so the stack never holds more
+            // than seven per level below the root and the root's own entry.
+            if ((Width - 1) * depth + 1 > WideStackLimit)
+                return;
+
+            wideBounds = bounds.ToArray();
+            wideChildren = children.ToArray();
+            wideFull = full.ToArray();
+            wideOrder = orders.ToArray();
+        }
+
+        /// <summary>
+        /// Makes a wide node of the interior node <paramref name="node"/>: starting from its two
+        /// children, opens whichever listed interior node has the largest box until eight are listed or
+        /// only leaves are left, then folds each interior node listed in turn. Returns the wide node's
+        /// index, and in <paramref name="depth"/> how many wide levels it and the deepest below it make.
+        /// </summary>
+        private int Fold(int node, List<float> bounds, List<int> children, List<byte> full, List<ulong> orders,
+            out int depth)
+        {
+            Span<int> slots = stackalloc int[Width];
+            int listed = 0;
+            slots[listed++] = node + 1;
+            slots[listed++] = bvh[node].Right;
+
+            while (listed < Width)
+            {
+                int widest = -1;
+                float widestArea = -1f;
+
+                for (int i = 0; i < listed; i++)
+                {
+                    ref readonly var candidate = ref bvh[slots[i]];
+                    if (candidate.Count != 0)
+                        continue;
+
+                    float dx = candidate.Maxs.X - candidate.Mins.X;
+                    float dy = candidate.Maxs.Y - candidate.Mins.Y;
+                    float dz = candidate.Maxs.Z - candidate.Mins.Z;
+                    float area = dx * dy + dy * dz + dz * dx;
+
+                    if (area > widestArea)
+                    {
+                        widestArea = area;
+                        widest = i;
+                    }
+                }
+
+                // Only leaves left - or boxes too strange to measure, which are folded on their own
+                // instead. Either way any choice here gives the same answers; it only shapes the walk.
+                if (widest < 0)
+                    break;
+
+                int opened = slots[widest];
+                slots[widest] = opened + 1;
+                slots[listed++] = bvh[opened].Right;
+            }
+
+            int self = full.Count;
+            for (int i = 0; i < WideStride; i++) bounds.Add(0f);
+            for (int i = 0; i < Width; i++) children.Add(0);
+            for (int i = 0; i < Width; i++) orders.Add(0);
+            full.Add((byte)((1 << listed) - 1));
+
+            for (int octant = 0; octant < Width; octant++)
+                orders[self * Width + octant] = SlotOrder(node, slots[..listed], octant);
+
+            depth = 1;
+
+            for (int i = 0; i < listed; i++)
+            {
+                ref readonly var child = ref bvh[slots[i]];
+                int at = self * WideStride + i;
+
+                bounds[at] = child.Mins.X;
+                bounds[at + Width] = child.Mins.Y;
+                bounds[at + 2 * Width] = child.Mins.Z;
+                bounds[at + 3 * Width] = child.Maxs.X;
+                bounds[at + 4 * Width] = child.Maxs.Y;
+                bounds[at + 5 * Width] = child.Maxs.Z;
+
+                if (child.Count != 0)
+                {
+                    children[self * Width + i] = ~slots[i];
+                    continue;
+                }
+
+                children[self * Width + i] = Fold(slots[i], bounds, children, full, orders, out int below);
+                depth = Math.Max(depth, below + 1);
+            }
+
+            return self;
+        }
+
+        /// <summary>
+        /// The order to try a wide node's slots in for a segment pointing into <paramref name="octant"/>
+        /// - bit 0 set for a segment running towards smaller x, bit 1 for y, bit 2 for z - nearest
+        /// first, one slot number a byte from the lowest, with the unused slots after the used ones.
+        ///
+        /// The binary tree split each node at the median along its box's longest axis, the smaller
+        /// centres going left, so a segment running up that axis meets the left child first and one
+        /// running down it the right. Walking the nodes the wide node stands for, each node's children
+        /// in the order the segment meets them, lists its slots in roughly the order the segment
+        /// reaches them.
+        /// </summary>
+        private ulong SlotOrder(int node, ReadOnlySpan<int> slots, int octant)
+        {
+            ulong order = 0;
+            int placed = 0;
+            PlaceSlots(node, slots, octant, ref order, ref placed);
+
+            for (int unused = slots.Length; unused < Width; unused++)
+                order |= (ulong)unused << (8 * placed++);
+
+            return order;
+        }
+
+        /// <summary>One step of <see cref="SlotOrder"/>: lists the slots at or under binary node <paramref name="at"/>.</summary>
+        private void PlaceSlots(int at, ReadOnlySpan<int> slots, int octant, ref ulong order, ref int placed)
+        {
+            int slot = slots.IndexOf(at);
+            if (slot >= 0)
+            {
+                order |= (ulong)slot << (8 * placed++);
+                return;
+            }
+
+            ref readonly var n = ref bvh[at];
+            float dx = n.Maxs.X - n.Mins.X;
+            float dy = n.Maxs.Y - n.Mins.Y;
+            float dz = n.Maxs.Z - n.Mins.Z;
+            int axis = dx >= dy && dx >= dz ? 0 : dy >= dz ? 1 : 2;
+
+            bool downward = ((octant >> axis) & 1) != 0;
+            PlaceSlots(downward ? n.Right : at + 1, slots, octant, ref order, ref placed);
+            PlaceSlots(downward ? at + 1 : n.Right, slots, octant, ref order, ref placed);
+        }
+
+        /// <summary>
+        /// <see cref="Blocks"/> down the wide tree: the same answer as down the binary one, for the
+        /// same triangle tests, with about a third as many stops.
+        ///
+        /// What the binary walk answers is whether any leaf whose box the segment passes through, by
+        /// <see cref="SegmentBoxes.Hits(Vector128{float}, Vector128{float}, out float)"/>, holds a
+        /// triangle it crosses. It reaches every such leaf it does not stop before: a node's box is
+        /// the union of its children's, and the box test cannot pass a box and fail one holding it -
+        /// on a flat axis it asks whether the start lies inside, and on the others the fractions it
+        /// works out from wider bounds are rounded from the same operations on numbers no further in,
+        /// so they span no less (the argument <see cref="ColumnBlocks"/> rests on). So every ancestor
+        /// of a leaf it passes is passed too, and the boxes in between decide nothing; this walk skips
+        /// them. Each leaf is still box-tested on its own box, in <see cref="WideBoxes.Hits"/> - the
+        /// same subtractions, multiplications, minimums and maximums in the same order, lane for lane,
+        /// so the same answer bit for bit, NaN included - and its triangles are tested by
+        /// <see cref="LeafBlocksWide"/>, the binary walk's own leaf test. The order the leaves are
+        /// asked in is all that differs, and any crossing being enough, it decides nothing.
+        /// </summary>
+        private int BlocksWideTree(BspFile.Vector3 a, BspFile.Vector3 b, int mask, in SegmentBoxes segment)
+        {
+            var boxes = new WideBoxes(in segment);
+
+            int octant = (b.X - a.X < 0f ? 1 : 0) | (b.Y - a.Y < 0f ? 2 : 0) | (b.Z - a.Z < 0f ? 4 : 0);
+
+            Span<int> stack = stackalloc int[WideStackLimit];
+            int top = 0;
+            stack[top++] = 0;
+
+            while (top > 0)
+            {
+                int entry = stack[--top];
+
+                if (entry < 0)
+                {
+                    ref readonly var leaf = ref bvh[~entry];
+                    if (LeafBlocksWide(a, b, mask, leaf.First, leaf.Count))
+                        return ~entry;
+
+                    continue;
+                }
+
+                uint passed = boxes.Hits(wideBounds, entry) & wideFull[entry];
+                if (passed == 0)
+                    continue;
+
+                // Farthest first, so the nearest comes off next. Every slot is written and only those
+                // whose box was passed are kept, which costs less than a branch on each.
+                ulong order = wideOrder[entry * Width + octant];
+                int slotsAt = entry * Width;
+
+                for (int k = Width - 1; k >= 0; k--)
+                {
+                    int slot = (int)(order >> (8 * k)) & 0xFF;
+                    stack[top] = wideChildren[slotsAt + slot];
+                    top += (int)(passed >> slot) & 1;
+                }
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// <see cref="SegmentBoxes.Hits(Vector128{float}, Vector128{float}, out float)"/> for the eight
+        /// boxes of a wide node at once, one lane a box where that test has one lane an axis.
+        ///
+        /// Lane for lane the same arithmetic: the same reciprocals and start, the same subtraction and
+        /// multiplication per bound, the same native minimum and maximum of each pair; a flat axis
+        /// swapped out for an infinite slab and its start tested against the bounds; and the three axes
+        /// gathered with zero and the far end in the order that test's two shuffles gather them -
+        /// x with z and y with the start, then the two together - so even a NaN falls the same way.
+        /// </summary>
+        private readonly struct WideBoxes
+        {
+            private readonly Vector256<float> ox, oy, oz;
+            private readonly Vector256<float> ix, iy, iz;
+            private readonly Vector256<float> slabX, slabY, slabZ;
+            private readonly bool flatX, flatY, flatZ, anyFlat;
+
+            private static readonly Vector256<float> NoEntry = Vector256.Create(float.NegativeInfinity);
+            private static readonly Vector256<float> NoExit = Vector256.Create(float.PositiveInfinity);
+            private static readonly Vector256<float> FarEnd = Vector256.Create(SegmentEnd);
+
+            public WideBoxes(in SegmentBoxes segment)
+            {
+                var origin = segment.Origin;
+                var inverse = segment.Inverse;
+                var slabs = segment.Slabs;
+                var flat = segment.Flat;
+
+                ox = Vector256.Create(origin.GetElement(0));
+                oy = Vector256.Create(origin.GetElement(1));
+                oz = Vector256.Create(origin.GetElement(2));
+
+                ix = Vector256.Create(inverse.GetElement(0));
+                iy = Vector256.Create(inverse.GetElement(1));
+                iz = Vector256.Create(inverse.GetElement(2));
+
+                slabX = Vector256.Create(slabs.GetElement(0));
+                slabY = Vector256.Create(slabs.GetElement(1));
+                slabZ = Vector256.Create(slabs.GetElement(2));
+
+                flatX = flat.AsInt32().GetElement(0) != 0;
+                flatY = flat.AsInt32().GetElement(1) != 0;
+                flatZ = flat.AsInt32().GetElement(2) != 0;
+                anyFlat = segment.AnyFlat;
+            }
+
+            /// <summary>One bit per box of wide node <paramref name="node"/> the segment passes through.</summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public uint Hits(float[] bounds, int node)
+            {
+                ref float at = ref bounds[node * WideStride];
+
+                var minX = Vector256.LoadUnsafe(ref at);
+                var minY = Vector256.LoadUnsafe(ref at, Width);
+                var minZ = Vector256.LoadUnsafe(ref at, 2 * Width);
+                var maxX = Vector256.LoadUnsafe(ref at, 3 * Width);
+                var maxY = Vector256.LoadUnsafe(ref at, 4 * Width);
+                var maxZ = Vector256.LoadUnsafe(ref at, 5 * Width);
+
+                var t0x = (minX - ox) * ix;
+                var t1x = (maxX - ox) * ix;
+                var t0y = (minY - oy) * iy;
+                var t1y = (maxY - oy) * iy;
+                var t0z = (minZ - oz) * iz;
+                var t1z = (maxZ - oz) * iz;
+
+                var entryX = Vector256.ConditionalSelect(slabX, Vector256.MinNative(t0x, t1x), NoEntry);
+                var entryY = Vector256.ConditionalSelect(slabY, Vector256.MinNative(t0y, t1y), NoEntry);
+                var entryZ = Vector256.ConditionalSelect(slabZ, Vector256.MinNative(t0z, t1z), NoEntry);
+                var exitX = Vector256.ConditionalSelect(slabX, Vector256.MaxNative(t0x, t1x), NoExit);
+                var exitY = Vector256.ConditionalSelect(slabY, Vector256.MaxNative(t0y, t1y), NoExit);
+                var exitZ = Vector256.ConditionalSelect(slabZ, Vector256.MaxNative(t0z, t1z), NoExit);
+
+                var entry = Vector256.MaxNative(Vector256.MaxNative(entryX, entryZ),
+                    Vector256.MaxNative(entryY, Vector256<float>.Zero));
+                var exit = Vector256.MinNative(Vector256.MinNative(exitX, exitZ),
+                    Vector256.MinNative(exitY, FarEnd));
+
+                var passed = Vector256.LessThanOrEqual(entry, exit);
+
+                if (anyFlat)
+                {
+                    if (flatX) passed &= Vector256.GreaterThanOrEqual(ox, minX) & Vector256.LessThanOrEqual(ox, maxX);
+                    if (flatY) passed &= Vector256.GreaterThanOrEqual(oy, minY) & Vector256.LessThanOrEqual(oy, maxY);
+                    if (flatZ) passed &= Vector256.GreaterThanOrEqual(oz, minZ) & Vector256.LessThanOrEqual(oz, maxZ);
+                }
+
+                return passed.ExtractMostSignificantBits();
+            }
         }
 
         /// <summary>
@@ -603,6 +1096,25 @@ namespace Meshwright
                 nodes[i] = (bvh[i].Mins, bvh[i].Maxs, bvh[i].Right, bvh[i].First, bvh[i].Count);
 
             return nodes;
+        }
+
+        /// <summary>
+        /// The wide tree as built, for the tests that check it is the binary tree's own boxes and leaves:
+        /// each wide node's six bound arrays (<see cref="wideBounds"/>), its slots, and which are full.
+        /// Empty when there is no wide tree.
+        /// </summary>
+        internal (float[] Bounds, int[] Children, byte[] Full) WideTreeForTests() => (wideBounds, wideChildren, wideFull);
+
+        /// <summary>
+        /// Takes away the wide tree and stops remembering blockers, as <paramref name="wide"/> and
+        /// <paramref name="remember"/> say, so the tests can hold each walk - binary or wide, with or
+        /// without the leaves that blocked last - to the old code.
+        /// </summary>
+        internal void UseForTests(bool wide, bool remember)
+        {
+            if (!wide)
+                wideChildren = [];
+            remembers = remember;
         }
 
         /// <inheritdoc cref="NodesForTests"/>
@@ -822,6 +1334,21 @@ namespace Meshwright
             }
 
             private static int Lane(bool on) => on ? -1 : 0;
+
+            /// <summary>The segment's start, x, y and z in the first three lanes.</summary>
+            public Vector128<float> Origin => origin;
+
+            /// <summary>The reciprocal of the segment's length along each axis, zero on a flat one.</summary>
+            public Vector128<float> Inverse => inverse;
+
+            /// <summary>All bits set in the lane of each axis the segment moves along.</summary>
+            public Vector128<float> Slabs => slabs;
+
+            /// <summary>All bits set in the lane of each flat axis.</summary>
+            public Vector128<float> Flat => flat;
+
+            /// <summary>Whether any axis is flat.</summary>
+            public bool AnyFlat => anyFlat;
 
             /// <summary>
             /// A node's mins, in the first three lanes; the fourth holds whatever follows them in the
