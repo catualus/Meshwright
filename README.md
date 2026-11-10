@@ -570,6 +570,21 @@ floating areas fall from 266 to 249, islands from 91 to 82 and areas no spawn re
 1,549, and no area a spawn reached is lost but a slot on pl_badwater no crouching body fits. A hull
 checker flags 140 of the 194 removed links it can test, against 1.3% to 31% of the links kept.
 
+The body sweep was blind to props in three ways of its own. A box wholly inside a prop touches none of
+its triangles, so it swept clear: the start of every sweep is now tested against the props' convex
+hulls as well. A box dragged out through a prop face it starts across was a hit, where a brush reports
+it leaving, so the step away from a wall face its sample lies on was allowed off a brush and refused
+off a prop: the sweep now knows which side of a prop's face is out, and 118 of 222 such steps in the
+flood, the node linker and the corner patcher are grazes it lets through. And a flat plate, the shape
+the crouching and resting body tests sweep up and down, could pass straight through a level prop face
+on rounding alone; plates are now given a hundredth of a unit of depth. Starts inside a prop were rare
+by now, because the line-trace fixes above already keep floors out of props - 601 sweeps across the
+twelve maps, all but 32 of them crouching bodies - and none of them changes a mesh. The graze steps
+reshape 1 to 13 areas on seven maps, and the plate fix removes one cut-off 25 by 18 unit pocket on
+pl_upward that no body fits in. Islands fall from 8 to 7 and areas no spawn reaches from 16 to 15 on
+pl_upward; routes, coverage, floating and over-air areas do not move on any map, and cp_granary,
+cp_badlands, gm_construct and gm_flatgrass come out byte-identical.
+
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
 nothing could leave once it had fallen in. Without them pl_upward has 2,965 areas instead of 4,488,
