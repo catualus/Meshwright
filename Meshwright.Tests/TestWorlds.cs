@@ -78,8 +78,13 @@ namespace Meshwright.Tests
             }
         }
 
-        private static void WriteBsp(string path, string entities,
-            (BspFile.Vector3 Mins, BspFile.Vector3 Maxs)[] models, Box[] boxes)
+        /// <summary>
+        /// Writes the same lumps to <paramref name="path"/> and leaves the file there, for readers that
+        /// take a path rather than a <see cref="BspFile"/> - <see cref="BspModels.Load"/>. Each model's
+        /// head node is <paramref name="headNodes"/>[i], or 0 when none is given.
+        /// </summary>
+        internal static void WriteBsp(string path, string entities,
+            (BspFile.Vector3 Mins, BspFile.Vector3 Maxs)[] models, Box[] boxes, int[]? headNodes = null)
         {
             const int LumpEntities = 0, LumpPlanes = 1, LumpModels = 14, LumpBrushes = 18, LumpBrushSides = 19;
 
@@ -88,12 +93,13 @@ namespace Meshwright.Tests
                 [LumpEntities] = Encoding.ASCII.GetBytes(entities + "\0"),
                 [LumpModels] = Bytes(w =>
                 {
-                    foreach (var (mins, maxs) in models)
+                    for (int i = 0; i < models.Length; i++)
                     {
+                        var (mins, maxs) = models[i];
                         Write(w, mins);
                         Write(w, maxs);
                         Write(w, default);  // origin
-                        w.Write(0);         // head node
+                        w.Write(headNodes is not null && i < headNodes.Length ? headNodes[i] : 0); // head node
                         w.Write(0);         // first face
                         w.Write(0);         // face count
                     }

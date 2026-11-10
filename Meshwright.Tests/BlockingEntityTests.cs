@@ -79,6 +79,25 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// Of the brushes a body walks through, only a toggle brush switched on when the map starts is
+        /// ground to stand on meanwhile. A door's top is in its frame, a breakable is walked through
+        /// because it breaks, and a toggle brush that starts switched off is not there at all.
+        /// </summary>
+        [Fact]
+        public void OnlyToggleBrushesSwitchedOnAtTheStartAreGroundABodyPasses()
+        {
+            int[] Ground(string lump)
+                => BspModels.SelectBlocking(lump, Models, forMovement: true, forGround: true).Select(b => b.Index).ToArray();
+
+            Assert.Equal([7], Ground("""{ "classname" "func_brush" "model" "*7" "targetname" "cap1_stairs" }"""));
+            Assert.Equal([7], Ground("""{ "classname" "func_brush" "model" "*7" }"""));
+            Assert.Empty(Ground("""{ "classname" "func_brush" "model" "*7" "StartDisabled" "1" }"""));
+            Assert.Empty(Ground("""{ "classname" "func_brush" "model" "*7" "solidity" "1" "targetname" "ghost" }"""));
+            Assert.Empty(Ground("""{ "classname" "func_door" "model" "*7" }"""));
+            Assert.Empty(Ground("""{ "classname" "func_breakable" "model" "*7" "health" "50" }"""));
+        }
+
+        /// <summary>
         /// A brace inside a keyvalue (Lua in a lua_run, say) used to end the entity there, so the door
         /// after it was read with the wrong keys and the wrong model.
         /// </summary>

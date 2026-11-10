@@ -253,9 +253,12 @@ namespace Meshwright
             // The same entities without the ones a player walks through (doors, breakables), for the
             // traces that decide where a body can stand and go. Sight keeps the full set.
             var movement = Task.Run(() => BspModels.Load(path, bsp, forMovement: true));
+            // And with the toggle brushes that are switched on at the start put back, for the traces
+            // that look for ground: a body passes them, but stands on them while they are there.
+            var ground = Task.Run(() => BspModels.Load(path, bsp, forMovement: true, forGround: true));
             var vis = BspVisibility.Load(path, bsp);
 
-            vis.AttachModels(models.Result, movement.Result);
+            vis.AttachModels(models.Result, movement.Result, ground.Result);
             vis.AttachDisplacements(displacements.Result);
             vis.AttachStaticProps(props.Result);
 

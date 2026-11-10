@@ -140,7 +140,7 @@ namespace Meshwright
 
         private void ReadLeafBrushes(BinaryReader r, (int Offset, int Length, int Version) lump, BspFile bsp)
         {
-            brushes = bsp.Brushes;
+            brushes = WithFullClip(bsp.Brushes, NavConstants.PlayerClipStopsEveryWalker);
             brushSides = bsp.BrushSides;
 
             if (lump.Length <= 0 || leafs.Length == 0 || brushes.Length == 0)
@@ -441,15 +441,72 @@ namespace Meshwright
         /// against this mask, never <see cref="MaskBlockLos"/>. The two exist for different questions -
         /// can a bot see past this, and can a bot's body pass through this - and this codebase had only
         /// ever asked the first one, everywhere, including for movement.
+        ///
+        /// Plus <see cref="ContentsFullClip"/>, a brush that stops every walker the mesh is for. That
+        /// is usually a brush this mask stopped already through CONTENTS_MONSTERCLIP; the exception is
+        /// TF2's player clip, a wall to its bots (<see cref="NavConstants.PlayerClipStopsEveryWalker"/>).
+        /// It also keeps this mask containing all of <see cref="GroundMask"/>, which is how
+        /// <see cref="ModelsFor"/> tells a movement trace from a sight trace.
         /// </summary>
-        public const int GenerationMask = 0x1 | 0x4000 | 0x2 | 0x20000 | ContentsGrate;
+        public const int GenerationMask = 0x1 | 0x4000 | 0x2 | 0x20000 | ContentsGrate | ContentsFullClip;
 
         /// <summary>CONTENTS_MONSTERCLIP - an invisible brush that stops NPCs and nothing else.</summary>
         private const int ContentsMonsterClip = 0x20000;
 
+        /// <summary>CONTENTS_PLAYERCLIP - an invisible brush that stops players and nothing else.</summary>
+        private const int ContentsPlayerClip = 0x10000;
+
+        /// <summary>
+        /// A content bit of Meshwright's own, set at load on every brush that stops every walker the
+        /// mesh is for: one carrying both CONTENTS_PLAYERCLIP and CONTENTS_MONSTERCLIP - Hammer's plain
+        /// tools/toolsclip, which stops players and NPCs alike - and in TF2, whose bots are players,
+        /// one carrying player clip alone (<see cref="NavConstants.PlayerClipStopsEveryWalker"/>).
+        /// vbsp never writes this bit (it is past CONTENTS_HITBOX, the last one bspflags.h defines), so
+        /// it means exactly that and nothing else.
+        ///
+        /// It exists because a mask is an "any of these bits" test and the question here is "both of
+        /// them". A brush that stops one kind of walker and not the other is a barrier for the one it
+        /// stops, and <see cref="GroundMask"/> explains why NPC clip on its own must not be ground. A
+        /// brush that stops everybody is not a barrier: it is solid, and its top is a floor that every
+        /// walker stands on, in-game, whether or not it is drawn.
+        ///
+        /// TF2 relies on this everywhere. Its stairs are smoothed with a clip ramp laid over the steps,
+        /// and its sunken floors - 2fort's sewer, dustbowl's trenches - are often a clip slab a few
+        /// units over the drawn floor. Without this bit those surfaces were neither ground nor clear:
+        /// not ground because monsterclip is excluded from <see cref="GroundMask"/>, and not clear
+        /// because every step under the ramp has the ramp in its headroom. The flood found nothing to
+        /// stand on there at all. Measured against Valve's own meshes, 919 of the 1,128 routes
+        /// ctf_2fort failed and 812 of cp_dustbowl's 1,095 broke first on exactly such a surface.
+        /// </summary>
+        public const int ContentsFullClip = unchecked((int)0x80000000);
+
+        /// <summary>
+        /// The brushes as the traces should see them: <paramref name="brushes"/> with
+        /// <see cref="ContentsFullClip"/> added to every one that stops players and NPCs both - or,
+        /// with <paramref name="playerClipStopsEveryWalker"/>, to every one that stops players, the
+        /// walkers being players (see <see cref="NavConstants.PlayerClipStopsEveryWalker"/>). A copy,
+        /// because the array belongs to the <see cref="BspFile"/>, which other readers share.
+        /// </summary>
+        internal static BspFile.Brush[] WithFullClip(BspFile.Brush[] brushes, bool playerClipStopsEveryWalker = false)
+        {
+            int stopsEveryWalker = playerClipStopsEveryWalker
+                ? ContentsPlayerClip
+                : ContentsPlayerClip | ContentsMonsterClip;
+
+            var tagged = (BspFile.Brush[])brushes.Clone();
+            for (int i = 0; i < tagged.Length; i++)
+            {
+                if ((tagged[i].Contents & stopsEveryWalker) == stopsEveryWalker)
+                    tagged[i].Contents |= ContentsFullClip;
+            }
+
+            return tagged;
+        }
+
         /// <summary>
         /// What counts as ground the mesh may be built on: <see cref="GenerationMask"/> without
-        /// CONTENTS_MONSTERCLIP.
+        /// CONTENTS_MONSTERCLIP. A brush that is player clip as well as NPC clip still counts, and so in
+        /// TF2 does player clip alone, through <see cref="ContentsFullClip"/>.
         ///
         /// The distinction the single mask was missing is between "can a body pass through this" and
         /// "can a body stand on this". Monsterclip answers yes to the first and no to the second: it is
@@ -492,20 +549,33 @@ namespace Meshwright
         /// </summary>
         private BspModels? movementModels;
 
-        public void AttachModels(BspModels models, BspModels? forMovement = null)
+        /// <summary>
+        /// Brush entities that are ground: <see cref="movementModels"/> plus the walked-through toggle
+        /// brushes that are switched on when the map starts, which a body passes for the purpose of
+        /// linking either side of them but stands on while they are there (see
+        /// <c>BspModels.StandsOn</c>). Falls back to <see cref="movementModels"/>.
+        /// </summary>
+        private BspModels? groundModels;
+
+        public void AttachModels(BspModels models, BspModels? forMovement = null, BspModels? forGround = null)
         {
             entityModels = models;
             movementModels = forMovement ?? models;
+            groundModels = forGround ?? movementModels;
         }
 
         /// <summary>
         /// The brush entities a trace against <paramref name="mask"/> should meet. Movement masks (both
         /// generation masks carry <see cref="GroundMask"/>'s windows and grates, which sight passes)
         /// get the walk-through set; sight gets every blocking entity, so a closed door still hides
-        /// what is behind it.
+        /// what is behind it. Of the two movement masks, <see cref="GroundMask"/> - the one without
+        /// CONTENTS_MONSTERCLIP - is the one that asks what can be stood on rather than what stops a
+        /// body, and gets the ground set.
         /// </summary>
         private BspModels? ModelsFor(int mask)
-            => (mask & GroundMask) == GroundMask ? movementModels : entityModels;
+            => (mask & GroundMask) != GroundMask ? entityModels
+                : (mask & ContentsMonsterClip) == 0 ? groundModels
+                : movementModels;
 
         public void AttachDisplacements(BspDisplacements disp) => displacements = disp;
 
@@ -859,7 +929,7 @@ namespace Meshwright
                 planes = planes,
                 nodes = nodes,
                 leafs = leafs,
-                brushes = brushes,
+                brushes = WithFullClip(brushes, NavConstants.PlayerClipStopsEveryWalker),
                 brushSides = brushSides,
                 leafBrushes = leafBrushes,
                 texInfos = texInfos ?? [],
@@ -1295,9 +1365,11 @@ namespace Meshwright
                     // slope instead of flat, which is exactly what stopped 14 of the 24 staircases the
                     // engine marks on rp_downtown_meowy from passing the "is this a ramp" test. Ask the
                     // brushes that actually bound the solid first, and only fall back to the split
-                    // plane if none of them answer.
+                    // plane if none of them answer. Only a brush the ray enters right here answers: the
+                    // ray is already inside solid at this crossing, so anything the brushes report
+                    // further on is a different surface.
                     int solidLeaf = LeafIndexAt(far, midPoint);
-                    if (solidLeaf >= 0 && TryHitLeafBrush(solidLeaf, rayStart, rayEnd, mid, ref hit, mask))
+                    if (solidLeaf >= 0 && TryHitLeafBrush(solidLeaf, rayStart, rayEnd, mid, mid, ref hit, mask))
                         return true;
 
                     float sign = behind ? -1f : 1f;
@@ -1319,7 +1391,7 @@ namespace Meshwright
 
             // Brushes first even for a solid leaf: they carry the real face the ray came through, where
             // the leaf alone can only say "solid here" and used to answer with a flat (0,0,1) guess.
-            if (TryHitLeafBrush(leafIndex, rayStart, rayEnd, startFraction, ref hit, mask))
+            if (TryHitLeafBrush(leafIndex, rayStart, rayEnd, startFraction, endFraction, ref hit, mask))
                 return true;
 
             if ((leafs[leafIndex].Contents & mask) != 0)
@@ -1386,9 +1458,20 @@ namespace Meshwright
         /// therefore invisible to this trace: the see-through road grates were found in the leaf lists,
         /// carried CONTENTS_GRATE correctly, and still failed to stop a downward trace, so no floor was
         /// ever sampled on top of one and bots had no mesh to walk across.
+        ///
+        /// Only hits inside this leaf's own stretch of the ray, <paramref name="startFraction"/> to
+        /// <paramref name="endFraction"/>, are this leaf's to report. A leaf lists every brush that
+        /// touches it anywhere, and clipping the whole ray against one of those can land far past the
+        /// leaf - where the ray only meets the brush after crossing other leaves, and possibly other
+        /// solids. Reporting that hit here returned it ahead of anything nearer in those later leaves.
+        /// On ctf_2fort a water leaf listed a sloped brush that its column only reached 24 units under
+        /// the drawn floor of the sewer, so every downward trace through the water went straight past
+        /// the floor; the strip it covered got no areas, and 240 of the 259 Valve routes the mesh still
+        /// failed once clip brushes were ground broke there. A hit past the leaf is not lost by
+        /// refusing it: the leaf the ray is in when it does meet the brush lists the brush too.
         /// </summary>
         private bool TryHitLeafBrush(int leafIndex, BspFile.Vector3 rayStart, BspFile.Vector3 rayEnd,
-            float startFraction, ref SurfaceHit hit, int mask)
+            float startFraction, float endFraction, ref SurfaceHit hit, int mask)
         {
             if ((uint)leafIndex >= (uint)leafBrushes.Length)
                 return false;
@@ -1471,7 +1554,7 @@ namespace Meshwright
                 // what was clipped. Ignore anything landing behind this leaf: leaves are visited front
                 // to back, so a nearer intersection with that same brush would already have been found
                 // in an earlier one, and accepting it here would report a hit the ray had passed.
-                if (enter < startFraction - 0.0001f)
+                if (enter < startFraction - 0.0001f || enter > endFraction + 0.0001f)
                     continue;
 
                 if (found && enter >= best)
