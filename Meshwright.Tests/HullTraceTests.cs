@@ -139,6 +139,46 @@ namespace Meshwright.Tests
             Assert.True(startSolid, "a box starting inside the func_wall was reported as starting in open air");
         }
 
+        /// <summary>
+        /// A body-sized box swept past the end of a brush entity, its middle line two units clear of the
+        /// wall's end and one side straight through it, hits the wall.
+        ///
+        /// Brush entities were gathered for the sweep by the line through the box's origin alone, so one
+        /// the box ran into but that line missed was never traced against: the respawn-room door panels
+        /// on ctf_2fort read as open to a 32 unit body anywhere its middle passed a unit beyond their ends.
+        /// </summary>
+        [Fact]
+        public void ABoxSweptPastTheEndOfABrushEntityHitsIt()
+        {
+            var vis = WallEntity("func_wall");
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(-60, 102, 9),
+                new BspFile.Vector3(60, 102, 9),
+                new BspFile.Vector3(-16, -16, 0), new BspFile.Vector3(16, 16, 46),
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
+
+            Assert.True(hit, "the box was swept through the func_wall's end");
+            Assert.False(startSolid);
+            Assert.True(fraction < 0.5f);
+        }
+
+        /// <summary>The control: the same box swept far enough past the wall's end to clear it is clear.</summary>
+        [Fact]
+        public void ABoxSweptClearOfTheEndOfABrushEntityIsClear()
+        {
+            var vis = WallEntity("func_wall");
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(-60, 117, 9),
+                new BspFile.Vector3(60, 117, 9),
+                new BspFile.Vector3(-16, -16, 0), new BspFile.Vector3(16, 16, 46),
+                BspVisibility.GenerationMask, out _, out _, out bool startSolid);
+
+            Assert.False(hit);
+            Assert.False(startSolid);
+        }
+
         /// <summary>The control: the same sweep starting beside the wall is clear.</summary>
         [Fact]
         public void ABoxSweptAwayFromABrushEntityIsClear()

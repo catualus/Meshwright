@@ -751,13 +751,14 @@ namespace Meshwright
         /// last attempt rather than the first of several.
         /// </summary>
         private static (int[] Heads, BspFile.Vector3[] Origins, int Count) GatherAll(
-            BspModels models, BspFile.Vector3 a, BspFile.Vector3 b)
+            BspModels models, BspFile.Vector3 a, BspFile.Vector3 b,
+            BspFile.Vector3 mins = default, BspFile.Vector3 maxs = default)
         {
             int capacity = models.BlockingModelCount;
             var heads = new int[capacity];
             var origins = new BspFile.Vector3[capacity];
 
-            return (heads, origins, models.Gather(a, b, heads, origins, out _));
+            return (heads, origins, models.Gather(a, b, mins, maxs, heads, origins, out _));
         }
 
         /// <summary>
@@ -996,11 +997,13 @@ namespace Meshwright
                 int gathered = Math.Min(hullModels.BlockingModelCount, GatherBuffer);
                 Span<int> heads = stackalloc int[gathered];
                 Span<BspFile.Vector3> origins = stackalloc BspFile.Vector3[gathered];
-                int count = hullModels.Gather(a, b, heads, origins, out bool overflowed);
+                // Gathered by the swept box, not by the line through its origin: a brush entity the box
+                // runs into beside that line is still in its way.
+                int count = hullModels.Gather(a, b, mins, maxs, heads, origins, out bool overflowed);
 
                 if (overflowed)
                 {
-                    var all = GatherAll(hullModels, a, b);
+                    var all = GatherAll(hullModels, a, b, mins, maxs);
                     heads = all.Heads;
                     origins = all.Origins;
                     count = all.Count;
