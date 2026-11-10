@@ -487,6 +487,111 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// The leaves of the tree a segment straight up or down through <paramref name="x"/>,
+        /// <paramref name="y"/> with both ends between <paramref name="below"/> and
+        /// <paramref name="above"/> less a margin can reach: every leaf whose box, and every ancestor's,
+        /// holds the column and reaches into that stretch of it. Written to <paramref name="leaves"/>,
+        /// which is grown as needed; returns how many. <see cref="ColumnBlocks"/> then answers each such
+        /// segment from these alone.
+        ///
+        /// A segment with no length across is flat on those two axes, and <see cref="SegmentBoxes"/>
+        /// asks of a flat axis only whether the start lies within the box's slab - the comparisons made
+        /// here, the same way round. A box wholly above <paramref name="above"/> or wholly below
+        /// <paramref name="below"/> it cannot pass for any such segment either, provided the margin the
+        /// caller took is far wider than the rounding in the box test and than the far end's
+        /// <see cref="SegmentEpsilon"/>: going away from such a box, the segment's fractions for it are
+        /// all below zero; going towards it, all past one by at least the margin over the segment's
+        /// length. <see cref="BspVisibility.ColumnMargin"/> is a thousand times what that needs. So these
+        /// are all the leaves <see cref="Blocks"/> could reach for such a segment, and more: which of
+        /// them it does reach depends on the heights, and that is left to <see cref="ColumnBlocks"/>.
+        /// </summary>
+        internal int CollectColumn(float x, float y, float below, float above, ref int[] leaves)
+        {
+            if (bvh.Length == 0)
+                return 0;
+
+            int found = 0;
+
+            Span<int> stack = stackalloc int[64];
+            int top = 0;
+            stack[top++] = 0;
+
+            while (top > 0)
+            {
+                int index = stack[--top];
+                ref readonly var node = ref bvh[index];
+
+                if (!(x >= node.Mins.X && x <= node.Maxs.X && y >= node.Mins.Y && y <= node.Maxs.Y))
+                    continue;
+
+                if (node.Mins.Z > above || node.Maxs.Z < below)
+                    continue;
+
+                if (node.Count != 0)
+                {
+                    if (found == leaves.Length)
+                        Array.Resize(ref leaves, Math.Max(16, leaves.Length * 2));
+
+                    leaves[found++] = index;
+                    continue;
+                }
+
+                // As deep as the tree and one more, which a median split keeps far below the stack's
+                // size; see Blocks.
+                if (top + 2 > stack.Length)
+                    continue;
+
+                stack[top++] = node.Right;
+                stack[top++] = index + 1;
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// <see cref="Blocks"/> for a segment straight up or down the column <paramref name="leaves"/>
+        /// were collected for (<see cref="CollectColumn"/>): the same answer, without the walk from the
+        /// root.
+        ///
+        /// <see cref="Blocks"/> tests the triangles of every leaf whose box the segment passes through,
+        /// once it has passed through the box of every node above it, and says whether any of them is
+        /// crossed. A node's box is the union of its triangles' boxes, so it holds each child's box, and
+        /// the box test cannot pass a box and fail one holding it: on the flat axes it asks whether the
+        /// start lies inside, and on the axis the segment runs along, the fractions it works out from a
+        /// wider box's bounds are rounded from the same operations on numbers no further in, so they
+        /// span no less. A leaf the segment passes through therefore has every ancestor passed through
+        /// too, and the leaves reached are exactly the collected ones the segment passes through. Each
+        /// is box-tested and its triangles tested as <see cref="Blocks"/> does, by the same code, so
+        /// each answers the same; the order they are asked in decides nothing, any crossing being
+        /// enough.
+        /// </summary>
+        internal bool ColumnBlocks(ReadOnlySpan<int> leaves, BspFile.Vector3 a, BspFile.Vector3 b, int mask)
+        {
+            if (leaves.IsEmpty)
+                return false;
+
+            var segment = new SegmentBoxes(a, b);
+            bool wide = Vector256.IsHardwareAccelerated;
+
+            foreach (int index in leaves)
+            {
+                ref readonly var node = ref bvh[index];
+
+                if (!segment.Hits(in node, out _))
+                    continue;
+
+                if (wide
+                        ? LeafBlocksWide(a, b, mask, node.First, node.Count)
+                        : LeafBlocksScalar(a, b, mask, node.First, node.Count))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// The tree as built, for the tests that hold <see cref="Blocks"/> to the walk it replaced:
         /// each node's box, its right child (the left is the next node), and its triangle range, with
         /// the triangles and their contents in the order the ranges index.

@@ -41,6 +41,14 @@ namespace Meshwright
         /// <summary>Whether the segment crosses any prop matching <paramref name="mask"/>.</summary>
         public bool Blocks(BspFile.Vector3 a, BspFile.Vector3 b, int mask) => mesh.Blocks(a, b, mask);
 
+        /// <summary>See <see cref="TriangleMesh.CollectColumn"/>.</summary>
+        internal int CollectColumn(float x, float y, float below, float above, ref int[] leaves)
+            => mesh.CollectColumn(x, y, below, above, ref leaves);
+
+        /// <summary>See <see cref="TriangleMesh.ColumnBlocks"/>.</summary>
+        internal bool ColumnBlocks(ReadOnlySpan<int> leaves, BspFile.Vector3 a, BspFile.Vector3 b, int mask)
+            => mesh.ColumnBlocks(leaves, a, b, mask);
+
         /// <summary>The nearest prop surface the segment crosses, with the triangle's normal.</summary>
         public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
             out float fraction, out BspFile.Vector3 normal)
