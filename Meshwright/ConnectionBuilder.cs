@@ -1028,7 +1028,7 @@ namespace Meshwright
         /// is - a kerb, a stair tread, a slope - and a body rests on the highest of it, up to a step above
         /// the floor under its middle, so that is the height it has to fit from.
         /// </summary>
-        private static bool BodyStands(BspVisibility vis, float x, float y, float ground)
+        internal static bool BodyStands(BspVisibility vis, float x, float y, float ground)
         {
             const float Half = NavConstants.HalfHumanWidth;
             const float Drop = NavConstants.StepHeight + 1f;
@@ -1381,7 +1381,7 @@ namespace Meshwright
         /// Searched only a step either side, so this corrects the quad-versus-tread discrepancy without
         /// wandering onto a different storey through a gap beside the area.
         /// </summary>
-        private static float GroundAt(BspVisibility vis, float x, float y, float claimed)
+        internal static float GroundAt(BspVisibility vis, float x, float y, float claimed)
             => StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
                 NavConstants.StepHeight * 2f, out float ground)
                 ? ground

@@ -237,6 +237,64 @@ namespace Meshwright
             return cleared;
         }
 
+        /// <summary>
+        /// Deletes the areas in <paramref name="doomed"/> and every reference the rest of the mesh holds
+        /// to them, for a pass that removes areas part way through a run. Returns how many went.
+        ///
+        /// Every reference the format can hold to an area: connections, the five ends of a ladder
+        /// (<see cref="ForgetLadderEnds"/>), visibility entries and the area a visibility list inherits
+        /// from, and encounters - both an encounter that starts or ends on a doomed area and a spot
+        /// sighting that names one of the hiding spots the doomed areas took with them, since spot ids
+        /// are global and an encounter in one area names spots in another. A pass that ran before the
+        /// spots or visibility were built has none of those yet, and those sweeps then find nothing.
+        ///
+        /// An area's own ladder lists are left alone. They hold *ladder* ids, not area ids, and
+        /// scrubbing them with area ids is how discarding area 3 once cut every link to ladder 3 on a
+        /// fresh run, where both count from 1.
+        /// </summary>
+        public static int RemoveAreas(NavFile nav, IReadOnlySet<uint> doomed)
+        {
+            if (doomed.Count == 0)
+                return 0;
+
+            var spots = new HashSet<uint>();
+
+            foreach (var area in nav.Areas)
+            {
+                if (!doomed.Contains(area.Id))
+                    continue;
+
+                foreach (var spot in area.HidingSpots)
+                    spots.Add(spot.Id);
+            }
+
+            int before = nav.Areas.Count;
+            nav.Areas.RemoveAll(a => doomed.Contains(a.Id));
+
+            foreach (var area in nav.Areas)
+            {
+                foreach (var list in area.Connections)
+                    list.RemoveAll(doomed.Contains);
+
+                area.VisibleAreas.RemoveAll(v => doomed.Contains(v.AreaId));
+
+                if (doomed.Contains(area.InheritVisibilityFrom))
+                    area.InheritVisibilityFrom = 0;
+
+                area.Encounters.RemoveAll(e => doomed.Contains(e.FromAreaId) || doomed.Contains(e.ToAreaId));
+
+                if (spots.Count == 0)
+                    continue;
+
+                foreach (var encounter in area.Encounters)
+                    encounter.Spots.RemoveAll(s => spots.Contains(s.SpotId));
+            }
+
+            ForgetLadderEnds(nav, doomed);
+
+            return before - nav.Areas.Count;
+        }
+
         private static int ClearIfMissing(HashSet<uint> areas, NavLadder ladder,
             Func<NavLadder, uint> read, Action<NavLadder, uint> write)
         {

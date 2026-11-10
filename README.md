@@ -297,17 +297,17 @@ and the areas the run's own reachability check cannot reach from any spawn.
 
 | | gm_construct | rp_downtown_tits_v25 |
 |---|---|---|
-| Coverage of the reference's ground a player can reach | **98.9%** | 67.6% |
+| Coverage of the reference's ground a player can reach | **98.9%** | 67.5% |
 | Coverage of every reference area including stranded | 89.2% | 67.6% |
 | Areas on ground the reference does not have | 2.4% | 9.4% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 140 (0.8%) |
+| Areas no player spawn can reach | 3 (0.1%) | 48 (0.3%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
 drops the second row to 89.2%.
 
-67.6% on the large map is mostly the reference's doing. It looks like the output of an earlier
+67.5% on the large map is mostly the reference's doing. It looks like the output of an earlier
 Meshwright, whose flood walked through thin walls and terrain. Of the 6,135 reachable shipped areas
 the generated mesh does not cover, 5,211 are on real ground, and 4,301 of those are under water -
 most of them the sea and lake bed under the displacement islands in the south-east of the map.
@@ -530,6 +530,27 @@ link: a sliver or slot no body fits in on each RP map and pl_badwater, and seven
 two pockets under the bridge deck that Valve's mesh does not cover, reached before only by a 256 unit
 drop through the deck and a link through a wall.
 
+Areas cut off from everything that no body fits in are removed. The flood gives a cell to any floor a
+column holds, so a slot between props, a pocket against a diagonal wall or a crevice between rocks
+becomes an area, and once the movement passes stopped linking such areas through solid they were left
+with no link at all, counted as islands and as ground no spawn reaches. After the corner patcher and
+the shortcut fixup, a generated area that has no connection or ladder to anything else, alone or in a
+group of up to four joined only to each other, goes when a crouching body stands nowhere on it - the
+connection builder's own test, on a four-unit grid a unit inside its edges. 13 areas on cp_badlands and
+pl_upward had room only with the body's centre exactly on their boundary, and none a unit in. An area a
+body fits in is kept and reported, as ground the movement pass failed to link: 83 across the twelve
+maps, 32 and 31 of them on the RP maps. So is anything near a player spawn, a ladder's top or foot or a
+lift stop, the area a spawn resolves to, and any area a ladder names: 13 more. 380 areas go, from none
+on ctf_2fort, gm_construct and gm_flatgrass to 93 on rp_downtown_tits_v25, and with them 6 links, each
+between two of them. Islands fall from 468 to 91 and areas no spawn reaches from 1,925 to 1,545, on
+every map but those three; no area a spawn reached is lost, and spawn coverage, ladders, floating and
+over-air areas do not move. Routes rise from 99.95% to 100% on cp_badlands, where one end of a pair
+was on a removed pocket, and hold elsewhere. Coverage falls by one reference area each on koth_viaduct
+and rp_downtown_tits_v25, 98.4% to 98.3% and 67.6% to 67.5%: the reference area's centre lay on a
+removed pocket, and no body fits at that centre in the reference either. The pass takes under a second
+on the largest map. Still in place are pockets with a link out and none in, like a 32 by 10 area on
+pl_badwater, and two groups under cp_badlands' bridge deck that a body does fit in.
+
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
 nothing could leave once it had fallen in. Without them pl_upward has 2,965 areas instead of 4,488,
@@ -594,7 +615,8 @@ sampled interior sits inside geometry. `meshwright shape <bsp> <nav>` reports it
 
 **Some areas cannot be reached from a player spawn.** Every run reports the count;
 `meshwright reachable` shows where. `-pruneunreachable` deletes them, capped to groups of eight or
-fewer, and refusing outright if the result would remove more than a third of the mesh.
+fewer, and refusing outright if the result would remove more than a third of the mesh. Areas cut off
+from everything that no crouching body fits in are removed on every run, as they are not ground.
 
 It is off by default because deleting it measures worse. Most unreachable ground is real ground the
 movement pass failed to link, and the engine walks it perfectly well: on `rp_downtown_tits_v2` pruning
