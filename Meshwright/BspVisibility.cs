@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Meshwright
 {
@@ -113,6 +115,7 @@ namespace Meshwright
             vis.ReadLeafs(r, offsets[LumpLeafs]);
             vis.ReadVisibility(r, offsets[LumpVisibility]);
             vis.ReadLeafBrushes(r, offsets[LumpLeafBrushes], bsp);
+            vis.BuildTraceTables();
 
             return vis;
         }
@@ -686,7 +689,7 @@ namespace Meshwright
             if (nodes.Length == 0 || leafs.Length == 0)
                 return true;
 
-            if (Blocked(0, a, b, mask, a, b, ignoreContents))
+            if (Blocked(0, a, b, new LineQuery(a, b, mask, ignoreContents, TestedBrushes(out int ray), ray)))
                 return false;
 
             return !BlockedPastWorld(a, b, mask, ignoreContents);
@@ -735,8 +738,12 @@ namespace Meshwright
             for (int i = 0; i < count; i++)
             {
                 var o = origins[i];
-                if (Blocked(heads[i], Shift(a, o), Shift(b, o), mask,
-                        Shift(a, o), Shift(b, o), ignoreContents))
+                var start = Shift(a, o);
+                var end = Shift(b, o);
+
+                // A ray of its own: the segment is a different one in each model's space.
+                if (Blocked(heads[i], start, end,
+                        new LineQuery(start, end, mask, ignoreContents, TestedBrushes(out int ray), ray)))
                     return true;
             }
 
@@ -968,7 +975,8 @@ namespace Meshwright
         internal static BspVisibility FromGeometry(BspFile.Plane[] planes, Node[] nodes, Leaf[] leafs,
             BspFile.Brush[] brushes, BspFile.BrushSide[] brushSides, int[]?[] leafBrushes,
             BspFile.TexInfo[]? texInfos = null)
-            => new()
+        {
+            var vis = new BspVisibility
             {
                 planes = planes,
                 nodes = nodes,
@@ -978,6 +986,10 @@ namespace Meshwright
                 leafBrushes = leafBrushes,
                 texInfos = texInfos ?? [],
             };
+
+            vis.BuildTraceTables();
+            return vis;
+        }
 
         /// <summary>
         /// Sweeps an axis-aligned box along a segment - the equivalent of <c>UTIL_TraceHull</c>, which
@@ -1121,11 +1133,11 @@ namespace Meshwright
         {
             while (num >= 0)
             {
-                var node = nodes[num];
+                ref readonly var node = ref nodes[num];
                 if ((uint)node.PlaneNum >= (uint)planes.Length)
                     return false;
 
-                var plane = planes[node.PlaneNum];
+                ref readonly var plane = ref planes[node.PlaneNum];
 
                 // How far the box can reach either side of the traced point along this plane's normal.
                 // Widening the split by it is what stops a leaf the box overlaps - but whose traced
@@ -1241,7 +1253,7 @@ namespace Meshwright
 
             foreach (int index in list)
             {
-                var brush = brushes[index];
+                ref readonly var brush = ref brushes[index];
                 if ((brush.Contents & mask) == 0)
                     continue;
 
@@ -1256,10 +1268,10 @@ namespace Meshwright
                     int sideIndex = brush.FirstSide + i;
                     if ((uint)sideIndex >= (uint)brushSides.Length) { startsOutside = true; break; }
 
-                    var side = brushSides[sideIndex];
+                    ref readonly var side = ref brushSides[sideIndex];
                     if ((uint)side.PlaneNum >= (uint)planes.Length) { startsOutside = true; break; }
 
-                    var plane = planes[side.PlaneNum];
+                    ref readonly var plane = ref planes[side.PlaneNum];
 
                     // the plane, pushed out to account for the box
                     float dist = plane.Distance
@@ -1497,10 +1509,12 @@ namespace Meshwright
         /// with each node splitting the run where the points cross its plane. The split has to land
         /// where a point descent would put each point, to the bit, or the answers differ - so it is not
         /// worked out from where the segment crosses the plane, but searched for among the points
-        /// themselves, each tested with exactly the expression <see cref="Blocked"/> uses. Searching is
-        /// sound because that expression is monotonic in height: with the column's x and y fixed it is
-        /// <c>((nx*x + ny*y) + nz*z) - d</c>, and every rounded multiply, add and subtract in it is
-        /// monotonic in its operand, so as z falls the plane's side changes at most once along the run.
+        /// themselves, each tested with exactly the expression <see cref="Blocked"/> uses
+        /// (<see cref="PlaneDistance"/>). Searching is sound because that expression is monotonic in
+        /// height: with the column's x and y fixed it is <c>((nx*x + ny*y) + nz*z) - d</c>, or on an
+        /// axial plane a single <c>z - d</c> or a constant, and every rounded multiply, add and subtract
+        /// in it is monotonic in its operand, so as z falls the plane's side changes at most once along
+        /// the run.
         /// Splits that fall in the same place are found by bisection, and a run that stays on one side
         /// costs two plane tests where the point descents cost one per point.
         ///
@@ -1544,16 +1558,14 @@ namespace Meshwright
         {
             while (num >= 0)
             {
-                ref readonly var node = ref nodes[num];
+                ref readonly var node = ref traceNodes[num];
 
                 // Blocked gives up on a node it cannot read and calls the point not blocked by the world.
-                if ((uint)node.PlaneNum >= (uint)planes.Length)
+                if (node.Plane.Axis == AxisMissing)
                     return FirstOpenPastWorld(-1, heights, lo, hi, x, y, mask);
 
-                ref readonly var plane = ref planes[node.PlaneNum];
-
-                bool first = InFront(in plane, x, y, heights[lo]);
-                if (InFront(in plane, x, y, heights[hi]) == first)
+                bool first = InFront(in node, x, y, heights[lo]);
+                if (InFront(in node, x, y, heights[hi]) == first)
                 {
                     num = first ? node.Child0 : node.Child1;
                     continue;
@@ -1565,7 +1577,7 @@ namespace Meshwright
                 while (b - a > 1)
                 {
                     int mid = a + (b - a) / 2;
-                    if (InFront(in plane, x, y, heights[mid]) == first)
+                    if (InFront(in node, x, y, heights[mid]) == first)
                         a = mid;
                     else
                         b = mid;
@@ -1590,12 +1602,13 @@ namespace Meshwright
         }
 
         /// <summary>
-        /// Which side of a node's plane a point descent sends the point at this height to - the same
-        /// expression, term for term and in the same order, as <see cref="Blocked"/> and
-        /// <see cref="TryGetLeaf"/> evaluate, so that it rounds the same way.
+        /// Which side of a node's plane a point descent sends the point at this height to - by
+        /// <see cref="PlaneDistance"/>, as <see cref="Blocked"/> works it out, so that it rounds the same
+        /// way. <see cref="TryGetLeaf"/> takes the full dot product for every plane, and agrees: see
+        /// <see cref="PlaneDistance"/> for why the axial shortcut cannot put a point on the other side.
         /// </summary>
-        private static bool InFront(in BspFile.Plane plane, float x, float y, float z)
-            => plane.Normal.X * x + plane.Normal.Y * y + plane.Normal.Z * z - plane.Distance >= 0;
+        private static bool InFront(in TraceNode node, float x, float y, float z)
+            => PlaneDistance(in node.Plane, new BspFile.Vector3(x, y, z)) >= 0;
 
         /// <summary>
         /// The rest of <see cref="IsPointSolid"/> for points the world tree has not already called solid,
@@ -1610,7 +1623,8 @@ namespace Meshwright
             {
                 var p = new BspFile.Vector3(x, y, heights[k]);
 
-                if (leafIndex >= 0 && HitsLeafBrush(leafIndex, p, p, mask, 0))
+                // One leaf per point, so no brush can come up twice and none are stamped.
+                if (leafIndex >= 0 && HitsLeafBrush(leafIndex, new LineQuery(p, p, mask, 0, null, 0)))
                     continue;
 
                 if (BlockedPastWorld(p, p, mask, 0) || IsInsideProp(p, mask))
@@ -1817,7 +1831,7 @@ namespace Meshwright
 
             foreach (int index in list)
             {
-                var brush = brushes[index];
+                ref readonly var brush = ref brushes[index];
                 if ((brush.Contents & mask) == 0)
                     continue;
 
@@ -1832,10 +1846,10 @@ namespace Meshwright
                     int sideIndex = brush.FirstSide + i;
                     if ((uint)sideIndex >= (uint)brushSides.Length) { startsOutside = true; break; }
 
-                    var side = brushSides[sideIndex];
+                    ref readonly var side = ref brushSides[sideIndex];
                     if ((uint)side.PlaneNum >= (uint)planes.Length) { startsOutside = true; break; }
 
-                    var plane = planes[side.PlaneNum];
+                    ref readonly var plane = ref planes[side.PlaneNum];
                     float d1 = plane.Normal.X * rayStart.X + plane.Normal.Y * rayStart.Y
                         + plane.Normal.Z * rayStart.Z - plane.Distance;
                     float d2 = plane.Normal.X * rayEnd.X + plane.Normal.Y * rayEnd.Y
@@ -2045,27 +2059,223 @@ namespace Meshwright
             return true;
         }
 
-        private bool Blocked(int num, BspFile.Vector3 p1, BspFile.Vector3 p2, int mask)
-            => Blocked(num, p1, p2, mask, p1, p2, 0);
+        /// <summary>
+        /// A plane as the yes-or-no traces read it: the four numbers they use, and which unit axis the
+        /// normal is, if any.
+        /// </summary>
+        private struct TracePlane
+        {
+            public float NormalX, NormalY, NormalZ, Distance;
 
-        private bool Blocked(int num, BspFile.Vector3 p1, BspFile.Vector3 p2, int mask,
-            BspFile.Vector3 rayStart, BspFile.Vector3 rayEnd, int ignoreContents)
+            /// <summary>
+            /// 0, 1 or 2 when the normal is exactly one along that axis and exactly zero along the
+            /// other two; <see cref="AxisOblique"/> for any other plane; <see cref="AxisMissing"/> when
+            /// whatever named it named a plane that does not exist, where the trace gives up.
+            /// </summary>
+            public int Axis;
+
+            public TracePlane(BspFile.Plane[] planes, int index)
+            {
+                if ((uint)index >= (uint)planes.Length)
+                {
+                    this = default;
+                    Axis = AxisMissing;
+                    return;
+                }
+
+                ref readonly var plane = ref planes[index];
+
+                NormalX = plane.Normal.X;
+                NormalY = plane.Normal.Y;
+                NormalZ = plane.Normal.Z;
+                Distance = plane.Distance;
+                Axis = AxisOf(plane.Normal);
+            }
+        }
+
+        private const int AxisOblique = 3;
+        private const int AxisMissing = -1;
+
+        /// <summary>
+        /// A tree node for the line trace, with its split plane copied in beside it.
+        ///
+        /// The line trace reads a node and then the plane it names, a second dependent load from a
+        /// second array, on every one of tens of millions of node visits a map; this puts the plane in
+        /// the same 32 bytes as the children, so a node is one load and half a cache line.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential, Size = 32)]
+        private struct TraceNode
+        {
+            public TracePlane Plane;
+            public int Child0, Child1;
+        }
+
+        /// <summary>The line trace's copy of the tree; see <see cref="TraceNode"/>.</summary>
+        private TraceNode[] traceNodes = [];
+
+        /// <summary>
+        /// Each brush side's plane, by side - where <see cref="brushSides"/> holds only the plane's
+        /// number. A brush's sides are consecutive, so clipping against one now reads straight down
+        /// this array, where it used to jump from each side to its plane somewhere in
+        /// <see cref="planes"/>, one scattered load per face.
+        /// </summary>
+        private TracePlane[] sidePlanes = [];
+
+        /// <summary>
+        /// Builds <see cref="traceNodes"/> and <see cref="sidePlanes"/> once the tree and the brushes are
+        /// read. Neither is written after, so every thread tracing shares them.
+        ///
+        /// Which planes are axial is read off the normal itself rather than off the plane's stored
+        /// type: the shortcut is only exact when the normal really is a unit axis to the bit, and a
+        /// type is a claim about the normal made by whatever wrote the file.
+        /// </summary>
+        private void BuildTraceTables()
+        {
+            var built = new TraceNode[nodes.Length];
+
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                built[i].Plane = new TracePlane(planes, nodes[i].PlaneNum);
+                built[i].Child0 = nodes[i].Child0;
+                built[i].Child1 = nodes[i].Child1;
+            }
+
+            var sides = new TracePlane[brushSides.Length];
+            for (int i = 0; i < brushSides.Length; i++)
+                sides[i] = new TracePlane(planes, brushSides[i].PlaneNum);
+
+            traceNodes = built;
+            sidePlanes = sides;
+        }
+
+        /// <summary>Which unit axis a normal is, exactly, or <see cref="AxisOblique"/>.</summary>
+        internal static int AxisOf(BspFile.Vector3 normal)
+        {
+            if (normal.X == 1f && normal.Y == 0f && normal.Z == 0f) return 0;
+            if (normal.X == 0f && normal.Y == 1f && normal.Z == 0f) return 1;
+            if (normal.X == 0f && normal.Y == 0f && normal.Z == 1f) return 2;
+            return AxisOblique;
+        }
+
+        /// <summary>
+        /// A point's signed distance from a plane, as the yes-or-no traces take it: the line trace's
+        /// walk down the tree, its brush test, and the floor walk.
+        ///
+        /// Valve's shortcut: on a plane whose normal is a unit axis, the distance is that one coordinate
+        /// less the plane's distance, without the dot product. It is the same number. With a normal of
+        /// exactly (0, 0, 1), <c>((0*x + 0*y) + 1*z) - d</c> multiplies to zero twice and by one once,
+        /// none of which rounds, and adding zeros to <c>z</c> leaves it as it was - so what reaches the
+        /// subtraction is <c>z</c> itself, and the subtraction is the same one. The one thing that can
+        /// differ is the sign of a zero result: the dot product of a point with a zero coordinate can
+        /// come out <c>-0</c> where the shortcut gives <c>+0</c>. Nothing these traces do can tell them
+        /// apart. Both are <c>&gt;= 0</c> and <c>&lt;= 0</c> and neither is <c>&lt; 0</c> or
+        /// <c>&gt; 0</c>; a zero over the non-zero difference it is divided by is a zero fraction
+        /// either way; in the tree a zero fraction moves no coordinate but a zero one, which is only
+        /// another such sign, and in a brush it is only ever compared after a non-zero epsilon is added
+        /// or taken away. So every node goes the same way, every leaf asked is the same leaf, and every
+        /// brush answers the same. Taken for granted is that coordinates are finite: an infinite one
+        /// would make the dot product's <c>0*x</c> a NaN that the shortcut never sees, and no map has
+        /// one.
+        ///
+        /// Only the traces that answer yes or no use this. <see cref="TraceSurface"/>,
+        /// <see cref="TryHitLeafBrush"/>, <see cref="HullTrace"/> and <see cref="ClipHullToLeaf"/> turn
+        /// the same fractions into the positions written to the mesh, where a <c>-0</c> could reach a
+        /// coordinate and change the file, so they keep the dot product.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static float PlaneDistance(in TracePlane plane, in BspFile.Vector3 p)
+        {
+            if (plane.Axis < AxisOblique)
+                return Unsafe.Add(ref Unsafe.AsRef(in p.X), plane.Axis) - plane.Distance;
+
+            return plane.NormalX * p.X + plane.NormalY * p.Y + plane.NormalZ * p.Z - plane.Distance;
+        }
+
+        /// <summary>
+        /// What a line trace carries down the tree: the whole ray, which every leaf's brushes are
+        /// clipped against (see <see cref="HitsLeafBrush"/>), what it is tested against, and the stamp
+        /// that marks the brushes it has already tested.
+        /// </summary>
+        private readonly ref struct LineQuery(BspFile.Vector3 start, BspFile.Vector3 end, int mask,
+            int ignoreContents, int[]? tested, int ray)
+        {
+            public readonly BspFile.Vector3 Start = start, End = end;
+            public readonly int Mask = mask, IgnoreContents = ignoreContents;
+
+            /// <summary>
+            /// The stamp array <see cref="TestedBrushes"/> handed out, or null for a query that cannot
+            /// meet a brush twice and should not pay to check.
+            /// </summary>
+            public readonly int[]? Tested = tested;
+
+            /// <summary>This ray's stamp in <see cref="Tested"/>.</summary>
+            public readonly int Ray = ray;
+        }
+
+        /// <summary>
+        /// Per brush, the last ray on this thread that tested it - Valve's <c>checkcount</c>. A detail
+        /// brush is listed in every leaf it touches, and a ray crossing several of them used to clip
+        /// against it once in each: on the benchmark maps 7-12% of brush tests repeated one the same
+        /// ray had already made. Asking again is pointless as well as slow. A brush is clipped against
+        /// the whole ray wherever it is met, so a second test is the same test with the same answer -
+        /// and the trace only reaches a second one because the first said no. Skipping it changes
+        /// nothing but the work.
+        ///
+        /// Per thread, because rays run on many at once, and shared by every map a thread traces - the
+        /// tests, a batch. That needs no more than the array being long enough: a thread's rays are
+        /// numbered upwards, so whatever any earlier ray left in a slot, on this map or another, is a
+        /// number this ray is not. Holding no reference to a map, it keeps none alive.
+        /// </summary>
+        [ThreadStatic] private static int[]? testedStamps;
+        [ThreadStatic] private static int testedRay;
+
+        /// <summary>
+        /// This thread's brush stamps, long enough for this map, and a fresh stamp for a new ray: one no
+        /// brush carries yet. When the numbers run out the stamps are cleared and start again, which is
+        /// once per two billion rays.
+        /// </summary>
+        private int[] TestedBrushes(out int ray)
+        {
+            var stamps = testedStamps;
+
+            if (stamps is null || stamps.Length < brushes.Length)
+            {
+                stamps = testedStamps = new int[brushes.Length];
+                testedRay = 0;
+            }
+            else if (testedRay == int.MaxValue)
+            {
+                Array.Clear(stamps);
+                testedRay = 0;
+            }
+
+            ray = ++testedRay;
+            return stamps;
+        }
+
+        /// <summary>
+        /// Whether a segment of the ray in <paramref name="query"/>, <paramref name="p1"/> to
+        /// <paramref name="p2"/>, meets blocking contents in the tree under <paramref name="num"/>:
+        /// a leaf whose contents match the mask, or a brush listed in one that the whole ray enters.
+        ///
+        /// Three things keep this cheap, none of which changes an answer: nodes are read with their
+        /// plane beside them (<see cref="TraceNode"/>), axial planes skip the dot product
+        /// (<see cref="PlaneDistance"/>), and a brush is clipped at most once per ray
+        /// (<see cref="testedStamps"/>).
+        /// </summary>
+        private bool Blocked(int num, BspFile.Vector3 p1, BspFile.Vector3 p2, in LineQuery query)
         {
             while (num >= 0)
             {
                 // By reference, not by value. This is the hottest loop in the program - tens of millions
-                // of node visits per map - and reading these as locals copied a 12-byte node and a
-                // 20-byte plane on every one of them, to use four floats of the plane and three ints of
-                // the node. The arrays are never written during a trace.
-                ref readonly var node = ref nodes[num];
+                // of node visits per map - and the array is never written during a trace.
+                ref readonly var node = ref traceNodes[num];
 
-                if ((uint)node.PlaneNum >= (uint)planes.Length)
+                if (node.Plane.Axis == AxisMissing)
                     return false;
 
-                ref readonly var plane = ref planes[node.PlaneNum];
-
-                float d1 = plane.Normal.X * p1.X + plane.Normal.Y * p1.Y + plane.Normal.Z * p1.Z - plane.Distance;
-                float d2 = plane.Normal.X * p2.X + plane.Normal.Y * p2.Y + plane.Normal.Z * p2.Z - plane.Distance;
+                float d1 = PlaneDistance(in node.Plane, in p1);
+                float d2 = PlaneDistance(in node.Plane, in p2);
 
                 if (d1 >= 0 && d2 >= 0) { num = node.Child0; continue; }
                 if (d1 < 0 && d2 < 0) { num = node.Child1; continue; }
@@ -2078,8 +2288,7 @@ namespace Meshwright
                     p1.Z + frac * (p2.Z - p1.Z));
 
                 bool behind = d1 < 0;
-                if (Blocked(behind ? node.Child1 : node.Child0, p1, mid, mask, rayStart, rayEnd,
-                        ignoreContents))
+                if (Blocked(behind ? node.Child1 : node.Child0, p1, mid, in query))
                     return true;
 
                 num = behind ? node.Child0 : node.Child1;
@@ -2090,14 +2299,14 @@ namespace Meshwright
             if ((uint)leafIndex >= (uint)leafs.Length)
                 return false;
 
-            if ((leafs[leafIndex].Contents & mask) != 0)
+            if ((leafs[leafIndex].Contents & query.Mask) != 0)
                 return true;
 
-            return HitsLeafBrush(leafIndex, rayStart, rayEnd, mask, ignoreContents);
+            return HitsLeafBrush(leafIndex, in query);
         }
 
         /// <summary>
-        /// Whether the segment enters any brush listed in this leaf that matches the mask.
+        /// Whether the ray enters any brush listed in this leaf that matches the mask.
         ///
         /// Given the whole ray rather than this leaf's slice of it, for the reason spelled out on
         /// <see cref="TryHitLeafBrush"/>. Here the sub-segment version failed the opposite way round:
@@ -2105,9 +2314,11 @@ namespace Meshwright
         /// beginning exactly on a brush face - the common case, since faces and split planes coincide -
         /// reported every such leaf as blocked whether the ray touched the brush or not. That is the
         /// same grate reading as solid to a clearance test while being invisible to a floor trace.
+        ///
+        /// That the whole ray is what is clipped is also what makes <see cref="testedStamps"/> exact: a
+        /// brush met again in a later leaf would be asked exactly the same question.
         /// </summary>
-        private bool HitsLeafBrush(int leafIndex, BspFile.Vector3 p1, BspFile.Vector3 p2, int mask,
-            int ignoreContents)
+        private bool HitsLeafBrush(int leafIndex, in LineQuery query)
         {
             if ((uint)leafIndex >= (uint)leafBrushes.Length)
                 return false;
@@ -2116,18 +2327,30 @@ namespace Meshwright
             if (list is null)
                 return false;
 
+            var tested = query.Tested;
+
             foreach (int index in list)
             {
+                ref readonly var brush = ref brushes[index];
+
                 // The list carries every brush either trace purpose could care about; re-check the
                 // caller's own mask here so a grate blocks movement but still passes sight, and a
                 // window (also generation-mask-only) never blocks either.
-                if ((brushes[index].Contents & mask) == 0)
+                if ((brush.Contents & query.Mask) == 0)
                     continue;
 
-                if (ignoreContents != 0 && (brushes[index].Contents & ignoreContents) != 0)
+                if (query.IgnoreContents != 0 && (brush.Contents & query.IgnoreContents) != 0)
                     continue;
 
-                if (SegmentHitsBrush(brushes[index], p1, p2))
+                if (tested is not null)
+                {
+                    if (tested[index] == query.Ray)
+                        continue;
+
+                    tested[index] = query.Ray;
+                }
+
+                if (SegmentHitsBrush(in brush, in query.Start, in query.End))
                     return true;
             }
 
@@ -2138,8 +2361,11 @@ namespace Meshwright
         /// Clips a segment against a convex brush. Each side plane either rejects the segment outright,
         /// pushes the entry fraction forward, or pulls the exit fraction back; anything left over is
         /// inside the brush.
+        ///
+        /// Reads the brush, its sides and their planes in place. It used to copy each of them, a side
+        /// and a twenty-byte plane per face, to use five numbers out of them.
         /// </summary>
-        private bool SegmentHitsBrush(BspFile.Brush brush, BspFile.Vector3 p1, BspFile.Vector3 p2)
+        private bool SegmentHitsBrush(in BspFile.Brush brush, in BspFile.Vector3 p1, in BspFile.Vector3 p2)
         {
             const float Epsilon = 0.03125f;
 
@@ -2150,16 +2376,15 @@ namespace Meshwright
             for (int i = 0; i < brush.NumSides; i++)
             {
                 int sideIndex = brush.FirstSide + i;
-                if ((uint)sideIndex >= (uint)brushSides.Length)
+                if ((uint)sideIndex >= (uint)sidePlanes.Length)
                     return false;
 
-                var side = brushSides[sideIndex];
-                if ((uint)side.PlaneNum >= (uint)planes.Length)
+                ref readonly var plane = ref sidePlanes[sideIndex];
+                if (plane.Axis == AxisMissing)
                     return false;
 
-                var plane = planes[side.PlaneNum];
-                float d1 = plane.Normal.X * p1.X + plane.Normal.Y * p1.Y + plane.Normal.Z * p1.Z - plane.Distance;
-                float d2 = plane.Normal.X * p2.X + plane.Normal.Y * p2.Y + plane.Normal.Z * p2.Z - plane.Distance;
+                float d1 = PlaneDistance(in plane, in p1);
+                float d2 = PlaneDistance(in plane, in p2);
 
                 if (d1 > 0) startsOutside = true;
 
