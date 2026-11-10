@@ -188,32 +188,45 @@ namespace Meshwright
 
             while (frontier.Count > 0 && visited.Count < MaxVisited)
             {
-                var next = new System.Collections.Concurrent.ConcurrentBag<Cell>();
+                var reached = new System.Collections.Concurrent.ConcurrentBag<Cell>();
 
+                // Expansion only reads the visited set; nothing is claimed until the whole level is in.
+                // Claiming inside the parallel loop made the first thread to arrive the winner, and two
+                // floors of one column within the same eight units share a key: which of them became
+                // the cell - and so which height its node, its links and its area got - depended on
+                // thread timing. rp_downtown_tits_v25 came out 17,189 areas on one run and 17,191 on
+                // the next, from the same build at the same thread count.
                 Parallel.ForEach(frontier, NavConcurrency.Options, cell =>
                 {
                     Interlocked.Increment(ref visitedCount);
 
                     foreach (var neighbour in Neighbours(world, cell))
                     {
-                        if (!visited.TryAdd(Key(neighbour), 0))
-                            continue;
-
-                        next.Add(neighbour);
-
-                        // Cells already represented still propagate - the flood has to be able to cross
-                        // existing mesh to reach the far side of it - but they contribute no new area.
-                        var at = world.PositionOf(neighbour.Gx, neighbour.Gy, neighbour.Z);
-
-                        if (index.FindAt(at.X, at.Y, neighbour.Z, CoveredTolerance) < 0)
-                        {
-                            accepted.Add(neighbour);
-                            Interlocked.Increment(ref uncovered);
-                        }
+                        if (!visited.ContainsKey(Key(neighbour)))
+                            reached.Add(neighbour);
                     }
                 });
 
-                frontier = [.. next];
+                // Settled in a fixed order, so the same cell wins a shared key every run: the lowest
+                // floor, which is the order the result is sorted in further down.
+                var next = reached.ToList();
+                next.Sort(CompareCells);
+                next.RemoveAll(cell => !visited.TryAdd(Key(cell), 0));
+
+                // Cells already represented still propagate - the flood has to be able to cross existing
+                // mesh to reach the far side of it - but they contribute no new area.
+                Parallel.ForEach(next, NavConcurrency.Options, neighbour =>
+                {
+                    var at = world.PositionOf(neighbour.Gx, neighbour.Gy, neighbour.Z);
+
+                    if (index.FindAt(at.X, at.Y, neighbour.Z, CoveredTolerance) < 0)
+                    {
+                        accepted.Add(neighbour);
+                        Interlocked.Increment(ref uncovered);
+                    }
+                });
+
+                frontier = next;
 
                 // No denominator exists here - the flood finds out how much ground there is by walking
                 // it - so this reports what it has found rather than inventing a percentage.
@@ -229,14 +242,7 @@ namespace Meshwright
             // Sorted so the node grid, and therefore the mesh, is identical run to run: a ConcurrentBag
             // returns its contents in whatever order threads happened to add them.
             var ordered = accepted.ToList();
-            ordered.Sort((a, b) =>
-            {
-                int byX = a.Gx.CompareTo(b.Gx);
-                if (byX != 0) return byX;
-
-                int byY = a.Gy.CompareTo(b.Gy);
-                return byY != 0 ? byY : a.Z.CompareTo(b.Z);
-            });
+            ordered.Sort(CompareCells);
 
             // Accepted cells become nodes carrying the ground normal already sampled for them, and
             // areas are built from those - so corner heights come from real sampled points and an area
@@ -503,6 +509,16 @@ namespace Meshwright
         /// <summary>Height is quantised so two probes of the same surface hash to the same cell.</summary>
         private static (int, int, int) Key(Cell c) => (c.Gx, c.Gy, (int)MathF.Round(c.Z / 8f));
 
+        /// <summary>Column by column, lowest floor first: the one order cells are ever settled in.</summary>
+        private static int CompareCells(Cell a, Cell b)
+        {
+            int byX = a.Gx.CompareTo(b.Gx);
+            if (byX != 0) return byX;
+
+            int byY = a.Gy.CompareTo(b.Gy);
+            return byY != 0 ? byY : a.Z.CompareTo(b.Z);
+        }
+
         /// <summary>
         /// One expansion of the flood from one cell, for tests.
         ///
@@ -523,6 +539,19 @@ namespace Meshwright
                 found.Add((cell.Gx, cell.Gy, cell.Z));
 
             return found;
+        }
+
+        /// <summary>
+        /// How much room the sampler finds at one cell, for tests - the same seam as
+        /// <see cref="SampleNeighbours"/>, for the question of whether a player fits there at all.
+        /// Several heights are asked of one world, in order, so its cache sits between them as it
+        /// does in the flood.
+        /// </summary>
+        internal static Clearance[] SampleClearance(BspVisibility vis,
+            BspFile.Vector3 mins, BspFile.Vector3 maxs, int gx, int gy, params float[] heights)
+        {
+            var world = new World(vis, mins, maxs);
+            return [.. heights.Select(z => world.ClearanceAt(gx, gy, z))];
         }
 
         /// <summary>
@@ -783,6 +812,17 @@ namespace Meshwright
                     // sheet was never in the way. The floors are already known here; asking whether one
                     // of them sits in between needs no trace at all, and so costs nothing.
                     if (Shadowed(world, gx, gy, z, cell.Z))
+                        continue;
+
+                    // The same on the way up, in the column being left. A climb has to rise through the
+                    // space over the walker's own head, and a floor there - the top of whatever the
+                    // ceiling is made of - means there is no such space. The sweep below cannot see it:
+                    // it runs flat at the height of the higher surface, which on a climb out from under a
+                    // thin roof is already above the roof, in open air. Crouch-only ground is where this
+                    // bit: on rp_downtown_tits_v25 an attic floor 64 units under a tiled roof stepped
+                    // straight up onto the roof's eave, and the flood spread 99 areas over a roof nothing
+                    // can reach.
+                    if (Shadowed(world, cell.Gx, cell.Gy, cell.Z, z))
                         continue;
 
                     // And that a body can actually be dragged from here to there.
@@ -1134,7 +1174,13 @@ namespace Meshwright
             /// <inheritdoc cref="Clearance"/>
             public Clearance ClearanceAt(int gx, int gy, float z)
             {
-                var key = (gx, gy, (int)MathF.Round(z / 8f));
+                // Keyed on the exact height, not the eight-unit bucket the visited set uses. Two floors of
+                // one column in the same bucket can have different answers - a tread and the landing a
+                // few units under it, one with room to stand and one without - and a bucketed cache
+                // handed both whichever answer was computed first, which on a parallel flood depends on
+                // thread timing. The heights asked about are the column's own sampled floors, so the
+                // cache still serves every repeat.
+                var key = (gx, gy, BitConverter.SingleToInt32Bits(z));
 
                 if (clearance.TryGetValue(key, out var cached))
                     return cached;
@@ -1278,13 +1324,27 @@ namespace Meshwright
                 // the map that motivated it made the coverage loss the more visible problem in practice.
                 const int MaxMismatch = 2;
 
+                // Each probe starts under a crouching player's head, not a standing one's. The answer only
+                // counts for a sample with crouching room and no more - ClearanceAt settles standing
+                // ground on the normal alone - so the ceiling over it sits somewhere between 55 and 71
+                // units up, and a probe started at 71 began inside it. It then found the
+                // ceiling's own solid as the "floor", 60-odd units above the sample, on all four sides,
+                // and every crouch-only sample came back as broken ground: gm_construct made no crouch
+                // area at all against 13 in the engine's mesh. Started just under 55, the probes find
+                // the floor beside the sample as they were meant to. gm_construct then gets 7 crouch
+                // areas, every one of them at the two places the engine marks crouch, and covers 98.4%
+                // of the engine's reachable ground rather than 98.1%, with no more ground the engine
+                // does not have. rp_downtown_tits_v25 goes from 40 crouch areas to 193, under low
+                // ceilings, stairs and props.
+                const float ProbeTop = NavConstants.HumanCrouchHeight - 1f;
+
                 int missing = 0;
                 int mismatched = 0;
 
                 foreach (var (dx, dy) in Offsets(Reach))
                 {
-                    if (!StairMarker.TryFindFloor(vis, x + dx, y + dy, z + RequiredHeadroom,
-                            RequiredHeadroom + Tolerance * 2f, out float nz))
+                    if (!StairMarker.TryFindFloor(vis, x + dx, y + dy, z + ProbeTop,
+                            ProbeTop + Tolerance * 2f, out float nz))
                     {
                         missing++;
                         continue;
