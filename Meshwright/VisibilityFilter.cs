@@ -61,6 +61,19 @@ namespace Meshwright
         /// <summary>Eye-height sample points, <see cref="SightPointsPerArea"/> per area, laid out flat.</summary>
         private readonly BspFile.Vector3[] sight;
 
+        /// <summary>
+        /// Where each of <see cref="sight"/> lies in the tree, laid out the same way: the cluster of the
+        /// leaf holding it, <see cref="SightInSolid"/> when that leaf's own contents block sight, or -1
+        /// when the point resolves to no cluster at all. See <see cref="SightClusters"/>.
+        /// </summary>
+        private readonly short[] sightCluster;
+
+        /// <summary>
+        /// A sight point inside contents that block sight. Every line to or from it is blocked: the line
+        /// trace visits the leaf at each end of a segment, and stops at one whose contents match.
+        /// </summary>
+        public const short SightInSolid = short.MinValue;
+
         /// <summary>Four corners then the centre - the order the tracer relies on.</summary>
         public const int SightPointsPerArea = 5;
 
@@ -77,6 +90,14 @@ namespace Meshwright
         public ReadOnlySpan<BspFile.Vector3> SightPoints(int areaIndex)
             => sight.AsSpan(areaIndex * SightPointsPerArea, SightPointsPerArea);
 
+        /// <summary>
+        /// The leaf cluster of each of <see cref="SightPoints"/>, in the same order: what the tracer
+        /// asks the PVS about a single line before tracing it. <see cref="SightInSolid"/> for a point
+        /// in contents that block sight, -1 for one in no cluster.
+        /// </summary>
+        public ReadOnlySpan<short> SightClusters(int areaIndex)
+            => sightCluster.AsSpan(areaIndex * SightPointsPerArea, SightPointsPerArea);
+
         public VisibilityFilter(NavFile nav, BspVisibility visibility, float maxViewDistance = DefaultMaxViewDistance)
         {
             vis = visibility;
@@ -88,6 +109,7 @@ namespace Meshwright
             clusters = new short[count][];
             visibleFrom = new byte[count][];
             sight = new BspFile.Vector3[count * SightPointsPerArea];
+            sightCluster = new short[count * SightPointsPerArea];
 
             int unmapped = 0;
 
@@ -112,7 +134,9 @@ namespace Meshwright
                 for (int s = 0; s < SightPointsPerArea; s++)
                 {
                     var p = samples[s];
-                    sight[i * SightPointsPerArea + s] = new BspFile.Vector3(p.X, p.Y, p.Z + EyeHeight);
+                    var eye = new BspFile.Vector3(p.X, p.Y, p.Z + EyeHeight);
+                    sight[i * SightPointsPerArea + s] = eye;
+                    sightCluster[i * SightPointsPerArea + s] = ClusterOfSight(vis, eye);
                 }
 
                 if (clusters[i].Length == 0)
@@ -147,6 +171,47 @@ namespace Meshwright
                 new BspFile.Vector3(x0 + ix, y1 - iy, sw),
                 new BspFile.Vector3((x0 + x1) / 2f, (y0 + y1) / 2f, (nw + ne + se + sw) / 4f),
             ];
+        }
+
+        /// <summary>See <see cref="SightClusters"/>.</summary>
+        private static short ClusterOfSight(BspVisibility vis, BspFile.Vector3 eye)
+        {
+            if (!vis.TryGetLeaf(eye, out var leaf))
+                return -1;
+
+            return (leaf.Contents & BspVisibility.MaskBlockLos) != 0 ? SightInSolid : leaf.Cluster;
+        }
+
+        /// <summary>
+        /// Whether a line between two sight points, given their <see cref="SightClusters"/>, can be
+        /// clear at all - false only when it certainly is not, so a line this rules out need never be
+        /// traced, and the answer is the one the trace would have given.
+        ///
+        /// Two ways to know. A point in solid has every line from it blocked (<see cref="SightInSolid"/>).
+        /// And a clear line runs through open leaves from one end's to the other's, which is exactly
+        /// the path the PVS is built to account for: VVIS records a cluster as potentially visible from
+        /// another whenever any line through the portals between them could join the two, so a cluster
+        /// the PVS leaves out cannot hold the far end of a clear line. Anything unknown - a point in no
+        /// cluster, a map with no vis data - is a yes.
+        ///
+        /// This is a finer use of the same table <see cref="Run"/> culls pairs with. That asks whether
+        /// any of one area's clusters sees any of the other's, and it passes the pair if one does; the
+        /// tracer then casts up to 25 lines between the two, and many of them run between corners whose
+        /// own clusters do not see each other: 3-11% of the corner sweep's lines on the benchmark maps.
+        /// Every one of the 13 million lines the PVS ruled out on ctf_2fort, cp_badlands, gm_construct
+        /// and rp_downtown_tits_v25 was traced anyway to check, and none was clear; the meshes are
+        /// byte-identical on all twelve benchmark maps.
+        /// </summary>
+        public bool MaySee(short from, short to)
+        {
+            if (from == SightInSolid || to == SightInSolid)
+                return false;
+
+            if (from < 0 || to < 0)
+                return true;
+
+            var row = vis.VisibleFrom(from);
+            return row is null || (to >> 3) >= row.Length || (row[to >> 3] & (1 << (to & 7))) != 0;
         }
 
         /// <summary>Runs both stages across all cores, handing surviving pairs to the sink.</summary>

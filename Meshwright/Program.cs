@@ -1316,11 +1316,12 @@ namespace Meshwright
             // Split by stage, because the three are very different bets and only counting tells you
             // which is paying. The sweep is the one to watch: it runs sixteen traces on precisely the
             // pairs everything cheaper has already failed on.
-            Console.WriteLine($"        centre: {tracer.RaysCentre:N0} rays -> {tracer.LinksCentre:N0} links");
+            Console.WriteLine($"        centre: {tracer.RaysCentre:N0} rays -> {tracer.LinksCentre:N0} links " +
+                              $"({tracer.CulledCentre:N0} lines ruled out untraced)");
             Console.WriteLine($"        cross:  {tracer.RaysCross:N0} rays -> {tracer.LinksCross:N0} links " +
-                              $"({tracer.PairsToCross:N0} pairs reached it)");
+                              $"({tracer.PairsToCross:N0} pairs reached it, {tracer.CulledCross:N0} lines ruled out)");
             Console.WriteLine($"        sweep:  {tracer.RaysSweep:N0} rays -> {tracer.LinksSweep:N0} links " +
-                              $"({tracer.PairsToSweep:N0} pairs reached it)");
+                              $"({tracer.PairsToSweep:N0} pairs reached it, {tracer.CulledSweep:N0} lines ruled out)");
 
             foreach (var ids in visible)
                 Array.Sort(ids);

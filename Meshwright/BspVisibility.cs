@@ -696,6 +696,86 @@ namespace Meshwright
         }
 
         /// <summary>
+        /// The kinds of geometry a sight line can be stopped by, in the order <see cref="IsSightClear"/>
+        /// tests them when it has nothing better to go on.
+        /// </summary>
+        public enum SightBlocker : byte
+        {
+            World,
+            Displacements,
+            Props,
+            BrushEntities,
+        }
+
+        /// <summary>
+        /// <see cref="IsLineClear(BspFile.Vector3, BspFile.Vector3)"/>, asking first the kind of
+        /// geometry named by <paramref name="first"/>, and leaving in it the kind that stopped the line
+        /// when one did. The answer is the same whatever the order: a line is blocked when any of the
+        /// four stops it, each is asked about the whole line on its own, and none of them is asked
+        /// anything that depends on what another said.
+        ///
+        /// The order is all this changes, and it is worth changing for the visibility pass, which traces
+        /// up to 25 lines between the same two areas and then moves on to the area beside one of them:
+        /// what stopped one line usually stops the next. Over terrain that is a displacement. On
+        /// rp_downtown_tits_v25 the world tree let 60% of the corner sweep's lines through, and
+        /// displacements stopped 90% of those - each one only after a full walk of the world tree and a
+        /// test of every brush entity on its way. Carried from line to line, the last answer sends the
+        /// next line straight to the hill that is in the way.
+        ///
+        /// Past the world tree the order is displacements, props, brush entities - the reverse of
+        /// <see cref="IsLineClear(BspFile.Vector3, BspFile.Vector3, int, int)"/>'s, which suits short
+        /// clearance lines rather than long sight lines. Measured on the sweep's lines, displacements
+        /// stopped 121 million on rp_downtown_tits_v25, props 18 million and brush entities 47 thousand,
+        /// for roughly comparable costs each; on cp_badlands and gm_construct displacements stopped
+        /// nearly all of them.
+        /// </summary>
+        public bool IsSightClear(BspFile.Vector3 a, BspFile.Vector3 b, ref SightBlocker first)
+        {
+            if (nodes.Length == 0 || leafs.Length == 0)
+                return true;
+
+            var lead = first;
+
+            if (lead != SightBlocker.World && SightBlockedBy(lead, a, b))
+                return false;
+
+            if (Blocked(0, a, b, new LineQuery(a, b, MaskBlockLos, 0, TestedBrushes(out int ray), ray)))
+            {
+                first = SightBlocker.World;
+                return false;
+            }
+
+            for (var kind = SightBlocker.Displacements; kind <= SightBlocker.BrushEntities; kind++)
+            {
+                if (kind != lead && SightBlockedBy(kind, a, b))
+                {
+                    first = kind;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>One of <see cref="BlockedPastWorld"/>'s three tests, for <see cref="IsSightClear"/>.</summary>
+        internal bool SightBlockedBy(SightBlocker kind, BspFile.Vector3 a, BspFile.Vector3 b)
+        {
+            switch (kind)
+            {
+                case SightBlocker.BrushEntities:
+                    var models = ModelsFor(MaskBlockLos);
+                    return models is not null && models.BlockingModelCount > 0 &&
+                           BlockedByModels(models, a, b, MaskBlockLos, 0);
+                case SightBlocker.Displacements:
+                    return displacements is not null && displacements.Blocks(a, b, MaskBlockLos);
+                case SightBlocker.Props:
+                    return staticProps is not null && staticProps.Blocks(a, b, MaskBlockLos);
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
         /// The half of <see cref="IsLineClear(BspFile.Vector3, BspFile.Vector3, int, int)"/> after the
         /// world tree has let the segment through: brush entities, displacements, props. Split out so the
         /// floor walk's column test (<see cref="FirstOpenStep(ReadOnlySpan{float}, float, float, int)"/>),
@@ -1175,10 +1255,13 @@ namespace Meshwright
         /// The sweep is only testable against a real BSP tree, and the bug this exists to pin down
         /// lives in how the tree is descended rather than in how a brush is clipped, so a stub that
         /// skipped the tree would not have caught it.
+        ///
+        /// <paramref name="pvs"/> is one decompressed row per cluster, as the map's own would be read;
+        /// left out, the set has no vis data.
         /// </summary>
         internal static BspVisibility FromGeometry(BspFile.Plane[] planes, Node[] nodes, Leaf[] leafs,
             BspFile.Brush[] brushes, BspFile.BrushSide[] brushSides, int[]?[] leafBrushes,
-            BspFile.TexInfo[]? texInfos = null)
+            BspFile.TexInfo[]? texInfos = null, byte[][]? pvs = null)
         {
             var vis = new BspVisibility
             {
@@ -1189,6 +1272,8 @@ namespace Meshwright
                 brushSides = brushSides,
                 leafBrushes = leafBrushes,
                 texInfos = texInfos ?? [],
+                pvs = pvs,
+                ClusterCount = pvs?.Length ?? 0,
             };
 
             vis.BuildTraceTables();
