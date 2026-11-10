@@ -55,14 +55,39 @@ namespace Meshwright
         /// invisible pairs that dominate the cost entirely untouched. A fast *accept* cannot help a
         /// workload whose cost is failures; what this pass would need is a fast reject, and the PVS is
         /// already the only cheap one available.
+        ///
+        /// So the PVS is now asked about every line as well as every pair (<see
+        /// cref="VisibilityFilter.MaySee"/>), and the lines it rules out are not traced: 3% of the
+        /// sweep on the city, where the map's clusters are large, and 10-14% on cp_badlands and
+        /// ctf_2fort. What was left of the cost on the city was mostly not the world tree at all:
+        /// 60% of the sweep's lines got through it and were then stopped by displacement terrain,
+        /// so each line now asks first about whatever stopped the pair's last one (<see
+        /// cref="BspVisibility.IsSightClear"/>). Neither changes an answer, and together they took
+        /// the pass from about 275 to 184 seconds of CPU on rp_downtown_tits_v25 at 16,922 areas,
+        /// and 19.3 to 15.7 on cp_badlands.
+        ///
+        /// Tried and left out: walking the world tree once for a whole fan of lines from one corner,
+        /// answering each as its own walk would (exact, but its bookkeeping made it 0-35% slower than
+        /// the lines one at a time); and dropping the corner farthest from the other area from each
+        /// side of the sweep, nine lines instead of sixteen, which saved a further fifth of the pass on
+        /// the city but lost 0.7% of its links.
         /// </summary>
         private long raysCentre, raysCross, raysSweep;
+        private long culledCentre, culledCross, culledSweep;
         private long pairsToCross, pairsToSweep;
         private long linksCentre, linksCross, linksSweep;
 
         public long RaysCentre => raysCentre;
         public long RaysCross => raysCross;
         public long RaysSweep => raysSweep;
+
+        /// <summary>
+        /// Lines each stage did not trace because <see cref="VisibilityFilter.MaySee"/> already knew
+        /// the answer was no. Not counted in the stage's rays, which are the traces actually cast.
+        /// </summary>
+        public long CulledCentre => culledCentre;
+        public long CulledCross => culledCross;
+        public long CulledSweep => culledSweep;
         public long PairsToCross => pairsToCross;
         public long PairsToSweep => pairsToSweep;
         public long LinksCentre => linksCentre;
@@ -91,6 +116,7 @@ namespace Meshwright
         public void Candidates(int areaIndex, ReadOnlySpan<int> others)
         {
             var from = filter.SightPoints(areaIndex);
+            var fromCluster = filter.SightClusters(areaIndex);
             var seen = forward[areaIndex];
             var seenBy = backward[areaIndex];
 
@@ -101,7 +127,8 @@ namespace Meshwright
             foreach (int other in others)
             {
                 var to = filter.SightPoints(other);
-                Sees(from, to, out bool fromSeesTo, out bool toSeesFrom, ref rays, ref phase);
+                Sees(from, fromCluster, to, filter.SightClusters(other),
+                    out bool fromSeesTo, out bool toSeesFrom, ref rays, ref phase);
 
                 if (fromSeesTo) { seen.Add(other); links++; }
                 if (toSeesFrom) { seenBy.Add(other); links++; }
@@ -113,6 +140,9 @@ namespace Meshwright
             Interlocked.Add(ref raysCentre, phase.RaysCentre);
             Interlocked.Add(ref raysCross, phase.RaysCross);
             Interlocked.Add(ref raysSweep, phase.RaysSweep);
+            Interlocked.Add(ref culledCentre, phase.CulledCentre);
+            Interlocked.Add(ref culledCross, phase.CulledCross);
+            Interlocked.Add(ref culledSweep, phase.CulledSweep);
             Interlocked.Add(ref pairsToCross, phase.PairsToCross);
             Interlocked.Add(ref pairsToSweep, phase.PairsToSweep);
             Interlocked.Add(ref linksCentre, phase.LinksCentre);
@@ -156,24 +186,44 @@ namespace Meshwright
         private struct PhaseCounts
         {
             public long RaysCentre, RaysCross, RaysSweep;
+            public long CulledCentre, CulledCross, CulledSweep;
             public long PairsToCross, PairsToSweep;
             public long LinksCentre, LinksCross, LinksSweep;
         }
 
-        private void Sees(ReadOnlySpan<BspFile.Vector3> from, ReadOnlySpan<BspFile.Vector3> to,
+        private void Sees(ReadOnlySpan<BspFile.Vector3> from, ReadOnlySpan<short> fromCluster,
+            ReadOnlySpan<BspFile.Vector3> to, ReadOnlySpan<short> toCluster,
             out bool fromSeesTo, out bool toSeesFrom, ref long rays, ref PhaseCounts phase)
         {
             const int Corners = VisibilityFilter.SightPointsPerArea - 1;
 
-            rays++;
-            phase.RaysCentre++;
+            // What stopped the last line between these two areas, which is asked about the next one
+            // first (BspVisibility.IsSightClear). Started afresh for every pair: carried on from the
+            // last pair in the row, a displacement that stopped its corner lines was asked first about
+            // the next pair's lines too, most of which the world stops, and on gm_construct - where a
+            // displacement test costs a couple of world walks - that made the whole pass 19% slower
+            // rather than 4% faster.
+            var lead = BspVisibility.SightBlocker.World;
 
-            if (vis.IsLineClear(from[Corners], to[Corners]))
+            // Every line below is first put to VisibilityFilter.MaySee, which rules out the ones the
+            // PVS or a sight point in solid already says are blocked. That answer is the trace's own,
+            // so a line it rules out is simply not traced.
+            if (!filter.MaySee(fromCluster[Corners], toCluster[Corners]))
             {
-                fromSeesTo = true;
-                toSeesFrom = true;
-                phase.LinksCentre += 2;
-                return;
+                phase.CulledCentre++;
+            }
+            else
+            {
+                rays++;
+                phase.RaysCentre++;
+
+                if (vis.IsSightClear(from[Corners], to[Corners], ref lead))
+                {
+                    fromSeesTo = true;
+                    toSeesFrom = true;
+                    phase.LinksCentre += 2;
+                    return;
+                }
             }
 
             fromSeesTo = false;
@@ -182,10 +232,16 @@ namespace Meshwright
 
             for (int c = 0; c < Corners; c++)
             {
+                if (!filter.MaySee(fromCluster[Corners], toCluster[c]))
+                {
+                    phase.CulledCross++;
+                    continue;
+                }
+
                 rays++;
                 phase.RaysCross++;
 
-                if (vis.IsLineClear(from[Corners], to[c]))
+                if (vis.IsSightClear(from[Corners], to[c], ref lead))
                 {
                     fromSeesTo = true;
                     phase.LinksCross++;
@@ -195,10 +251,16 @@ namespace Meshwright
 
             for (int c = 0; c < Corners; c++)
             {
+                if (!filter.MaySee(toCluster[Corners], fromCluster[c]))
+                {
+                    phase.CulledCross++;
+                    continue;
+                }
+
                 rays++;
                 phase.RaysCross++;
 
-                if (vis.IsLineClear(to[Corners], from[c]))
+                if (vis.IsSightClear(to[Corners], from[c], ref lead))
                 {
                     toSeesFrom = true;
                     phase.LinksCross++;
@@ -226,10 +288,16 @@ namespace Meshwright
             {
                 for (int c = 0; c < Corners; c++)
                 {
+                    if (!filter.MaySee(fromCluster[s], toCluster[c]))
+                    {
+                        phase.CulledSweep++;
+                        continue;
+                    }
+
                     rays++;
                     phase.RaysSweep++;
 
-                    if (vis.IsLineClear(from[s], to[c]))
+                    if (vis.IsSightClear(from[s], to[c], ref lead))
                     {
                         // Counted as what the sweep actually added, not as two links: whichever
                         // direction an earlier stage had already established was not bought here.

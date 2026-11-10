@@ -492,7 +492,7 @@ namespace Meshwright.Tests
             _ => low + (float)rng.NextDouble() * (high - low),
         };
 
-        private sealed class World
+        internal sealed class World
         {
             public required BspVisibility Vis { get; init; }
             public required List<float> Heights { get; init; }
@@ -622,7 +622,7 @@ namespace Meshwright.Tests
         /// describing any consistent solid, only exercising the walk; terrain; props now and then; and
         /// brush entities now and then.
         /// </summary>
-        private static World RandomWorld(Random rng)
+        internal static World RandomWorld(Random rng)
         {
             var sites = Sites(rng);
             var (vertices, triangleContents, heights) = Triangles(rng, sites);
