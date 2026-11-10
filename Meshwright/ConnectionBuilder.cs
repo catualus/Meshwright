@@ -1229,6 +1229,10 @@ namespace Meshwright
         /// <paramref name="sweepBody"/> also drags a crouching body across, for a crossing tried off
         /// the shared span's middle with half the body hanging past its end (see
         /// <see cref="CrossesElsewhere"/>).
+        ///
+        /// Where the lines or that sweep refuse a crossing between floors within a step of each other,
+        /// a body stepping over a thin obstacle no higher than a step is tried before it is refused
+        /// (<see cref="StepsOver"/>).
         /// </summary>
         private static Refusal TestCrossing(BspVisibility vis, NavArea from, NavArea to,
             float fromX, float fromY, float fromZ, float toX, float toY, float toZ,
@@ -1268,13 +1272,16 @@ namespace Meshwright
                 sideY = dx / length * NavConstants.HalfHumanWidth;
             }
 
-            if (!LinesClear(vis, fromX, fromY, toX, toY, high, sideX, sideY, sideFloors: false) &&
-                !LinesClear(vis, fromX, fromY, toX, toY, high, sideX, sideY, sideFloors: true))
-            {
-                return Refusal.Crossing;
-            }
+            bool clear = LinesClear(vis, fromX, fromY, toX, toY, high, sideX, sideY, sideFloors: false) ||
+                         LinesClear(vis, fromX, fromY, toX, toY, high, sideX, sideY, sideFloors: true);
 
-            if (sweepBody && !BodyCrosses(vis, fromX, fromY, toX, toY, high))
+            if (clear && sweepBody)
+                clear = BodyCrosses(vis, fromX, fromY, toX, toY, high);
+
+            // Failing that, over a thin obstacle no higher than a step, which the lowest line runs into
+            // and a walker steps onto and off again (StepsOver). Its own test is a body swept across,
+            // so it stands in for the sweep above as well.
+            if (!clear && !StepsOver(vis, fromX, fromY, fromGround, toX, toY, toGround))
                 return Refusal.Crossing;
 
             // Both evaluated, not short-circuited: either end being buried is worth recording, and the
@@ -1545,6 +1552,120 @@ namespace Meshwright
                 BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
 
             return !startSolid && (!hit || fraction >= 1f);
+        }
+
+        /// <summary>
+        /// How deep, along the crossing, an obstacle <see cref="StepsOver"/> steps over may be: a body's
+        /// width. Anything deeper holds a whole body on its top, which makes it floor rather than something
+        /// in the way - the generator puts an area on it, and the builder links up onto it and down off it
+        /// by ordinary steps. A link straight over it would skip that area, or, where the generator left
+        /// it bare, claim a stride over ground nothing vouches for.
+        /// </summary>
+        private const float MaxStepOverDepth = NavConstants.HumanWidth;
+
+        /// <summary>
+        /// Whether a walker gets across by stepping over a thin obstacle between two floors - a bar, a
+        /// raised threshold, a pipe, a low rail - where the clearance lines are refused because the
+        /// lowest of them, eight units over the higher floor, runs into it.
+        ///
+        /// A player crosses anything up to <c>StepHeight</c> by stepping onto it and off again, and the
+        /// lines alone read a bar ten to eighteen units high as a wall: the floors either side were never
+        /// linked. Asked only once the lines have refused, so it only ever adds connections, and only
+        /// where all of this holds:
+        ///
+        /// - Both floors are real, not a surface found from inside something (a unit above each is
+        ///   open), and they are within a step of each other.
+        /// - What the body passes over tops out within a step of both floors: a plate the size of the
+        ///   body's footprint over the whole crossing, lowered from a step over the lower floor, starts in
+        ///   nothing and lands on it. Its top has to stand above the higher floor - otherwise there is no
+        ///   obstacle to step over, and the lines refused for some other reason.
+        /// - The obstacle is in the crossing and thin (<see cref="MaxStepOverDepth"/>): a plate the body's
+        ///   width, swept along the crossing from each end halfway up the obstacle, finds its near and far
+        ///   faces no further apart than that.
+        /// - A crouching body raised onto the obstacle's top - a unit clear of it, with a crouching body's
+        ///   headroom above it - is swept across clear, start-solid aware as everywhere else, so a ceiling
+        ///   too low over the bar, a post beside it or a prop it would start inside still refuse it.
+        ///
+        /// Both floors within a step of the top, not only the one being left, so the link is one a walker
+        /// makes both ways: a wall twelve units above a pavement and thirty above the road beside it is a
+        /// drop one way and a jump the other, which is the drop and climb tests' business, not this one's.
+        ///
+        /// On the twelve benchmark maps it links five sites on each RP map - a 13.5 unit rail on a prop
+        /// floor, a garden wall 14 to 18 units over the terrain either side, a prop's foot grazing the
+        /// body's side - one on ctf_2fort and four on pl_upward, and a hull checker flags none of the links.
+        /// Where Valve's TF2 meshes or the engine's gm_construct mesh have ground at both ends of a pair the
+        /// builder refused and a step move crosses, they join all nine, two directly and the rest through an
+        /// area spanning the obstacle or standing on it.
+        /// </summary>
+        internal static bool StepsOver(BspVisibility vis, float fromX, float fromY, float fromGround,
+            float toX, float toY, float toGround)
+        {
+            const float Half = NavConstants.HalfHumanWidth;
+            const int Mask = BspVisibility.GenerationMask;
+
+            float low = MathF.Min(fromGround, toGround), high = MathF.Max(fromGround, toGround);
+            if (high - low > NavConstants.StepHeight)
+                return false;
+
+            float dx = toX - fromX, dy = toY - fromY;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+            if (length <= 0.01f)
+                return false;
+
+            // A floor found from inside a brush is reported where the search started, and one found from
+            // inside a prop is the prop's underside (GroundAt): either has solid just above it.
+            if (vis.IsPointSolid(fromX, fromY, fromGround + 1f, Mask) || vis.IsPointSolid(toX, toY, toGround + 1f, Mask))
+                return false;
+
+            // Nothing taller than a step over the lower floor may stand in the way. A line through the middle
+            // at that height asks first, as it is cheap and turns away every wall, which is most refusals.
+            float ceiling = low + NavConstants.StepHeight;
+            if (!vis.IsLineClear(new BspFile.Vector3(fromX, fromY, ceiling), new BspFile.Vector3(toX, toY, ceiling), Mask))
+                return false;
+
+            // The top of what the body passes over: a plate covering its footprint along the whole crossing,
+            // lowered from there.
+            float midX = (fromX + toX) / 2f, midY = (fromY + toY) / 2f;
+            float halfX = MathF.Abs(dx) / 2f + Half, halfY = MathF.Abs(dy) / 2f + Half;
+            float drop = ceiling - (low - 1f);
+
+            bool landed = vis.TryTraceHull(
+                new BspFile.Vector3(midX, midY, ceiling), new BspFile.Vector3(midX, midY, low - 1f),
+                new BspFile.Vector3(-halfX, -halfY, 0f), new BspFile.Vector3(halfX, halfY, 0f),
+                Mask, out float fraction, out _, out bool startSolid);
+
+            if (startSolid || !landed)
+                return false;
+
+            float top = ceiling - fraction * drop;
+            if (top <= high + 1f)
+                return false;
+
+            // Its depth along the crossing, halfway up it: a plate the body's width, edge on to the crossing,
+            // swept from each end until it meets a face.
+            float across = Half - 0.5f;
+            var plateMin = new BspFile.Vector3(-MathF.Abs(dy) / length * across, -MathF.Abs(dx) / length * across, 0f);
+            var plateMax = new BspFile.Vector3(-plateMin.X, -plateMin.Y, 0f);
+            float waist = (high + top) / 2f;
+            var near = new BspFile.Vector3(fromX, fromY, waist);
+            var far = new BspFile.Vector3(toX, toY, waist);
+
+            if (!vis.TryTraceHull(near, far, plateMin, plateMax, Mask, out float toFace, out _, out bool nearSolid) || nearSolid ||
+                !vis.TryTraceHull(far, near, plateMin, plateMax, Mask, out float backFace, out _, out bool farSolid) || farSolid)
+            {
+                return false;
+            }
+
+            if (length * (1f - toFace - backFace) > MaxStepOverDepth)
+                return false;
+
+            // A crouching body raised onto the top, a unit clear of it, crosses.
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(fromX, fromY, top + 1f), new BspFile.Vector3(toX, toY, top + 1f),
+                new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, NavConstants.HumanCrouchHeight - 1f),
+                Mask, out float bodyFraction, out _, out bool bodySolid);
+
+            return !bodySolid && (!hit || bodyFraction >= 1f);
         }
 
         /// <summary>
