@@ -331,6 +331,40 @@ namespace Meshwright
             }
         }
 
+        /// <summary>
+        /// Which part of a segment a triangle has to cross to count as hit, as a fraction of the
+        /// segment: more than this along it, and no more than this past its end. A segment owns the
+        /// half-open stretch <c>(SegmentEpsilon, 1 + SegmentEpsilon]</c>.
+        ///
+        /// The near end is left out so that a trace starting on a surface - a headroom line from a floor
+        /// point, a probe from a hit point just found - does not stop on the surface it starts from.
+        /// The far end is **in**, and that is the half that matters. Both ends used to be left out, so
+        /// a surface lying exactly where one segment ends and the next begins was inside neither, and
+        /// anything that walks a line in pieces read straight through it.
+        /// <see cref="StairMarker.TryFindFloor"/> is that walk: it steps down a column four units at a
+        /// time, terrain heights and the heights it starts from are both short binary fractions, so
+        /// terrain landing exactly on a boundary is common rather than a coincidence - an area surface
+        /// a whole two units under terrain is enough - and down a straight run of terrain it stays on
+        /// the boundary at every step. The column then read as having no floor at all: cp_badlands area
+        /// 210, on terrain two units above its own surface, was reported 82 units afloat.
+        ///
+        /// Shifting the whole stretch by the same epsilon at both ends is what makes consecutive
+        /// segments share each hit exactly once rather than at least once: a surface a distance
+        /// <c>s</c> past the shared point lands at <c>1 + s</c> on the first and at <c>s</c> on the
+        /// second, so it is the first's when <c>s</c> is within the epsilon and the second's otherwise.
+        /// That holds in exact arithmetic and on flat terrain. On a steep triangle far from the origin
+        /// the hit's position along a segment carries a rounding error of a few millionths, more than
+        /// the epsilon, so a walk that has to see every surface cannot rest on it alone;
+        /// <see cref="StairMarker.TryFindFloor"/> also overlaps its segments.
+        /// Brushes need none of this - they are solids, and a segment starting on a brush face already
+        /// starts inside it - and neither does <see cref="TryTraceHull"/>, which counts a box touching a
+        /// triangle at the start of a sweep as starting solid.
+        /// </summary>
+        private const float SegmentEpsilon = 1e-6f;
+
+        /// <summary>The far end of the stretch a segment owns; see <see cref="SegmentEpsilon"/>.</summary>
+        private const float SegmentEnd = 1f + SegmentEpsilon;
+
 
         /// <summary>
         /// Whether the segment crosses any displacement surface matching <paramref name="mask"/>.
@@ -382,6 +416,9 @@ namespace Meshwright
         /// A displacement has no single plane to read a normal off - it is a triangulated grid - so the
         /// normal is the face normal of whichever triangle was hit first. That is the true surface
         /// orientation, which is what the walkability and stair tests need.
+        ///
+        /// A hit counts up to a hair past <paramref name="b"/> (see <see cref="SegmentEpsilon"/>), and
+        /// is reported at <paramref name="b"/> itself, so <paramref name="fraction"/> never exceeds one.
         /// </summary>
         public bool TryTraceSurface(BspFile.Vector3 a, BspFile.Vector3 b, int mask,
             out float fraction, out BspFile.Vector3 normal)
@@ -416,8 +453,10 @@ namespace Meshwright
                     continue;
                 }
 
+                // Nothing found yet bounds nothing: the hit test itself keeps to the segment's own
+                // stretch, which runs past one.
                 int nearest = NearestInLeaf(a, b, mask, node.First, node.Count,
-                    found ? fraction : 1f, out float hit);
+                    found ? fraction : float.PositiveInfinity, out float hit);
 
                 if (nearest >= 0)
                 {
@@ -427,6 +466,11 @@ namespace Meshwright
                     found = true;
                 }
             }
+
+            // Clamped only once the nearest has been chosen, so two hits in the last epsilon still
+            // compete on where they really are.
+            if (found && fraction > 1f)
+                fraction = 1f;
 
             return found;
         }
@@ -504,6 +548,8 @@ namespace Meshwright
             var az = Vector256.Create(a.Z);
 
             var epsilon = Vector256.Create(Epsilon);
+            var nearEnd = Vector256.Create(SegmentEpsilon);
+            var farEnd = Vector256.Create(SegmentEnd);
             var zero = Vector256<float>.Zero;
             var one = Vector256<float>.One;
             var maskLanes = Vector256.Create(mask);
@@ -575,9 +621,10 @@ namespace Meshwright
 
                 var at = (v2x * qx + v2y * qy + v2z * qz) * inverse;
 
-                // The same bounds the scalar version applies: strictly inside the segment.
-                live2 &= Vector256.GreaterThan(at, epsilon).AsSingle();
-                live2 &= Vector256.LessThan(at, one).AsSingle();
+                // The same bounds the scalar version applies: the segment's own half-open stretch,
+                // see SegmentEpsilon.
+                live2 &= Vector256.GreaterThan(at, nearEnd).AsSingle();
+                live2 &= Vector256.LessThanOrEqual(at, farEnd).AsSingle();
 
                 var scored = Vector256.ConditionalSelect(live2, at, miss);
 
@@ -880,7 +927,10 @@ namespace Meshwright
             BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2)
             => TryHitTriangle(a, b, v0, v1, v2, out _);
 
-        /// <summary>Moller-Trumbore, bounded to the segment rather than an infinite ray.</summary>
+        /// <summary>
+        /// Moller-Trumbore, bounded to the segment rather than an infinite ray - to the half-open
+        /// stretch of it described on <see cref="SegmentEpsilon"/>, so a hit on the end point counts.
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool TryHitTriangle(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 v0, BspFile.Vector3 v1, BspFile.Vector3 v2, out float fraction)
@@ -915,18 +965,23 @@ namespace Meshwright
             if (v < 0f || u + v > 1f) return false;
 
             float t = (e2x * qx + e2y * qy + e2z * qz) * inverse;
-            if (t is <= Epsilon or >= 1f)
+            if (t is <= SegmentEpsilon or > SegmentEnd)
                 return false;
 
             fraction = t;
             return true;
         }
 
+        /// <summary>
+        /// Whether the segment passes through a node's box. Runs out to the same far end the triangle
+        /// test does, or a flat node lying on the end point could be culled by a rounding error before
+        /// its triangles were asked.
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool SegmentHitsBox(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs)
         {
-            float tMin = 0f, tMax = 1f;
+            float tMin = 0f, tMax = SegmentEnd;
 
             return Slab(a.X, b.X - a.X, mins.X, maxs.X, ref tMin, ref tMax)
                 && Slab(a.Y, b.Y - a.Y, mins.Y, maxs.Y, ref tMin, ref tMax)

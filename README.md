@@ -278,14 +278,14 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,631 | 19,577 | 17,315 |
-| Connections | 11,446 | 14,140 | 91,538 | 81,357 |
+| Areas | 2,271 | 2,631 | 19,577 | 17,314 |
+| Connections | 11,446 | 14,140 | 91,538 | 81,351 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
-| Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **48 (0.3%)** |
-| Areas over open air | 3 | **0** | 215 (1.1%) | **1** |
+| Areas floating above the floor | 1 | **0** | 2,714 (13.9%) | **4 (0.0%)** |
+| Areas over open air | 3 | **0** | 215 (1.1%) | **0** |
 
-On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,713 areas
+On gm_construct the two are level. On the large map they are not: the shipped mesh leaves 2,714 areas
 above the floor and 215 over nothing.
 
 ### What it covers
@@ -430,8 +430,8 @@ reference covering it there, 859 passes removed a strip that was mostly such flo
 lines decided 700 of them. Another 71 were terrain the floor search missed: it walks down in four-unit
 segments and a displacement counts only strictly inside one, so terrain lying on a boundary read as no
 floor at all, and on cp_badlands that took an area back 70 units over a slope Valve's mesh covers, a
-step a pass. Those lines now wait until the clip has stopped without them, and the search is tried
-again half a segment higher. Edges of kept areas pulled back 16 units or more over such floor fall
+step a pass. Those lines now wait until the clip has stopped without them, and the search no longer
+misses such terrain (see below). Edges of kept areas pulled back 16 units or more over such floor fall
 from 1,211 to 303 across the twelve maps, and from 106 to 17 on the ten with a reference. Coverage rises
 by 0.4 to 0.7 points on five maps, pl_upward's routes from 99.1% to 99.7%, and the old links on reshaped
 areas that the builder's test now refuses fall from 10,491 to 9,187, the ones removed from 505 to 497.
@@ -448,6 +448,20 @@ Floating areas on the TF2 maps fall from 32 to 7 (26 before the clip fix), and o
 from 48 and 49 to 4 each. Routes and coverage do not move. The one island added is a koth_viaduct area
 no body fits in, joined before only through the two hanging patches. What still floats sits over cracks
 a few units wide, which a body walks across.
+
+Terrain on a segment boundary was missed everywhere the floor search runs, not only in the clip, which
+had the only workaround. A displacement or prop triangle counted as hit only strictly inside a segment,
+so terrain exactly where one four-unit segment ended and the next began was inside neither, and the
+column read as having no floor. A segment now owns its far end, and the search's segments overlap by a
+thirty-second of a unit, because on steep terrain far from the origin a hit on a boundary is only placed
+to a few millionths of a segment and can still fall just outside both: a sample on rp_downtown_tits read
+as over open air that way. The clip's workaround is gone. The meshes barely move: no area or island is
+added or lost on any of the twelve maps, four come out byte-identical, the rest gain or lose at most two
+links net, and routes and coverage do not change. What changes is `meshwright fit`, whose floor search
+this is: it no longer reports terrain under an area as missing, and its counts fall to those of a check
+that tries every column from four heights. Floating areas on the TF2 maps go from 29 to 6 - 13 to 3 on
+cp_badlands, 12 to 1 on pl_upward - and the one area over open air on each of pl_upward and
+rp_downtown_tits goes.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
