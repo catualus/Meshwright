@@ -1984,6 +1984,14 @@ namespace Meshwright
                                           ? $", discarded {trimmed.Discarded:N0} left too narrow to walk"
                                           : ""));
                 }
+
+                // As NavPipeline does: the pairs the clip reshaped, tested again on their new shapes.
+                if (!args.Contains("-noconnect", StringComparer.OrdinalIgnoreCase))
+                {
+                    var relinked = ConnectionBuilder.Relink(nav, vis, trimmed.Reshaped);
+                    if (relinked.Total > 0)
+                        Console.WriteLine($"      relinked {relinked.Total:N0} connections across clipped edges");
+                }
             }
 
             NavIntegrity.PruneAndReport(nav);

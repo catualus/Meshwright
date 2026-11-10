@@ -279,7 +279,7 @@ down from 25 points on every area and reports the gap.
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
 | Areas | 2,271 | 2,640 | 19,577 | 17,323 |
-| Connections | 11,446 | 14,182 | 91,538 | 81,461 |
+| Connections | 11,446 | 14,185 | 91,538 | 81,471 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **49 (0.3%)** |
@@ -403,6 +403,15 @@ crate. Those are refused now. A sample lying exactly on a wall face, which the s
 as inside, still steps away from the wall: across the twelve maps that was 235 of the 287 start-solid
 steps in the flood. Seven of the twelve meshes come out byte-identical; on the other five a few links
 and one or two areas go, a handful of areas lose their last link, and routes and coverage do not move.
+
+Connections are made before areas are clipped back out of walls, so a pair the clip reshaped kept the
+answer it got on its old shapes. The pairs it reshaped are now tested again straight after it, adding
+links and never removing any, with a body swept through the middle of a span narrower than one: a strip
+pulled back to a wall can otherwise pass on clearance lines that graze the wall face. Of the adjacent
+pairs the builder would link in the finished meshes, 28,941 of 29,684 are shortcuts the fixup removes on
+purpose; the pass adds 105 links across the twelve maps, 82 after the fixup, flagged by a hull checker
+about as often as the build's own. Routes and coverage do not move, and the pass takes under a second.
+Links the build made that fail its own test on the new shapes, 8,871 of them, are left in place.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that

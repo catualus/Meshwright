@@ -24,7 +24,9 @@ namespace Meshwright
     /// <list type="bullet">
     /// <item>Areas before ladders and connections - both attach to areas that must already exist.</item>
     /// <item>Connections before clipping. Clipping moves an edge off a wall, away from whatever used
-    /// to abut it, and the connection pass has only the edges to go on.</item>
+    /// to abut it, and the connection pass has only the edges to go on. Then, straight after the clip,
+    /// the pairs it reshaped are tested again on their new shapes, adding links and never removing
+    /// them.</item>
     /// <item>Stitching immediately after connecting, because the stitch needs to know what each jump
     /// area joined, which only the connection pass knows.</item>
     /// <item>Everything that reads an area's final shape - stairs, lifts, corners - after clipping.</item>
@@ -148,6 +150,10 @@ namespace Meshwright
             public AreaClipper.Result? Clipped;
             public LadderBuilder.Result? Ladders;
             public ConnectionBuilder.Result? Connections;
+
+            /// <summary>What <see cref="ConnectionBuilder.Relink"/> added after the clip.</summary>
+            public ConnectionBuilder.Result? Relinked;
+
             public JumpAreaStitcher.Result? Stitched;
             public StairMarker.Result? Stairs;
             public ElevatorConnector.Result? Elevators;
@@ -413,6 +419,23 @@ namespace Meshwright
                         (trimmed.Discarded > 0
                             ? $", discarded {trimmed.Discarded:N0} left too narrow to walk"
                             : ""));
+                }
+
+                // Straight after the clip, and only for what it moved. The pairs it reshaped were tested
+                // on their old shapes; this tests them again on the new ones, adding links and never
+                // removing them. Before the corner patcher and the shortcut fixup, so both see these like
+                // any other connection - the fixup in particular stays free to prune them as redundant.
+                if (options.Movement)
+                {
+                    var relinked = ConnectionBuilder.Relink(nav, vis, trimmed.Reshaped);
+                    result.Relinked = relinked;
+
+                    if (relinked.Total > 0)
+                    {
+                        log($"Relinked: {relinked.Total:N0} connections across clipped edges " +
+                            $"({relinked.Steps:N0} steps, {relinked.JumpsUp + relinked.CrouchJumpsUp:N0} jumps up, " +
+                            $"{relinked.Drops:N0} drops)");
+                    }
                 }
             }
 

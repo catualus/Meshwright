@@ -84,6 +84,12 @@ namespace Meshwright
             public int Clipped;
             public float Reclaimed;
             public int Discarded;
+
+            /// <summary>
+            /// The ids of the areas this pass moved an edge of and kept. Their connections were tested on
+            /// the shapes they had before, so these are what <see cref="ConnectionBuilder.Relink"/> re-tests.
+            /// </summary>
+            public readonly HashSet<uint> Reshaped = [];
         }
 
         /// <param name="firstGeneratedId">
@@ -158,12 +164,18 @@ namespace Meshwright
                 {
                     clipped++;
                     reclaimed += shrunk;
+                    result.Reshaped.Add(area.Id);
                 }
             });
 
             result.Clipped = clipped;
             result.Reclaimed = (float)reclaimed;
             result.Discarded = DiscardSlivers(nav, vis, firstGeneratedId);
+
+            // A discarded area has nothing left to relink.
+            if (result.Discarded > 0)
+                result.Reshaped.IntersectWith(nav.Areas.Select(a => a.Id));
+
             return result;
         }
 
