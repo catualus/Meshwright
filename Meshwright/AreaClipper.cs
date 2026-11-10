@@ -265,7 +265,8 @@ namespace Meshwright
         /// buried slivers this pass exists to remove and took the footprint inside solid from 0.25% to
         /// 0.72%. Without the floor test it kept slivers left hanging off a ledge by the clip, which
         /// cost nothing on the solid measure and took mean height error from 0.6 to 1.5 with a worst
-        /// case of 426 units.
+        /// case of 426 units. A point over a crack has floor under it, as it does to the clip
+        /// (<see cref="OverCrack"/>).
         /// </summary>
         private static bool Standable(BspVisibility vis, NavArea area)
         {
@@ -283,7 +284,8 @@ namespace Meshwright
                         return false;
 
                     if (!StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
-                            NavConstants.StepHeight * 2f, out _))
+                            NavConstants.StepHeight * 2f, out _)
+                        && !OverCrack(vis, area, x, y, NavConstants.StepHeight))
                     {
                         return false;
                     }
@@ -464,13 +466,12 @@ namespace Meshwright
         /// Refusing to spare anything with floor missing at one of those points stranded 42 areas on
         /// rp_downtown_tits that a spawn reached before; trimming strands none.
         ///
-        /// A line with no floor anywhere between the edge and the middle is left out rather than allowed
-        /// to decide. That is a gap running across the area - a crack between two brushes, a few units
-        /// wide - and pulling the edge back cannot get past it. The clip narrowed several strips to
-        /// slivers for exactly that reason, since the crack lies under one of its probe lines; a body
-        /// walks across it, and refusing those strips stranded areas on cp_granary and cp_badlands. They
-        /// are kept as they were, and <c>meshwright fit</c> still counts the four of them on the TF2
-        /// maps, because one of its samples lands in the crack.
+        /// A crack - a gap between two brushes a few units wide - is floor here as it is to the clip
+        /// (<see cref="OverCrack"/>), so a line running along one finds floor at the edge and costs the
+        /// area nothing. That used to be the commonest way a strip became a sliver at all: the clip read
+        /// the crack under one of its probe lines as a ledge and pulled the edge back to it. A line with
+        /// no floor anywhere between the edge and the middle is still left out rather than allowed to
+        /// decide, since pulling the edge back cannot get past whatever gap that is.
         /// </summary>
         private static bool TrimToFloor(BspVisibility vis, NavArea area)
         {
@@ -814,6 +815,12 @@ namespace Meshwright
         /// footprint hanging above the real floor against 2 (0.1%) of the engine's own mesh, and the
         /// worst cluster was a whole building's roof edges overhanging by up to 384 units - the height
         /// of the building.
+        ///
+        /// A crack is not a ledge (<see cref="OverCrack"/>). Five lines and four points each are few
+        /// enough that a crack between two brushes, a few units wide, lands under one of them often:
+        /// running along the line it took the line's whole reach, and across it the reach beyond. Read
+        /// as a ledge, that pulled the edge back to the crack - eight-unit slivers left of strips a body
+        /// walks straight across, on cp_badlands, cp_granary and pl_upward among others.
         /// </summary>
         private static float FloorReach(BspVisibility vis, NavArea area,
             float x0, float y0, float x1, float y1, float length)
@@ -833,7 +840,10 @@ namespace Meshwright
             return length;
         }
 
-        /// <summary>Whether there is floor within a step of the area's own surface at a point.</summary>
+        /// <summary>
+        /// Whether there is floor within a step of the area's own surface at a point, or the point is
+        /// over a crack in it (<see cref="OverCrack"/>).
+        /// </summary>
         private static bool FloorUnder(BspVisibility vis, NavArea area, float x, float y)
         {
             // The area's own interpolated surface is the claim being checked, so it is also the right
@@ -841,9 +851,155 @@ namespace Meshwright
             // the ramp descending, only for the ground disappearing from under it.
             float claimed = NavGeometry.SurfaceZ(area, x, y);
 
-            return StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
-                       NavConstants.StepHeight * 3f, out float actual)
-                && MathF.Abs(actual - claimed) <= NavConstants.StepHeight;
+            if (StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
+                    NavConstants.StepHeight * 3f, out float actual)
+                && MathF.Abs(actual - claimed) <= NavConstants.StepHeight)
+            {
+                return true;
+            }
+
+            return OverCrack(vis, area, x, y, NavConstants.StepHeight);
+        }
+
+        /// <summary>
+        /// Widest gap in the floor that still counts as floor: half a body's width.
+        ///
+        /// A body cannot fall into a gap narrower than itself - its box rests on both sides - so
+        /// anything under a full width is somewhere a walker crosses without noticing. Half that
+        /// leaves a margin: a body centred over a gap this wide still has at least a quarter of its
+        /// width on floor each side, the 32-unit hull and the 48-unit TF2 one alike. The
+        /// cracks this is for are far narrower: between two brushes, or between terrain and a brush,
+        /// cp_badlands has them six to eight units wide, pl_upward one or two across a ramp, and
+        /// cp_dustbowl a seam under a unit. Each one under a probe line used to read as a ledge.
+        /// </summary>
+        internal const float CrackWidth = NavConstants.HalfHumanWidth;
+
+        /// <summary>
+        /// How far apart the points looking for floor beyond a crack are. The edge of the floor they find
+        /// is then placed to an eighth of a unit, so a gap is measured the same wherever in it the point
+        /// asking happens to be.
+        /// </summary>
+        private const float CrackStep = 2f;
+
+        /// <summary>
+        /// Whether a point with no floor under it is over a crack rather than off a ledge: whether floor
+        /// within <paramref name="tolerance"/> below the area's surface (and no more than a step above
+        /// it) resumes on both sides of the point, along either axis, with the gap between the two no
+        /// wider than <see cref="CrackWidth"/>.
+        ///
+        /// Both sides is what separates the two. Past a ledge there is floor behind the point and none
+        /// in front, and along the ledge none either way, so it is still a ledge however close the floor
+        /// behind is; a notch in a corner, or a ledge running diagonally across an area, is the same.
+        /// Floor resuming further away than <see cref="CrackWidth"/> is taken for the far side of a
+        /// drop, and floor more than <paramref name="tolerance"/> below the area's surface is a
+        /// different floor, so neither counts.
+        ///
+        /// Either axis because a crack can run either way under the line being probed. Across it, the
+        /// line itself has floor on both sides of the gap; along it, every point of the line is in the
+        /// gap, and the floor is to either side of the line. A crack running diagonally is a little
+        /// wider along each axis than across, by up to a factor of 1.4.
+        ///
+        /// The far side has to be floor that carries on, at least <see cref="CrackStep"/> of it. A rail
+        /// a unit wide laid along a trench is not the edge of the trench, and taken for one it made a
+        /// recess on cp_dustbowl 22 units deep and 34 across read as two cracks, each between a rail and
+        /// the trench's side. And the gap is measured, not only bounded: with the floor found on a
+        /// two-unit grid alone, the same 15-unit trench on rp_downtown_tits read as a crack from a point
+        /// near one side and as a ledge from the middle, so the clip kept an area over it that
+        /// <c>meshwright fit</c>, asking from the middle, called floating.
+        ///
+        /// A point inside something is not floor, and the search stops there, so a slot between a floor
+        /// and a wall is not a crack: the wall is not somewhere a body stands, and floor beyond it is
+        /// not reached across the gap. The floor search from inside a brush finds the brush, which
+        /// would otherwise pass.
+        ///
+        /// Only asked where the floor search has already failed, so it costs nothing on the floor most
+        /// areas stand on. <c>meshwright fit</c> asks it of a sample it would otherwise call floating
+        /// or over open air, with its own tolerance.
+        /// </summary>
+        internal static bool OverCrack(BspVisibility vis, NavArea area, float x, float y, float tolerance)
+        {
+            for (int axis = 0; axis < 2; axis++)
+            {
+                float dx = axis == 0 ? 1f : 0f, dy = 1f - dx;
+
+                float behind = FloorResumes(vis, area, x, y, -dx, -dy, CrackWidth, tolerance);
+                if (behind < 0f)
+                    continue;
+
+                if (FloorResumes(vis, area, x, y, dx, dy, CrackWidth - behind, tolerance) >= 0f)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private enum Ground { Floor, Gap, Blocked }
+
+        /// <summary>
+        /// What is at a point for <see cref="OverCrack"/>: floor within the window round the area's
+        /// surface, something taller than a step, or neither.
+        /// </summary>
+        private static Ground GroundAt(BspVisibility vis, NavArea area, float x, float y, float tolerance)
+        {
+            float claimed = NavGeometry.SurfaceZ(area, x, y);
+            float top = claimed + NavConstants.StepHeight;
+
+            if (vis.IsPointSolid(x, y, top, BspVisibility.GenerationMask))
+                return Ground.Blocked;
+
+            return StairMarker.TryFindFloor(vis, x, y, top, NavConstants.StepHeight + tolerance, out float actual)
+                   && actual >= claimed - tolerance
+                ? Ground.Floor
+                : Ground.Gap;
+        }
+
+        /// <summary>
+        /// How far from a point in one direction the floor resumes - the near edge of floor that carries
+        /// on for at least <see cref="CrackStep"/> - when that is no further than
+        /// <paramref name="limit"/>; otherwise -1. Something taller than a step in the way ends the
+        /// search: nothing past it is reached across the gap.
+        /// </summary>
+        private static float FloorResumes(BspVisibility vis, NavArea area, float x, float y, float dx, float dy,
+            float limit, float tolerance)
+        {
+            const int Refinements = 4;
+
+            Ground At(float d) => GroundAt(vis, area, x + dx * d, y + dy * d, tolerance);
+
+            // One step past the limit: an edge just inside it is only found by the sample after it.
+            for (float d = CrackStep; d <= limit + CrackStep; d += CrackStep)
+            {
+                var ground = At(d);
+
+                if (ground == Ground.Blocked)
+                    return -1f;
+
+                if (ground == Ground.Gap)
+                    continue;
+
+                // The edge is somewhere in the last step: placed to an eighth of a unit.
+                float open = d - CrackStep, floor = d;
+
+                for (int i = 0; i < Refinements; i++)
+                {
+                    float mid = (open + floor) / 2f;
+
+                    if (At(mid) == Ground.Floor)
+                        floor = mid;
+                    else
+                        open = mid;
+                }
+
+                // And it has to carry on from there, judged from the edge rather than from where the
+                // sample happened to land, so a beam three units wide is floor wherever it is asked
+                // from and a rail a unit wide never is.
+                if (At(floor + CrackStep / 2f) != Ground.Floor || At(floor + CrackStep) != Ground.Floor)
+                    continue;
+
+                return floor <= limit ? floor : -1f;
+            }
+
+            return -1f;
         }
 
         /// <summary>

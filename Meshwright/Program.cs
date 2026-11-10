@@ -3479,7 +3479,7 @@ namespace Meshwright
             const float SearchDepth = 512f;
 
             int floatingAreas = 0, airAreas = 0;
-            long floatingSamples = 0, airSamples = 0, totalSamples = 0;
+            long floatingSamples = 0, airSamples = 0, totalSamples = 0, crackSamples = 0;
             double errorSum = 0;
             var errors = new List<float>();
             var worstFloating = new List<(float Error, string Where)>();
@@ -3489,7 +3489,7 @@ namespace Meshwright
             foreach (var area in nav.Areas)
             {
                 var b = NavGeometry.GetBounds(area);
-                int floating = 0, air = 0, taken = 0;
+                int floating = 0, air = 0, taken = 0, cracked = 0;
                 float worst = 0;
                 string worstAt = "";
                 float worstX = 0, worstY = 0, worstZ = 0;
@@ -3508,8 +3508,22 @@ namespace Meshwright
 
                         // Start the search a little above the claimed surface so a quad sitting a hair
                         // under the real floor still finds it rather than reporting the storey below.
-                        if (!StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
-                                SearchDepth, out float actual))
+                        bool found = StairMarker.TryFindFloor(vis, x, y, claimed + NavConstants.StepHeight,
+                            SearchDepth, out float actual);
+
+                        // A sample that lands in a crack narrower than half a body - between two
+                        // brushes, or a seam in terrain - is over floor a walker crosses without
+                        // noticing, and is neither floating nor over air. It is the clip's own test
+                        // (AreaClipper.OverCrack), with this command's tolerance: floor has to resume
+                        // within it on both sides of the sample, so a sample past a ledge, or over a
+                        // gap a body can fall into, still counts.
+                        if ((!found || claimed - actual > tolerance) && AreaClipper.OverCrack(vis, area, x, y, tolerance))
+                        {
+                            cracked++;
+                            continue;
+                        }
+
+                        if (!found)
                         {
                             air++;
                             continue;
@@ -3538,6 +3552,7 @@ namespace Meshwright
                 totalSamples += taken;
                 floatingSamples += floating;
                 airSamples += air;
+                crackSamples += cracked;
 
                 float cx = (b.MinX + b.MaxX) / 2f, cy = (b.MinY + b.MaxY) / 2f;
                 string where = $"area {area.Id,-7} at ({cx:F0} {cy:F0} " +
@@ -3580,6 +3595,7 @@ namespace Meshwright
                               $"{floatingSamples:N0} samples ({100.0 * floatingSamples / Math.Max(1, totalSamples):F1}%)");
             Console.WriteLine($"over open air    {airAreas:N0} areas ({100.0 * airAreas / Math.Max(1, nav.Areas.Count):F1}%), " +
                               $"{airSamples:N0} samples ({100.0 * airSamples / Math.Max(1, totalSamples):F1}%)");
+            Console.WriteLine($"in a crack       {crackSamples:N0} samples, counted as on the floor");
 
             worstFloating.Sort((a, b2) => b2.Error.CompareTo(a.Error));
             worstAir.Sort((a, b2) => b2.Fraction.CompareTo(a.Fraction));

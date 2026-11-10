@@ -554,6 +554,142 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// A crack six units wide under an area pulls none of its edges back.
+        ///
+        /// The crack runs east-west from y = 85 to 91. The east and west edges each have a probe line
+        /// at y = 90 running along it, with no floor anywhere on it, and the south edge's lines all
+        /// cross it, with no floor at the second of their four points. Read as a ledge, the first
+        /// pulled both side edges back to four units from their probes' start, and the second the
+        /// south edge back to six units from its. A body walks straight across it.
+        /// </summary>
+        [Fact]
+        public void ACrackUnderTheProbeLinesDoesNotPullAnEdgeBack()
+        {
+            var nav = Square(0f, 0f, 100f, 100f);
+
+            var result = AreaClipper.Clip(nav, SlottedGround(85f, 91f), Step);
+
+            Assert.Equal(0, result.Clipped);
+            var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
+            Assert.Equal((0f, 0f, 100f, 100f), (b.MinX, b.MinY, b.MaxX, b.MaxY));
+        }
+
+        /// <summary>
+        /// The control: where the gap is wider than a crack - forty units, from y = 80 to 120 - the
+        /// floor resuming beyond it does not make it one. The south edge still comes back to the
+        /// ledge at y = 80, and the east and west edges, whose lines at y = 90 run over the gap, are
+        /// left alone once it has.
+        /// </summary>
+        [Fact]
+        public void AGapWiderThanACrackIsStillALedge()
+        {
+            var nav = Square(0f, 0f, 100f, 100f);
+
+            AreaClipper.Clip(nav, SlottedGround(80f, 120f), Step);
+
+            var b = NavGeometry.GetBounds(Assert.Single(nav.Areas));
+            Assert.InRange(b.MaxY, 75f, 80f);
+            Assert.Equal((0f, 0f, 100f), (b.MinX, b.MinY, b.MaxX));
+        }
+
+        /// <summary>
+        /// The crack test on its own: a point in a crack narrower than half a body is over one, along
+        /// it or across it; a point past a ledge, or in a gap wider than that, is not, however close
+        /// the floor behind it is.
+        /// </summary>
+        [Theory]
+        [InlineData(88f, 50f, 85f, 91f, true)]      // in a six-unit crack
+        [InlineData(85.5f, 50f, 85f, 86f, true)]    // in a one-unit seam
+        [InlineData(81f, 50f, 80f, 120f, false)]    // a unit into a forty-unit gap
+        [InlineData(90.5f, 50f, 80f, 97f, false)]     // in the middle of a gap just wider than a crack
+        public void OnlyAGapNarrowerThanHalfABodyIsACrack(float y, float x, float from, float to, bool crack)
+        {
+            var nav = Square(0f, 0f, 100f, 100f);
+            var vis = SlottedGround(from, to);
+
+            Assert.Equal(crack, AreaClipper.OverCrack(vis, nav.Areas[0], x, y, NavConstants.StepHeight));
+        }
+
+        /// <summary>
+        /// Solid ground under z = 0 with open air above, alternately floor and gap across y: floor south
+        /// of the first boundary, a gap to the next, floor to the one after, and so on.
+        /// </summary>
+        private static BspVisibility Strips(params float[] boundaries)
+        {
+            var planes = new List<BspFile.Plane> { Plane(0, 0, 1, 0) };
+            var leafs = new List<BspVisibility.Leaf>
+            {
+                new() { Contents = 0 },         // 0: open air
+                new() { Contents = Solid },     // 1: the ground
+            };
+
+            // Leaf n is referenced as -(n) - 1.
+            const int Air = -1, Ground = -2;
+
+            var nodes = new List<BspVisibility.Node> { default };
+
+            // Built from the north end: each node splits off the strip south of its boundary.
+            int north = boundaries.Length % 2 == 0 ? Ground : Air;
+
+            for (int i = boundaries.Length - 1; i >= 0; i--)
+            {
+                planes.Add(Plane(0, 1, 0, boundaries[i]));
+                nodes.Add(new BspVisibility.Node
+                {
+                    PlaneNum = planes.Count - 1, Child0 = north, Child1 = i % 2 == 0 ? Ground : Air,
+                });
+                north = nodes.Count - 1;
+            }
+
+            nodes[0] = new BspVisibility.Node { PlaneNum = 0, Child0 = Air, Child1 = north };
+
+            return BspVisibility.FromGeometry([.. planes], [.. nodes], [.. leafs], [], [],
+                new int[]?[leafs.Count]);
+        }
+
+        /// <summary>
+        /// A gap is measured, not only bounded, so a trench fifteen units across is a crack asked from
+        /// near its side or from its middle, and one seventeen across is not from either.
+        /// </summary>
+        [Theory]
+        [InlineData(81f, 95f, true)]
+        [InlineData(87.5f, 95f, true)]
+        [InlineData(81f, 97f, false)]
+        [InlineData(88.5f, 97f, false)]
+        public void AGapIsMeasuredWhereverItIsAskedFrom(float y, float to, bool crack)
+        {
+            var nav = Square(0f, 0f, 100f, 100f);
+
+            Assert.Equal(crack, AreaClipper.OverCrack(SlottedGround(80f, to), nav.Areas[0], 50f, y,
+                NavConstants.StepHeight));
+        }
+
+        /// <summary>
+        /// A rail a unit and a half wide down a trench thirty across is not the far side of a crack: the
+        /// floor beyond a crack has to carry on. A beam three units wide does, from either side of it.
+        /// </summary>
+        [Theory]
+        [InlineData(85f, 90f, false)]       // the rail, from the gap south of it
+        [InlineData(85f, 91.5f, true)]      // the beam, from the south
+        [InlineData(94.5f, 91.5f, true)]    // the beam, from the north
+        public void ARailDownATrenchIsNotTheFarSideOfACrack(float y, float railTo, bool crack)
+        {
+            var nav = Square(0f, 0f, 100f, 100f);
+
+            Assert.Equal(crack, AreaClipper.OverCrack(Strips(80f, 88.5f, railTo, 100f), nav.Areas[0], 50f, y,
+                NavConstants.StepHeight));
+        }
+
+        /// <summary>The same, off a ledge: floor behind the point and none in front of it is not a crack.</summary>
+        [Fact]
+        public void APointPastALedgeIsNotOverACrack()
+        {
+            var nav = Square(-20f, 0f, 80f, 100f);
+
+            Assert.False(AreaClipper.OverCrack(Ledge(0f), nav.Areas[0], -1f, 50f, NavConstants.StepHeight));
+        }
+
+        /// <summary>
         /// A one-node square on the corner of a platform, with a drop on two sides, which the clip
         /// leaves too small to keep is clipped again from where it started, the way every area was
         /// clipped before the patient clip.
