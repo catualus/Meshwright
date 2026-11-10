@@ -396,19 +396,42 @@ namespace Meshwright
         /// sampling grid share one long edge, with the doorway wherever the mapper put it, so they were
         /// linked only when the door happened to sit at the centre: 296 of rp_downtown_tits_v25's 409
         /// doorways connected, 384 with this. The engine links areas from node connections along the
-        /// whole edge, which is what this approximates. Tried in a fixed order, a body's half-width in
-        /// from each end so the whole hull fits, so the result does not depend on thread timing.
+        /// whole edge, which is what this approximates. Tried in a fixed order, so the result does not
+        /// depend on thread timing.
+        ///
+        /// The body's centre may be anywhere on the shared span, out to a unit from either end, with
+        /// half of the body hanging past it. This used to stop a body's half-width short of each end so
+        /// the whole hull stayed over the span, which on a span under 32 units left no position to try
+        /// at all - and the middle is then the only crossing ever tested. A ledge 25 units deep under
+        /// an overhang is that shape: a crouching body fits on it only at the lip, half of it over the
+        /// drop, so the middle runs into the overhang and nothing else was tried. gm_flatgrass has
+        /// them round the walls of its pit, and 22 of their areas were islands. Across the twelve
+        /// benchmark maps, measured with hull sweeps along each unlinked shared edge, 93% of the edges a
+        /// body could cross only off the middle were narrower than a body.
+        ///
+        /// Where the body does hang past the span, the space it hangs into belongs to neither area, so
+        /// nothing else vouches for it and it gets a real body swept through it, not only the lines.
         /// </summary>
         private static bool CrossesElsewhere(BspVisibility vis, NavArea area, NavArea other,
             NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
             float centre, float overlap, out float climb)
         {
             climb = 0;
-            float low = centre - overlap / 2f + NavConstants.HalfHumanWidth;
-            float high = centre + overlap / 2f - NavConstants.HalfHumanWidth;
+            float spanLow = centre - overlap / 2f, spanHigh = centre + overlap / 2f;
+            float low = spanLow + SpanEnd;
+            float high = spanHigh - SpanEnd;
 
-            for (float c = low; c <= high; c += SpanStep)
+            // The same grid as before, a half-width in from the low end and a step apart, carried on
+            // out to both ends and pinned to them, so every position tried before is still tried and a
+            // crossing found before is still found. Stepped by count rather than by accumulating.
+            float anchor = spanLow + NavConstants.HalfHumanWidth;
+            int first = -(int)MathF.Ceiling((anchor - low) / SpanStep);
+
+            // Runs until the position before reached the high end, so that end is tried once.
+            for (int k = first; anchor + (k - 1) * SpanStep < high; k++)
             {
+                float c = Math.Clamp(anchor + k * SpanStep, low, high);
+
                 if (MathF.Abs(c - centre) < SpanStep / 2f)
                     continue;   // the middle, already tried
 
@@ -420,7 +443,11 @@ namespace Meshwright
                 if (!Reachable(toZ - fromZ))
                     continue;
 
-                if (TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _) == Refusal.Clear)
+                bool overhangs = c - spanLow < NavConstants.HalfHumanWidth ||
+                                 spanHigh - c < NavConstants.HalfHumanWidth;
+
+                if (TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _,
+                        sweepBody: overhangs) == Refusal.Clear)
                 {
                     climb = toZ - fromZ;
                     return true;
@@ -429,6 +456,12 @@ namespace Meshwright
 
             return false;
         }
+
+        /// <summary>
+        /// How close to either end of the shared span a crossing is tried: a unit in, so the trace
+        /// endpoints sit on both areas rather than on the corner where their edges stop.
+        /// </summary>
+        private const float SpanEnd = 1f;
 
         /// <summary>
         /// A point inset from the middle of one edge. A negative <paramref name="offset"/> moves inward,
@@ -454,10 +487,14 @@ namespace Meshwright
         ///
         /// Both ends then need vertical room to reach that level, or the connection passes under a
         /// ceiling too low to stand up in.
+        ///
+        /// <paramref name="sweepBody"/> also drags a crouching body across, for a crossing tried off
+        /// the shared span's middle with half the body hanging past its end (see
+        /// <see cref="CrossesElsewhere"/>).
         /// </summary>
         private static Refusal TestCrossing(BspVisibility vis, NavArea from, NavArea to,
             float fromX, float fromY, float fromZ, float toX, float toY, float toZ,
-            out bool startedSolid)
+            out bool startedSolid, bool sweepBody = false)
         {
             startedSolid = false;
 
@@ -508,6 +545,9 @@ namespace Meshwright
                         return Refusal.Crossing;
                 }
             }
+
+            if (sweepBody && !BodyCrosses(vis, fromX, fromY, toX, toY, high))
+                return Refusal.Crossing;
 
             // Both evaluated, not short-circuited: either end being buried is worth recording, and the
             // two traces are cheap next to the ones already done above.
@@ -637,6 +677,46 @@ namespace Meshwright
             return !startedSolid && vis.IsLineClear(foot,
                 new BspFile.Vector3(x, y, z + NavConstants.HumanCrouchHeight),
                 BspVisibility.GenerationMask);
+        }
+
+        /// <summary>
+        /// Whether a crouching body, the full 32 units wide, can be dragged straight across at the
+        /// height of the higher surface.
+        ///
+        /// The clearance lines are three columns 16 units apart at three heights, and anything that
+        /// slips between them - a post, a beam over the 50 unit line - reads as clear. Across the
+        /// middle of a shared span the lines are all that has ever been asked, with the body over the
+        /// two areas' own ground. Off the end of the span half the body is over ground that belongs to
+        /// neither area, so that space gets a body swept through it as well.
+        ///
+        /// Lifted half a step, as <see cref="Traversability.CanStep"/> and the crouch sampler are:
+        /// anything lower is stepped over.
+        ///
+        /// A body that starts inside something is refused whether or not the sweep reports a hit. A box
+        /// that begins in a brush and is dragged out of it never enters one, so the trace finds nothing
+        /// to report and says so - with only its start-solid flag left to tell. Taking "nothing found"
+        /// as clear let the body begin in a wall whenever the crossing led away from it, which is the
+        /// usual shape off the end of a span: the area being left is a sliver against a wall or in a
+        /// corner, too narrow for a body anywhere, and the crossing runs out of it into open ground.
+        /// On the twelve benchmark maps that was 1,089 of the 11,092 links made with the body hanging
+        /// past the end of a span. For 850 of them no body fits anywhere in the area being left within
+        /// 64 units of the edge, and they were nearly all one-way - 743 of the 787 left in the finished
+        /// meshes had no link back - because the crossing back runs into the wall and is caught.
+        /// </summary>
+        private static bool BodyCrosses(BspVisibility vis, float fromX, float fromY, float toX, float toY,
+            float high)
+        {
+            const float Lift = NavConstants.StepHeight / 2f;
+            const float Half = NavConstants.HalfHumanWidth;
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(fromX, fromY, high + Lift),
+                new BspFile.Vector3(toX, toY, high + Lift),
+                new BspFile.Vector3(-Half, -Half, 0f),
+                new BspFile.Vector3(Half, Half, NavConstants.HumanCrouchHeight - Lift),
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
+
+            return !startSolid && (!hit || fraction >= 1f);
         }
 
         /// <summary>
