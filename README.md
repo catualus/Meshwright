@@ -278,8 +278,8 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,631 | 19,577 | 17,328 |
-| Connections | 11,446 | 14,140 | 91,538 | 81,437 |
+| Areas | 2,271 | 2,631 | 19,577 | 17,331 |
+| Connections | 11,446 | 14,146 | 91,538 | 81,660 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,690 (13.7%) | **0** |
@@ -301,7 +301,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | Coverage of every reference area including stranded | 89.2% | 67.6% |
 | Areas on ground the reference does not have | 2.4% | 9.4% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 142 (0.8%) |
+| Areas no player spawn can reach | 3 (0.1%) | 140 (0.8%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -486,6 +486,32 @@ of the twelve maps, before or after. Four new islands are pockets against a diag
 cp_badlands and pl_upward, that no crouching body fits in anywhere and the build could not link: a
 hairline seam under a probe line used to pare them down to slivers, which were discarded. cp_badlands
 has two more areas no spawn reaches for it, 49; pl_upward and cp_dustbowl have three and one fewer.
+
+A crossing between two areas was never tried with the body centred on the very end of their shared
+span, half of it past the end over the floor of whatever runs alongside both - the way a body gets round
+a corner. Every crossing stopped at least a unit short of the end, and at a corner that unit is the
+whole difference: two strips the clip pulls back against a wall, each narrower than a body, are crossed
+by a body standing at their open side, and a unit further along its far side is in the wall. Of the
+39,889 adjacent pairs the builder refused on the twelve finished meshes, a hull checker gets a body
+across 956 only with it centred on an end of the span, 737 of them level. The two ends are now tried
+last, from six units and from a unit inside each area, for level crossings only, where every probe under
+the overhanging half finds floor within a step, a crouching body stands at both ends, and a body swept
+across is clear from start to finish. The stale-link pass tries them too, and removes a link the build
+made only at a span end if the clip leaves no body standing at both ends of any crossing.
+
+The two corner crossings on ctf_2fort an earlier audit found that pass removing were not this. Each is
+a respawn-room doorway with a thin `func_brush` panel between the two areas, and a body gets round it
+only with its middle 12 units past the span's end. The hull sweep said otherwise because it gathered
+brush entities by the line through the box's origin, so a panel the box ran into beside that line was
+never tested; it gathers them by the swept box now. On its own that leaves nine of the twelve meshes
+byte-identical, takes four links on cp_granary that the build made through a `func_brush`, and on the
+two RP maps re-partitions one room beside a wall button.
+
+Connections rise by up to 0.7% on eleven maps; gm_flatgrass comes out byte-identical. Routes rise
+from 99.85% to 99.95% on cp_badlands and hold elsewhere, coverage, floating and over-air areas do not
+move, islands fall on seven maps (cp_badlands 46 to 41) and areas no spawn reaches on seven (cp_badlands
+49 to 44), and no area a spawn reached before is cut off. A hull checker that also tries a span's exact
+end flags 2 of the 905 new level links, against 1.2% of the links kept.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
