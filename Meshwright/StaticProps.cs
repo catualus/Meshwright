@@ -62,11 +62,39 @@ namespace Meshwright
         public bool Contains(BspFile.Vector3 point, int mask)
             => (mask & PropContents) != 0 && solids.Contains(point);
 
-        /// <summary>Sweeps a box against the props.</summary>
+        /// <summary>
+        /// Sweeps a box against the props, reporting <paramref name="startSolid"/> when the box starts
+        /// anywhere in a prop's collision: across its surface or wholly inside it.
+        ///
+        /// The triangle sweep sees only the first. It counts a box overlapping a triangle at the start
+        /// as starting solid, so a box lying across a prop's surface, or holding a whole small prop, is
+        /// caught - but a box wholly inside a prop's hull touches none of its faces and swept clear. A
+        /// crate, a vehicle or a building-sized prop then had room inside it for every body test built
+        /// on the sweep: the flood's step, the crouching body, and the bodies the connection pass and
+        /// the pocket pass stand at the ends of a crossing.
+        ///
+        /// So the start box's centre is also tested against the props' convex hulls. A box overlaps a
+        /// convex hull exactly when it crosses the hull's surface, holds the whole hull, or lies wholly
+        /// inside it, and the centre is inside in the last case; when it is inside in any other, the
+        /// box crosses the surface and the triangles have already said so. A centre on a face, within
+        /// <see cref="ConvexSolids.Margin"/>, is not inside, so a box resting against a prop is not
+        /// made start-solid by this - only, as before, by overlapping the face. Only the start needs
+        /// it: a box that ends inside a prop crossed one of its faces to get there, and stops on it.
+        /// </summary>
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
             out float fraction, out BspFile.Vector3 normal, out bool startSolid)
-            => mesh.TryTraceHull(a, b, mins, maxs, mask, out fraction, out normal, out startSolid);
+        {
+            bool hit = mesh.TryTraceHull(a, b, mins, maxs, mask, out fraction, out normal, out startSolid);
+
+            if (!startSolid && (mask & PropContents) != 0)
+            {
+                startSolid = solids.Contains(new BspFile.Vector3(
+                    a.X + (mins.X + maxs.X) / 2f, a.Y + (mins.Y + maxs.Y) / 2f, a.Z + (mins.Z + maxs.Z) / 2f));
+            }
+
+            return hit;
+        }
 
         /// <summary>How much content had to be searched, which is most of what loading props costs.</summary>
         public int SearchRoots { get; private set; }
@@ -142,8 +170,11 @@ namespace Meshwright
             var perTriangle = new int[result.TriangleCount];
             Array.Fill(perTriangle, PropContents);
 
-            result.mesh.Build(result.Triangles, perTriangle);
-            result.solids = ConvexSolids.Build(result.Triangles, pieces);
+            // The hulls first: they orient each triangle outwards, which the sweep needs to tell a box
+            // leaving a prop from one entering it.
+            var outward = new BspFile.Vector3[result.TriangleCount];
+            result.solids = ConvexSolids.Build(result.Triangles, pieces, outward);
+            result.mesh.Build(result.Triangles, perTriangle, outward);
             return result;
         }
 
@@ -312,8 +343,11 @@ namespace Meshwright
             var perTriangle = new int[result.TriangleCount];
             Array.Fill(perTriangle, PropContents);
 
-            result.mesh.Build(result.Triangles, perTriangle);
-            result.solids = ConvexSolids.Build(result.Triangles, pieces);
+            // The hulls first: they orient each triangle outwards, which the sweep needs to tell a box
+            // leaving a prop from one entering it.
+            var outward = new BspFile.Vector3[result.TriangleCount];
+            result.solids = ConvexSolids.Build(result.Triangles, pieces, outward);
+            result.mesh.Build(result.Triangles, perTriangle, outward);
 
             result.IndexMs = clock.ElapsedMilliseconds;
             return result;

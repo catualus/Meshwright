@@ -20,6 +20,11 @@ namespace Meshwright
     /// plane is oriented outwards against the piece's own vertex centroid rather than by winding, which
     /// the .phy format does not reliably give (see <see cref="PhyFile"/>). A point *on* a face, within
     /// <see cref="Margin"/>, is not inside: a floor sampled on top of a prop is on it, not in it.
+    ///
+    /// The hull sweep has the same blind spot and asks the same question. A box wholly inside a hull
+    /// touches none of its triangles, so <see cref="StaticProps.TryTraceHull"/> tests the start box's
+    /// centre here; and the outward normals worked out here tell the sweep a box leaving a prop through
+    /// a face from one entering it (see <see cref="TriangleMesh.TryTraceHull"/>).
     /// </summary>
     public sealed class ConvexSolids
     {
@@ -50,8 +55,15 @@ namespace Meshwright
         /// <summary>
         /// Indexes the pieces of a triangle soup. Each entry of <paramref name="pieces"/> is a run of
         /// whole triangles in <paramref name="triangles"/> (three vertices each) forming one convex hull.
+        ///
+        /// <paramref name="outward"/>, when given, one entry per triangle, receives each triangle's
+        /// outward unit normal as oriented here, or a zero vector for a triangle that is not a face of a
+        /// kept piece: a sliver, one in a flat or open piece, or one outside every piece. The hull sweep
+        /// uses it to tell a box leaving a prop from one entering it; see
+        /// <see cref="TriangleMesh.TryTraceHull"/>.
         /// </summary>
-        public static ConvexSolids Build(BspFile.Vector3[] triangles, IReadOnlyList<(int First, int Count)> pieces)
+        public static ConvexSolids Build(BspFile.Vector3[] triangles, IReadOnlyList<(int First, int Count)> pieces,
+            BspFile.Vector3[]? outward = null)
         {
             var result = new ConvexSolids();
 
@@ -107,11 +119,17 @@ namespace Meshwright
                     if (side > 0f) { px = -px; py = -py; pz = -pz; d = -d; }
 
                     planeX.Add(px); planeY.Add(py); planeZ.Add(pz); planeD.Add(d);
+
+                    if (outward is not null)
+                        outward[t] = new BspFile.Vector3(px, py, pz);
                 }
 
                 // Four planes is the fewest that close a volume.
                 if (planeX.Count - planesBefore < 4)
                 {
+                    if (outward is not null)
+                        Array.Clear(outward, first, count);
+
                     planeX.RemoveRange(planesBefore, planeX.Count - planesBefore);
                     planeY.RemoveRange(planesBefore, planeY.Count - planesBefore);
                     planeZ.RemoveRange(planesBefore, planeZ.Count - planesBefore);

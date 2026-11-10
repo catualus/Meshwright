@@ -26,6 +26,13 @@ namespace Meshwright
     {
         private BspFile.Vector3[] vertices = [];   // triangle vertices, three per triangle
         private int[] contents = [];               // one entry per triangle
+
+        /// <summary>
+        /// Each triangle's outward normal, for triangles that are faces of a closed solid, or null when
+        /// none are. A zero normal marks a triangle with no known outside. Only
+        /// <see cref="TryTraceHull"/> reads it; see there.
+        /// </summary>
+        private BspFile.Vector3[]? outward;
         private BvhNode[] bvh = [];
         private int[] order = [];
 
@@ -62,13 +69,19 @@ namespace Meshwright
         }
 
         /// <summary>
-        /// Takes ownership of the triangles and indexes them. Both arrays are kept as given rather than
+        /// Takes ownership of the triangles and indexes them. The arrays are kept as given rather than
         /// copied - callers build them once and hand them over.
+        ///
+        /// <paramref name="triangleOutward"/>, one per triangle, gives the outward normal of each
+        /// triangle that is a face of a closed solid - a prop's hull - and a zero vector for any other.
+        /// Terrain leaves it out: a surface has no outside.
         /// </summary>
-        public void Build(BspFile.Vector3[] triangleVertices, int[] triangleContents)
+        public void Build(BspFile.Vector3[] triangleVertices, int[] triangleContents,
+            BspFile.Vector3[]? triangleOutward = null)
         {
             vertices = triangleVertices;
             contents = triangleContents;
+            outward = triangleOutward;
             BuildBvh();
         }
         /// <summary>
@@ -178,6 +191,7 @@ namespace Meshwright
         {
             var sortedVertices = new BspFile.Vector3[count * 3];
             var sortedContents = new int[count];
+            var sortedOutward = outward is null ? null : new BspFile.Vector3[count];
 
             for (int i = 0; i < count; i++)
             {
@@ -189,10 +203,14 @@ namespace Meshwright
                 sortedVertices[to + 2] = vertices[from + 2];
 
                 sortedContents[i] = contents[order[i]];
+
+                if (sortedOutward is not null)
+                    sortedOutward[i] = outward![order[i]];
             }
 
             vertices = sortedVertices;
             contents = sortedContents;
+            outward = sortedOutward;
             order = [];
 
             BuildEdgeArrays(count);
@@ -702,6 +720,17 @@ namespace Meshwright
         /// sits *on* it, 0.9 units square and 55 tall - so the sweep is re-expressed as a centred box by
         /// moving the ray to the box's centre, and the half-extents are what the triangles get inflated
         /// by.
+        ///
+        /// A box overlapping a triangle at the start is <paramref name="startSolid"/>, and is also a hit
+        /// at fraction zero - with one exception. When the triangle is a face of a closed solid (see
+        /// <see cref="Build"/>) and the box is moving out through it, the face is not a hit: the box is
+        /// leaving the solid, not entering it, which is how a brush answers a box dragged out of it. The
+        /// graze rule in <see cref="Traversability.CanStep"/> depends on that answer - a sample on a face
+        /// stepping away from it - and against a prop it used to get a hit at fraction zero, which
+        /// refused every such step. Terrain has no outside and keeps the hit.
+        ///
+        /// A box wholly inside a closed solid overlaps none of its triangles, so this does not report
+        /// it; <see cref="StaticProps.TryTraceHull"/> does.
         /// </summary>
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
@@ -717,11 +746,13 @@ namespace Meshwright
             // Centre the box and carry the offset on the ray instead.
             var centre = new BspFile.Vector3((mins.X + maxs.X) / 2f, (mins.Y + maxs.Y) / 2f,
                 (mins.Z + maxs.Z) / 2f);
-            var extent = new BspFile.Vector3((maxs.X - mins.X) / 2f, (maxs.Y - mins.Y) / 2f,
-                (maxs.Z - mins.Z) / 2f);
+            // No thinner than MinHalfExtent along any axis; see there.
+            var extent = new BspFile.Vector3(MathF.Max((maxs.X - mins.X) / 2f, MinHalfExtent),
+                MathF.Max((maxs.Y - mins.Y) / 2f, MinHalfExtent), MathF.Max((maxs.Z - mins.Z) / 2f, MinHalfExtent));
 
             var from = new BspFile.Vector3(a.X + centre.X, a.Y + centre.Y, a.Z + centre.Z);
             var to = new BspFile.Vector3(b.X + centre.X, b.Y + centre.Y, b.Z + centre.Z);
+            var delta = new BspFile.Vector3(b.X - a.X, b.Y - a.Y, b.Z - a.Z);
 
             bool found = false;
 
@@ -767,7 +798,13 @@ namespace Meshwright
                     }
 
                     if (solid)
+                    {
                         startSolid = true;
+
+                        // Dragged out through a face of a solid it starts across: leaving, not a hit.
+                        if (outward is not null && Dot(outward[i], delta) > 0f)
+                            continue;
+                    }
 
                     if (found && hit >= fraction)
                         continue;
@@ -780,6 +817,25 @@ namespace Meshwright
 
             return found;
         }
+
+        /// <summary>
+        /// The least half-depth a swept box is given along each axis.
+        ///
+        /// A box with no depth along the direction it moves - the flat plates the body tests sweep up
+        /// and down, 32 units square and no units tall - passes a triangle parallel to it in an
+        /// instant: every axis the separating-axis test projects onto along that direction gives the
+        /// same zero-width slab, entered and left at the same fraction. Each axis computes that
+        /// fraction with its own rounding, and whenever the latest entry came out a hair after the
+        /// earliest exit the plate went straight through. Whether it did depends on the coordinates,
+        /// and against some faces it always did: a plate rising under a prop slab placed off the
+        /// origin missed its underside at every one of 1,386 points tried, and one dropping onto it
+        /// missed its top. On the benchmark maps it let crouching bodies rise into props on the two RP
+        /// maps, and resting bodies drop through the top of the prop they stood on. Given a hundredth
+        /// of a unit, the slabs have width enough to outlast the rounding - 12,000 random plates and
+        /// prop slabs out to 30,000 units from the origin, none missed - and nothing a body test asks
+        /// about is that thin. Terrain shares the sweep and gets the same.
+        /// </summary>
+        private const float MinHalfExtent = 0.01f;
 
         /// <summary>
         /// Sweeps a centred box along a segment against one triangle, by the separating axis theorem.
