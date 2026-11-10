@@ -156,14 +156,14 @@ namespace Meshwright
             // what it produced. Ordinary BFS is sequential, and nearly all the cost here is the floor
             // probing each cell triggers - many traces per column - so the frontier is where the time
             // goes and where the parallelism belongs.
-            var visited = new System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), byte>();
+            var visited = new System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float>();
             var accepted = new System.Collections.Concurrent.ConcurrentBag<Cell>();
             int uncovered = 0;
 
             var frontier = new List<Cell>();
             foreach (var seed in Seeds(nav, bsp, vis, world, result))
             {
-                if (!visited.TryAdd(Key(seed.Cell), 0))
+                if (!Claim(visited, seed.Cell))
                     continue;
 
                 frontier.Add(seed.Cell);
@@ -206,7 +206,7 @@ namespace Meshwright
 
                     foreach (var neighbour in Neighbours(world, cell))
                     {
-                        if (!visited.ContainsKey(Key(neighbour)))
+                        if (!Seen(visited, neighbour))
                             reached.Add(neighbour);
                     }
                 });
@@ -215,7 +215,7 @@ namespace Meshwright
                 // floor, which is the order the result is sorted in further down.
                 var next = reached.ToList();
                 next.Sort(CompareCells);
-                next.RemoveAll(cell => !visited.TryAdd(Key(cell), 0));
+                next.RemoveAll(cell => !Claim(visited, cell));
 
                 // Cells already represented still propagate - the flood has to be able to cross existing
                 // mesh to reach the far side of it - but they contribute no new area.
@@ -360,7 +360,7 @@ namespace Meshwright
         /// their nodes took that category from 348 to 2 on that map.
         /// </summary>
         private static void Classify(NavFile reference, NavFile generated, World world,
-            System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), byte> visited,
+            System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float> visited,
             HashSet<(int, int, int)> accepted, Result result)
         {
             var generatedIndex = new NavGeometry.Index(generated.Areas);
@@ -414,7 +414,7 @@ namespace Meshwright
 
                 if (!world.IsStandable(cell.Gx, cell.Gy, floor.Value))
                     Note("floor found but not standable");
-                else if (!visited.ContainsKey(key))
+                else if (!Seen(visited, new Cell(cell.Gx, cell.Gy, floor.Value)))
                     Note("standable but the flood never reached it");
                 else if (!accepted.Contains(key))
                     Note("reached, but treated as already covered");
@@ -512,6 +512,46 @@ namespace Meshwright
 
         /// <summary>Height is quantised so two probes of the same surface hash to the same cell.</summary>
         private static (int, int, int) Key(Cell c) => (c.Gx, c.Gy, (int)MathF.Round(c.Z / 8f));
+
+        /// <summary>
+        /// How close two floors of one column have to be to count as one cell even when they fall either
+        /// side of the edge of a <see cref="Key"/> band: half a band, so any two within it are one cell
+        /// wherever the edges fall, as two in the same band already were.
+        /// </summary>
+        private const float SameFloor = NavNodeGrid.HeightGranularity / 2f;
+
+        /// <summary>
+        /// Whether the flood has already claimed this cell: its own band, or a floor of the same column in
+        /// the band either side within <see cref="SameFloor"/> of it.
+        ///
+        /// The band alone was the test, so two floors of one column a unit apart were one cell or two
+        /// depending on where the band edges fell between them. The sewers of both roleplay maps are
+        /// terrain laid 1.3 units over the brush face it was built from, at z=-195.7 over z=-197, with
+        /// the edge between two bands at z=-196: the flood took both floors of every column there, the
+        /// generator gave each its own node, and areas were laid one over the other. On
+        /// rp_downtown_tits_v25 it handed the connection builder 371 pairs of areas overlapping by more
+        /// than two units both ways at heights within a step, 288 of them within a unit. The finished
+        /// meshes of the twelve benchmark maps held 365 and 381 such pairs on the roleplay maps and up to
+        /// 12 on the TF2 maps; with this they hold 0 to 2. Where one copy was a strip nothing linked to,
+        /// it was kept as a cut-off group a body fits in - six on each roleplay map, every one lying
+        /// inside an area the spawns reach.
+        /// </summary>
+        private static bool Seen(System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float> visited, Cell c)
+        {
+            var (gx, gy, band) = Key(c);
+
+            return visited.ContainsKey((gx, gy, band)) ||
+                   visited.TryGetValue((gx, gy, band - 1), out float below) && c.Z - below < SameFloor ||
+                   visited.TryGetValue((gx, gy, band + 1), out float above) && above - c.Z < SameFloor;
+        }
+
+        /// <summary>
+        /// Claims a cell for the flood unless <see cref="Seen"/> already, recording the height it was
+        /// claimed at. Called only from one thread at a time, in a fixed order, so the same floor of a
+        /// pair always wins.
+        /// </summary>
+        private static bool Claim(System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), float> visited, Cell c)
+            => !Seen(visited, c) && visited.TryAdd(Key(c), c.Z);
 
         /// <summary>Column by column, lowest floor first: the one order cells are ever settled in.</summary>
         private static int CompareCells(Cell a, Cell b)
