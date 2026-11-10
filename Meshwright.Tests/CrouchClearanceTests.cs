@@ -10,6 +10,7 @@ namespace Meshwright.Tests
     /// units out on each side, which have to find the same floor the sample stands on. Those probes used
     /// to start a standing player's height up, which under a crouch-height ceiling is inside the ceiling,
     /// so they found the ceiling instead of the floor and every crouch-only sample was thrown away.
+    /// A crouch-only sample also has to have room for a crouching body, not just a clear line up.
     /// </summary>
     public class CrouchClearanceTests
     {
@@ -73,6 +74,72 @@ namespace Meshwright.Tests
             return BspVisibility.FromGeometry(planes, nodes, leafs, brushes, sides, leafBrushes);
         }
 
+        /// <summary>
+        /// Flat ground at z = 0 under a crouch-height slab from 64 to 84, as <see cref="Slab"/>, in a
+        /// slot between two solid walls: everything from x = <paramref name="right"/> on, and
+        /// everything up to x = <paramref name="left"/>, floor to well over the slab.
+        /// </summary>
+        private static BspVisibility SlabInSlot(float left, float right)
+        {
+            var planes = new[]
+            {
+                Plane(0, 0, 1, 0),                 // 0: ground top, and the split above/below it
+                Plane(1, 0, 0, right),             // 1: the right wall's face, as a splitting plane
+                Plane(1, 0, 0, left),              // 2: the left wall's face, as a split and a side
+                Plane(0, 0, 1, 64),                // 3: slab underside, as a splitting plane
+                Plane(0, 0, 1, 84),                // 4: slab top, as a splitting plane and a side
+                Plane(0, 0, -1, 500),              // 5: z >= -500
+                Plane(-1, 0, 0, 5000),             // 6: x >= -5000
+                Plane(1, 0, 0, 5000),              // 7: x <= 5000
+                Plane(0, -1, 0, 5000),             // 8: y >= -5000
+                Plane(0, 1, 0, 5000),              // 9: y <= 5000
+                Plane(0, 0, -1, -64),              // 10: slab underside as a side, z >= 64
+                Plane(-1, 0, 0, -right),           // 11: the right wall's face as a side, x >= right
+                Plane(0, 0, -1, 0),                // 12: a wall's foot, z >= 0
+                Plane(0, 0, 1, 500),               // 13: a wall's top, z <= 500
+            };
+
+            // Leaf n is referenced as -(n) - 1.
+            var nodes = new[]
+            {
+                new BspVisibility.Node { PlaneNum = 0, Child0 = 1, Child1 = -1 },  // above / in the ground
+                new BspVisibility.Node { PlaneNum = 1, Child0 = -2, Child1 = 2 },  // in the right wall / short of it
+                new BspVisibility.Node { PlaneNum = 2, Child0 = 3, Child1 = -3 },  // in the slot / in the left wall
+                new BspVisibility.Node { PlaneNum = 3, Child0 = 4, Child1 = -4 },  // at or above the slab / the gap
+                new BspVisibility.Node { PlaneNum = 4, Child0 = -5, Child1 = -6 }, // above the slab / in it
+            };
+
+            var leafs = new[]
+            {
+                new BspVisibility.Leaf { Contents = Solid }, // 0: the ground
+                new BspVisibility.Leaf { Contents = Solid }, // 1: the right wall
+                new BspVisibility.Leaf { Contents = Solid }, // 2: the left wall
+                new BspVisibility.Leaf { Contents = 0 },     // 3: the gap between ground and slab
+                new BspVisibility.Leaf { Contents = 0 },     // 4: open air above the slab
+                new BspVisibility.Leaf { Contents = Solid }, // 5: the slab
+            };
+
+            var brushes = new[]
+            {
+                new BspFile.Brush { FirstSide = 0, NumSides = 6, Contents = Solid },
+                new BspFile.Brush { FirstSide = 6, NumSides = 6, Contents = Solid },
+                new BspFile.Brush { FirstSide = 12, NumSides = 6, Contents = Solid },
+                new BspFile.Brush { FirstSide = 18, NumSides = 6, Contents = Solid },
+            };
+
+            var sides = new[]
+            {
+                Side(0), Side(5), Side(6), Side(7), Side(8), Side(9),
+                Side(4), Side(10), Side(6), Side(7), Side(8), Side(9),
+                Side(11), Side(7), Side(8), Side(9), Side(12), Side(13),
+                Side(2), Side(6), Side(8), Side(9), Side(12), Side(13),
+            };
+
+            var leafBrushes = new int[]?[] { new[] { 0 }, new[] { 2 }, new[] { 3 }, null, null, new[] { 1 } };
+
+            return BspVisibility.FromGeometry(planes, nodes, leafs, brushes, sides, leafBrushes);
+        }
+
         private static BspFile.Plane Plane(float x, float y, float z, float distance)
             => new() { Normal = new BspFile.Vector3(x, y, z), Distance = distance };
 
@@ -130,6 +197,36 @@ namespace Meshwright.Tests
 
             Assert.Equal(AreaGenerator.Clearance.Crouch, AreaGenerator.SampleClearance(world, Mins, Maxs, 10, 10, 0f)[0]);
             Assert.DoesNotContain(AreaGenerator.SampleNeighbours(world, Mins, Maxs, 10, 10, 0f), c => c.Z > 32f);
+        }
+
+        /// <summary>
+        /// Crouch-only ground needs room for a crouching body, not just a clear line up from the sample.
+        ///
+        /// The sample sits in the middle of a slot 28 units wide under a crouch-height ceiling. The line
+        /// straight up is clear to the ceiling at 64, but a body is 32 units wide and fits nowhere in
+        /// the slot. The same ceiling over a slot 100 units wide is crouch ground.
+        /// </summary>
+        [Fact]
+        public void CrouchGroundTooNarrowForABodyIsNoGround()
+        {
+            Assert.Equal(AreaGenerator.Clearance.None,
+                AreaGenerator.SampleClearance(SlabInSlot(236f, 264f), Mins, Maxs, 10, 10, 0f)[0]);
+            Assert.Equal(AreaGenerator.Clearance.Crouch,
+                AreaGenerator.SampleClearance(SlabInSlot(200f, 300f), Mins, Maxs, 10, 10, 0f)[0]);
+        }
+
+        /// <summary>
+        /// The body does not have to be centred on the sample, only somewhere in the sample's own cell.
+        ///
+        /// A wall 8 units from the sample leaves no room for a body centred there, but half a step
+        /// away from the wall there is. koth_viaduct's crouch spots, which Valve marks too, sit in a
+        /// wedge under a sloping ceiling like this, and requiring a centred body lost them.
+        /// </summary>
+        [Fact]
+        public void ABodyMayStandOffCentreInItsCell()
+        {
+            Assert.Equal(AreaGenerator.Clearance.Crouch,
+                AreaGenerator.SampleClearance(SlabInSlot(-1000f, 258f), Mins, Maxs, 10, 10, 0f)[0]);
         }
 
         /// <summary>The controls either side: no room even to crouch, and room to stand.</summary>

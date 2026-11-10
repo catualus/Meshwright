@@ -182,7 +182,7 @@ These apply to every command, not just `generate`:
 | Option | Effect |
 |---|---|
 | `-threads N` | Cap parallel work. Default is every core |
-| `-game NAME` | Movement limits: `cs`/`css`/`csgo`, or `gmod`/`hl2`/`tf2`/`source` (default). `tf2`, or a Compile Pal game called Team Fortress 2, also makes player clip solid, as it is to TF2's bots |
+| `-game NAME` | Movement limits: `cs`/`css`/`csgo`, or `gmod`/`hl2`/`tf2`/`source` (default). `tf2`, or a Compile Pal game called Team Fortress 2, also makes player clip solid, as it is to TF2's bots, and floods only from `info_player_teamspawn`, the one class TF2 spawns players at |
 | `-content DIR` | Extra directory to resolve prop models from. May be repeated |
 
 `-content` matters more than it looks. Meshwright works out where the game's content lives from the
@@ -278,8 +278,8 @@ down from 25 points on every area and reports the gap.
 | | gm_construct | | rp_downtown_tits_v25 | |
 |---|---|---|---|---|
 | | engine | Meshwright | shipped | Meshwright |
-| Areas | 2,271 | 2,637 | 19,577 | 17,323 |
-| Connections | 11,446 | 14,010 | 91,538 | 77,332 |
+| Areas | 2,271 | 2,637 | 19,577 | 17,302 |
+| Connections | 11,446 | 14,010 | 91,538 | 77,291 |
 | Height error, mean | 1.0 | 1.0 | 10.3 | **0.6** |
 | Height error, median | 0.3 | **0.2** | 0.1 | **0.0** |
 | Areas floating above the floor | 1 | **0** | 2,713 (13.9%) | **45 (0.3%)** |
@@ -301,7 +301,7 @@ and the areas the run's own reachability check cannot reach from any spawn.
 | Coverage of every reference area including stranded | 88.7% | 67.5% |
 | Areas on ground the reference does not have | 2.7% | 9.6% |
 | Player spawns with an area under them | **33 of 33** | 56 of 96 |
-| Areas no player spawn can reach | 3 (0.1%) | 396 (2.3%) |
+| Areas no player spawn can reach | 3 (0.1%) | 388 (2.2%) |
 
 Score against reachable ground rather than against every area, because a reference mesh contains
 ground nothing can path to: gm_construct's engine mesh strands 224 of its 2,271 areas, which is what
@@ -348,7 +348,19 @@ is switched on at the start - cp_dustbowl's stairs to the first stage's yard, pl
 the final pit - to be a floor, and, for TF2 only, player clip to be solid, as it is to TF2's bots.
 That last one also seals the map edges the flood used to walk out through: on koth_viaduct 83.5% of
 the generated areas were on ground Valve's mesh does not have, and now 27.8% are, and on cp_badlands
-69.2% now 25.3%. Coverage of the ground Valve's meshes can reach is 95.5% to 98.5% on every TF2 map.
+69.2% now 25.2%. Coverage of the ground Valve's meshes can reach is 95.4% to 98.5% on every TF2 map.
+
+Crouch areas follow the engine's own heights: room under 71 units is crouching room, under 55 is
+none, on TF2 as everywhere else. TF2's player is taller - 82 standing, 62 crouched - but Valve's
+meshes do not use those figures: of the 68 reachable areas in them whose lowest headroom is 71 to 82,
+63 are not marked crouch, and two thirds of the 33 that are marked have somewhere under 71. What the
+generated TF2 meshes used to have was mostly noise. Of 239 crouch areas on the eight maps, 229 were off
+Valve's ground: 148 filled the sealed space under cp_granary's terrain, flooded from
+`info_player_start`s left on its floor, which TF2 never spawns anyone at, and 26 were too narrow for
+a crouching body anywhere in them, since headroom was a single line. With teamspawns as the only TF2
+seeds and a 32 unit wide body swept for crouch-only ground, 51 remain, 45 of them off Valve's ground,
+most of them small pockets a crouching body does fit, several under props. Routes are unchanged and
+coverage moves by a tenth of a point at most.
 
 Ground inside a `trigger_hurt` that kills on contact gets no mesh. pl_upward's out-of-bounds valley
 sits under one, and Meshwright meshed 1,510 areas there that Valve's mesh does not have and that
@@ -429,8 +441,15 @@ single area.
 **Some collision questions use a line rather than a swept box.** Movement between samples is tested
 with a proper hull sweep against world brushes, brush entities and displacement terrain. "Is there
 room standing right here" is a point question, and a zero-length sweep is degenerate for a brush
-clipper, so headroom is still a line trace. It can drop through a grating or a gap slightly narrower
-than itself.
+clipper, so standing headroom is still a line trace. It can drop through a grating or a gap slightly
+narrower than itself. Crouch-only ground, where that matters most, also sweeps a body's footprint
+upward, which is a sweep with length and so not degenerate.
+
+**A ledge a body only fits on by its edge is meshed but not linked.** A crouching body is allowed
+anywhere in a sample's own cell, so a ledge 26 units deep under an overhang, which a body fits on with
+half of it over the drop, is crouch ground. Crossings are tested on an area's centre line, a body's
+half-width either side, so nothing links it: gm_flatgrass has 16 such areas under the rim of its pit,
+each an island.
 
 **Stair marking is limited by area shape, not by the test.** Run over the engine's own areas the
 classifier reproduces the engine's verdicts. Run over a mesh generated here it finds fewer, because an

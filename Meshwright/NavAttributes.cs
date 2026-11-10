@@ -116,6 +116,15 @@ namespace Meshwright
         /// </summary>
         public static bool PlayerClipStopsEveryWalker { get; set; }
 
+        /// <summary>
+        /// Whether players enter the map only at <c>info_player_teamspawn</c>, as they do in TF2, rather
+        /// than at any of the spawn classes Garry's Mod accepts. Switched on for TF2 by the game name,
+        /// together with <see cref="PlayerClipStopsEveryWalker"/>. Read by
+        /// <see cref="AreaGenerator.SpawnPositions(BspFile)"/>, which is what every seed and every
+        /// reachability check takes its spawns from.
+        /// </summary>
+        public static bool PlayersSpawnOnlyAtTeamSpawns { get; set; }
+
         /// <summary>Standing height; the headroom a sampled position needs to be walkable.</summary>
         public const float HumanHeight = 71f;
 
