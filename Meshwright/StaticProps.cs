@@ -46,6 +46,22 @@ namespace Meshwright
             out float fraction, out BspFile.Vector3 normal)
             => mesh.TryTraceSurface(a, b, mask, out fraction, out normal);
 
+        /// <summary>
+        /// The same hulls kept apart, one convex piece each, for <see cref="Contains"/>: the triangle
+        /// soup above can say what a line crosses but not whether a point is inside.
+        /// </summary>
+        private ConvexSolids solids = new();
+
+        /// <summary>How many closed convex pieces <see cref="Contains"/> tests against.</summary>
+        public int SolidCount => solids.Count;
+
+        /// <summary>
+        /// Whether a point is inside a prop's collision. Every prop is solid, so the mask only decides
+        /// whether props are being asked about at all.
+        /// </summary>
+        public bool Contains(BspFile.Vector3 point, int mask)
+            => (mask & PropContents) != 0 && solids.Contains(point);
+
         /// <summary>Sweeps a box against the props.</summary>
         public bool TryTraceHull(BspFile.Vector3 a, BspFile.Vector3 b,
             BspFile.Vector3 mins, BspFile.Vector3 maxs, int mask,
@@ -105,6 +121,32 @@ namespace Meshwright
 
         private readonly List<string> missingModels = [];
 
+        /// <summary>
+        /// Props made of the given hulls, each one convex piece of whole triangles (three vertices
+        /// each), with no map or models behind them - for tests, which have neither.
+        /// </summary>
+        internal static StaticProps FromHulls(params BspFile.Vector3[][] hulls)
+        {
+            var result = new StaticProps();
+            var pieces = new List<(int First, int Count)>();
+            var tris = new List<BspFile.Vector3>();
+
+            foreach (var hull in hulls)
+            {
+                pieces.Add((tris.Count / 3, hull.Length / 3));
+                tris.AddRange(hull);
+            }
+
+            result.Triangles = [.. tris];
+
+            var perTriangle = new int[result.TriangleCount];
+            Array.Fill(perTriangle, PropContents);
+
+            result.mesh.Build(result.Triangles, perTriangle);
+            result.solids = ConvexSolids.Build(result.Triangles, pieces);
+            return result;
+        }
+
         public static StaticProps Load(string bspPath, IEnumerable<string>? extraRoots = null)
         {
             var lump = StaticPropLump.Load(bspPath);
@@ -126,6 +168,7 @@ namespace Meshwright
             int models = lump.ModelNames.Length;
 
             var hulls = new BspFile.Vector3[models][];
+            var ledges = new int[models][];
             var fromBox = new bool[models];
 
             // Which models are actually used, and with what solidity. A model's shape depends on the
@@ -173,7 +216,7 @@ namespace Meshwright
             System.Threading.Tasks.Parallel.ForEach(wanted, NavConcurrency.Options, m =>
             {
                 hulls[m] = LoadHull(files, lump.ModelNames[m], solidFor[m],
-                    out fromBox[m], out missingAt[m], out hulllessAt[m]);
+                    out ledges[m], out fromBox[m], out missingAt[m], out hulllessAt[m]);
             });
 
             result.LoadMs = clock.ElapsedMilliseconds; clock.Restart();
@@ -194,6 +237,7 @@ namespace Meshwright
             foreach (var prop in lump.Props) total += hulls[prop.ModelIndex]?.Length ?? 0;
 
             var tris = new BspFile.Vector3[total];
+            var pieces = new List<(int First, int Count)>();
             int at = 0;
 
             foreach (var prop in lump.Props)
@@ -210,6 +254,13 @@ namespace Meshwright
                 // Once per prop, not once per vertex - see StaticPropLump.Basis.
                 var basis = StaticPropLump.Basis.For(prop.Pitch, prop.Yaw, prop.Roll);
                 float scale = prop.Scale;
+
+                int piece = at / 3;
+                foreach (int size in ledges[m] ?? [])
+                {
+                    pieces.Add((piece, size));
+                    piece += size;
+                }
 
                 foreach (var v in hull)
                 {
@@ -262,6 +313,7 @@ namespace Meshwright
             Array.Fill(perTriangle, PropContents);
 
             result.mesh.Build(result.Triangles, perTriangle);
+            result.solids = ConvexSolids.Build(result.Triangles, pieces);
 
             result.IndexMs = clock.ElapsedMilliseconds;
             return result;
@@ -294,8 +346,9 @@ namespace Meshwright
         /// order afterwards.
         /// </remarks>
         private static BspFile.Vector3[] LoadHull(GameFiles files, string modelPath, byte solid,
-            out bool box, out string? missing, out string? noHull)
+            out int[] ledges, out bool box, out string? missing, out string? noHull)
         {
+            ledges = [];
             box = false;
             missing = null;
             noHull = null;
@@ -307,7 +360,11 @@ namespace Meshwright
                 if (files.TryRead(phyPath, out var phyBytes))
                 {
                     var phy = PhyFile.Parse(phyBytes);
-                    if (phy.TriangleCount > 0) return phy.Triangles;
+                    if (phy.TriangleCount > 0)
+                    {
+                        ledges = phy.LedgeSizes;
+                        return phy.Triangles;
+                    }
 
                     noHull = modelPath;
                     return [];
@@ -339,7 +396,9 @@ namespace Meshwright
             if (!model.Valid) return [];
 
             box = true;
-            return model.AsTriangles();
+            var boxTriangles = model.AsTriangles();
+            ledges = [boxTriangles.Length / 3];
+            return boxTriangles;
         }
     }
 }
