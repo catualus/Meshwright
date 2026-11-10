@@ -602,7 +602,7 @@ eight units over the higher floor, so a bar, a raised threshold or a prop's edge
 as a wall and the floors either side were never linked. Where the lines refuse a crossing between floors
 within a step of each other, a crouching body is now raised onto whatever it passes over and swept
 across. That top has to be within a step of both floors, so a wall a step over a pavement and 30 units
-over the road beside it stays the drop and climb tests' business. It has to stand in the crossing, with
+over the road beside it is not stepped over (see below). It has to stand in the crossing, with
 its near and far faces no more than a body's width apart halfway up, so a raised floor is a floor and is
 linked by steps up onto it and down off it. And there has to be a crouching body's headroom over it.
 Of the pairs the builder refused and a step move crosses, 9 have ground at both ends in Valve's TF2
@@ -619,8 +619,30 @@ checked in cross-section. Four links each on the RP maps go to the connection fi
 when A to B to C now exists, and a 14 unit strip on top of a 13 unit block on pl_upward goes with its 6
 links, as it was kept only for being the one way between its neighbours. Routes, coverage, floating and
 over-air areas, islands and areas no spawn reaches do not move, and eight maps come out byte-identical.
-The 46 to 48 unit fences are not modelled: 86 and 87 refused pairs on the RP maps, 2 of them into a
-cut-off group, and 0 to 5 on the other maps.
+
+Fences a jump clears are not linked, because the reference meshes do not link them. Among the level
+pairs the builder refuses everywhere along their span, the ones a crouch jump would join - a thin
+obstacle, no deeper than a body's width, more than a step and at most `JumpCrouchHeight` over the lower
+floor, with a crouching body's room over its top and room for one at both ends, tried at every four
+units along the span - are 264 and 270 on the RP maps and 94 on the TF2 maps and gm_construct (58 of them
+on cp_granary, none on ctf_turbine or gm_flatgrass). Valve's TF2 meshes and the engine's gm_construct
+mesh have ground at both ends of 45 of the 185 directed links those would make, and link 2 of them, one
+pair over a 56 unit, 31 unit deep obstacle on koth_viaduct; 23 lie inside one reference area drawn across the obstacle, 8
+are joined round its end within 64 units and 12 are not joined. No area in any reference mesh, the RP
+maps' shipped meshes included, carries the `JUMP` attribute. Of the facing pairs in the reference
+meshes themselves with a thin 18 to 66 unit obstacle between them, 49 on the TF2 maps and none on
+gm_construct, none is linked both ways and 2 one way. Nor would such a link say it is a jump: a
+connection carries no flags, so Meshwright marks a jump up only by the height between the two areas,
+which a bot reads, and across a fence there is none; the one marker the format has, the `JUMP`
+attribute, belongs to a whole area. On the TF2 maps and gm_construct every such pair is already joined
+through the rest of the mesh. On each RP map 16 of the links would reach a cut-off area: four single
+areas behind a 47 unit fence at (-5490, 1170 to 1505) and two behind 27 and 28 unit obstacles, all kept
+as cut-off groups. The open-topped props at (-844, -970) are not among them: every crossing into them has
+something solid less than 66 units over the floor. A wall a step over one floor and more than a step
+over the other, with the two floors within a step of each other - stepped onto and dropped off one way,
+jumped the other - is refused as well: 9 pairs on each RP map with a crouching body's room over the top,
+all already joined through the mesh, none linked directly in the RP maps' shipped meshes, and none on
+the other maps.
 
 A line traced from inside a static prop is not told so. The line traces have no start-solid flag: one
 starting inside a brush is blocked because it starts inside, but a prop is triangles, and a segment

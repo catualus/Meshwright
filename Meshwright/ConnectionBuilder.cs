@@ -1588,7 +1588,9 @@ namespace Meshwright
         ///
         /// Both floors within a step of the top, not only the one being left, so the link is one a walker
         /// makes both ways: a wall twelve units above a pavement and thirty above the road beside it is a
-        /// drop one way and a jump the other, which is the drop and climb tests' business, not this one's.
+        /// step up and a drop one way and a jump the other, and is left unlinked. So is anything taller
+        /// than a step that a jump clears: Valve's TF2 meshes and the engine's gm_construct mesh link 2 of
+        /// the 185 such crossings the builder refuses on those maps, and mark no area as a jump.
         ///
         /// On the twelve benchmark maps it links five sites on each RP map - a 13.5 unit rail on a prop
         /// floor, a garden wall 14 to 18 units over the terrain either side, a prop's foot grazing the
