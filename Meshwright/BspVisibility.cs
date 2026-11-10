@@ -1073,6 +1073,11 @@ namespace Meshwright
                 }
             }
 
+            // Props differ from terrain in two ways, both because a prop is a closed solid rather than
+            // a surface. A box wholly inside one touches none of its triangles, and is start-solid only
+            // because StaticProps tests the start against the hulls themselves. And a box dragged out
+            // through a face it starts across is start-solid without a hit, as it is out of a brush,
+            // which is what lets Traversability.CanStep's graze rule judge it.
             if (staticProps is not null)
             {
                 bool propHit = staticProps.TryTraceHull(a, b, mins, maxs, mask,
