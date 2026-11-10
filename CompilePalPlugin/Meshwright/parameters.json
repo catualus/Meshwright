@@ -83,6 +83,7 @@
     "Name": "Thread limit",
     "Parameter": " -threads",
     "CanHaveValue": true,
+    "Value": "4",
     "Description": "Limit how many CPU cores Meshwright uses. Leave this off to use all of them - useful if you want to keep using your computer for other things during a long compile."
   },
   {
