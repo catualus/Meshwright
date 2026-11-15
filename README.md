@@ -590,7 +590,7 @@ gm_construct, gm_flatgrass and ctf_turbine come out byte-identical. The other 49
 body walks out of across the shared edge, refused by the builder's test (its body is swept at the
 height of the floor under its middle on a slope, positions near the middle of a narrow span are never
 tried, and slivers are tried only six units in; loosening each linked links the checker flags more
-often than the links kept); 11 left on foot only across floor no area covers or just past a span's end;
+often than the links kept, and a body walking across now joins ten of them - see below); 11 left on foot only across floor no area covers or just past a span's end;
 10 behind 46 to 48 unit fences and railings, which a jump clears; 10 inside open-topped props, first
 taken for floor beyond bars 10 to 19 units high (see below); and 6 no
 player reaches - a strip behind a row of containers on cp_granary and a recess under a 32 unit lintel,
@@ -619,6 +619,48 @@ checked in cross-section. Four links each on the RP maps go to the connection fi
 when A to B to C now exists, and a 14 unit strip on top of a 13 unit block on pl_upward goes with its 6
 links, as it was kept only for being the one way between its neighbours. Routes, coverage, floating and
 over-air areas, islands and areas no spawn reaches do not move, and eight maps come out byte-identical.
+
+The builder's own test refused a real crossing on 11 of the 12 cut-off groups traced to it above, and
+never tested the twelfth. Each is one area, 18 to 25 units across, beside ground a hull checker walks
+onto in a cell or two. At the middle of the shared span an outer clearance line starts inside what
+stands beside the crossing within 16 units of the middle - a prop, a brush, a brush entity. Off the
+middle, every crossing on a span that short hangs a body past the span's end and drags it half a step
+over the floor under its middle: on the 35 degree slopes of pl_upward and uneven ground on the RP maps a
+body rests on the highest floor under it, 8 to 18 units higher, so the one dragged starts inside the
+ground; where the way through is a gap little wider than a body off the middle, the eight unit grid puts
+it into one side or the other, and the grid position nearest the gap is skipped as the middle; and on
+koth_viaduct a body six units into the area is in what stands beside it, and only a unit in does it fit.
+The span's ends fail the same ways. The twelfth, on cp_badlands, shares 12 units of edge with the area
+beside it, under the 16 the builder tests at all.
+
+Once every other test has refused a crossing between floors within a step of each other, across a span
+narrower than a body, a crouching body now walks it as a player does: tried every unit along the span,
+from a unit and six units into each area, it rests on the floor under it at every two-unit stride - on a
+slope, on its uphill side - and is swept to the next resting height at the higher of the two, half a
+step up, start-solid aware. Each floor has to be within a step of the last and within half a step of the
+band between the two ends' floors, so a strip a step high and deeper than a body is still a floor of its
+own, and the walk has to end on the far area's floor. The body has to have a unit to spare on either
+side. Without it a walk tried every two units found windows a unit wide through gaps of 32 to 34 units,
+which nothing steering along a mesh hits, and a hull checker sampling every two units flagged 28 of the
+248 level links it added on the five maps holding the refusals, against 1.1% of the level links kept. A
+link the build made only by a walk is re-tested after the clip as one made at a span end is, and goes
+when no body gets across on the new shapes: one pair on pl_upward, walked before the clip pulled one
+edge back four units, kept a link no body gets across afterwards, the checker's included.
+
+Ten of the twelve groups are joined: the four on pl_upward, the one on koth_viaduct, two sites on each
+RP map, and the cp_badlands area, now walked into from another neighbour. The site at (5538, 2387) on
+both RP maps stays cut off: its way out is a gap 34 to 35 units wide, with no unit to spare at any
+position tried. Across the twelve maps the finished meshes gain 239 links, 233 level and 6 between areas
+more than a step apart at the middle of the span, walked further along it where their floors are not,
+and lose 28, shortcuts the connection fixer now prunes and walked links the stale-link pass drops; a
+hull checker flags none of either, against 1.2% of the level links and 31% of the drops kept. Routes,
+coverage, floating and over-air areas do not move on any map. Islands fall on five maps (pl_upward 7 to
+3, both RP maps by 2) and areas no spawn reaches on five (pl_upward 15 to 11, koth_viaduct 1 to 0,
+rp_downtown_tits_v25 33 to 30), no area of unchanged shape loses its way in, and gm_construct and
+gm_flatgrass come out byte-identical. Linking and relinking take about a second longer on pl_upward, 1.2
+to about 2.3 seconds, and about a second and a half on rp_downtown_tits_v25, 4.3 to 5.7, measured on a
+busy machine. Tried on spans of any length, the walk added 5 more links and made rp_downtown_tits_v25
+take a sixth longer to build.
 
 Fences a jump clears are not linked, because the reference meshes do not link them. Among the level
 pairs the builder refuses everywhere along their span, the ones a crouch jump would join - a thin
