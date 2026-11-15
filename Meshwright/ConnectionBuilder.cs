@@ -89,6 +89,13 @@ namespace Meshwright
             /// </summary>
             public readonly HashSet<(uint From, int Direction, uint To)> AtSpanEnds = [];
 
+            /// <summary>
+            /// The links made only by a body walking across (<see cref="WalksAcross"/>), from, the direction and
+            /// to, for <see cref="DropStale"/>: as <see cref="AtSpanEnds"/>, they stand on a body that got across,
+            /// not on a test that never asked.
+            /// </summary>
+            public readonly HashSet<(uint From, int Direction, uint To)> Walked = [];
+
             // split by direction so a systematic asymmetry cannot hide behind a single total
             public int UpCandidates, UpRejectedByReach, UpRejectedByTrace;
             public int DownCandidates, DownRejectedByReach, DownRejectedByTrace;
@@ -134,6 +141,7 @@ namespace Meshwright
                 HeadroomStartSolid += other.HeadroomStartSolid;
                 HeadroomLowCeiling += other.HeadroomLowCeiling;
                 AtSpanEnds.UnionWith(other.AtSpanEnds);
+                Walked.UnionWith(other.Walked);
             }
         }
 
@@ -200,7 +208,7 @@ namespace Meshwright
                 if (refusal == Refusal.Clear)
                     log.Add($"{name}:   would connect");
                 else if (CrossesElsewhere(vis, from, to, bounds, other, direction, centreA, overlap, out float elsewhere,
-                             out bool atEnd))
+                             out bool atEnd, out _))
                 {
                     log.Add($"{name}:   REFUSED by {refusal} at the middle, would connect further along (climb {elsewhere:F1})" +
                             (atEnd ? ", at an end of the span" : ""));
@@ -270,8 +278,8 @@ namespace Meshwright
             public int Removed;
 
             /// <summary>
-            /// Of those, the ones the build made only at an end of their span, removed although no body
-            /// stands at both ends of any crossing on the new shapes.
+            /// Of those, the ones the build made only at an end of their span or by a body walking across,
+            /// removed although no body stands at both ends of any crossing on the new shapes.
             /// </summary>
             public int RemovedAtEnds;
 
@@ -320,6 +328,13 @@ namespace Meshwright
         /// ends of any crossing - the corner pulled back into a strip a body no longer fits in beside the
         /// wall - there is nothing left to give it the benefit of the doubt for, and it goes too.
         ///
+        /// So does a link <paramref name="walked"/> says the build made only by a body walking across
+        /// (<see cref="WalksAcross"/>), for the same reason: it was made where a body went, before the clip
+        /// pulled the areas back from the geometry, and where none goes now across the span they are left
+        /// sharing, nothing else ever vouched for it. On pl_upward one pair was walked across on its shapes
+        /// before the clip, which then pulled one edge back four units and both ends of the span in; on the
+        /// clipped shapes no body gets across anywhere, a hull checker included, and the link stayed.
+        ///
         /// Nor is a link given it whose crossing is shut to a walker of no width wherever it is tried
         /// (<see cref="CrossingShut"/>): a line through its middle runs into something, or it drops onto
         /// ground under the floor it leaves. The ends being too tight for a body is then not why nothing
@@ -335,7 +350,8 @@ namespace Meshwright
         /// </summary>
         public static StaleResult DropStale(NavFile nav, BspVisibility vis, IReadOnlySet<uint> reshaped,
             IReadOnlyDictionary<uint, NavGeometry.Bounds> before,
-            IReadOnlySet<(uint From, int Direction, uint To)>? atSpanEnds = null)
+            IReadOnlySet<(uint From, int Direction, uint To)>? atSpanEnds = null,
+            IReadOnlySet<(uint From, int Direction, uint To)>? walked = null)
         {
             var result = new StaleResult();
             if (reshaped.Count == 0)
@@ -384,7 +400,8 @@ namespace Meshwright
                         local.Refused++;
 
                         var verdict = BodyCrosses(vis, area, other, bounds, otherBounds, oldBounds, otherOld, direction);
-                        bool atEnd = atSpanEnds is not null && atSpanEnds.Contains((area.Id, direction, id));
+                        bool atEnd = atSpanEnds is not null && atSpanEnds.Contains((area.Id, direction, id)) ||
+                                     walked is not null && walked.Contains((area.Id, direction, id));
 
                         if (verdict == BodyVerdict.Crosses || verdict == BodyVerdict.NoRoom && !atEnd)
                             continue;
@@ -444,7 +461,7 @@ namespace Meshwright
                 return false;
 
             return TestCrossing(vis, area, other, fromX, fromY, fromZ, toX, toY, toZ, out _) == Refusal.Clear ||
-                   CrossesElsewhere(vis, area, other, bounds, otherBounds, direction, centreA, overlap, out _, out _);
+                   CrossesElsewhere(vis, area, other, bounds, otherBounds, direction, centreA, overlap, out _, out _, out _);
         }
 
         /// <summary>How far inside each area a body crossing a stale link is tried from (<see cref="DropStale"/>).</summary>
@@ -717,13 +734,16 @@ namespace Meshwright
                             out bool startedSolid, sweepBody: sweepMiddle);
                         if (refusal != Refusal.Clear &&
                             CrossesElsewhere(vis, area, other, bounds, NavGeometry.GetBounds(other), direction,
-                                centreA, overlap, out float elsewhere, out bool atEnd))
+                                centreA, overlap, out float elsewhere, out bool atEnd, out bool walked))
                         {
                             refusal = Refusal.Clear;
                             climb = elsewhere;
 
                             if (atEnd)
                                 local.AtSpanEnds.Add((area.Id, direction, other.Id));
+
+                            if (walked)
+                                local.Walked.Add((area.Id, direction, other.Id));
                         }
 
                         if (refusal != Refusal.Clear)
@@ -869,10 +889,11 @@ namespace Meshwright
         /// </summary>
         private static bool CrossesElsewhere(BspVisibility vis, NavArea area, NavArea other,
             NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
-            float centre, float overlap, out float climb, out bool atEnd)
+            float centre, float overlap, out float climb, out bool atEnd, out bool walked)
         {
             climb = 0;
             atEnd = false;
+            walked = false;
             float spanLow = centre - overlap / 2f, spanHigh = centre + overlap / 2f;
             float low = spanLow + SpanEnd;
             float high = spanHigh - SpanEnd;
@@ -912,7 +933,239 @@ namespace Meshwright
 
             atEnd = CrossesAtEnds(vis, area, other, bounds, otherBounds, direction, spanLow, spanHigh, EndDepths,
                 out climb, out _);
-            return atEnd;
+
+            if (atEnd)
+                return true;
+
+            // Only across a span narrower than a body: see WalksAcross.
+            walked = overlap < 2f * NavConstants.HalfHumanWidth &&
+                     WalksAcross(vis, area, other, bounds, otherBounds, direction, spanLow, spanHigh, out climb);
+            return walked;
+        }
+
+        /// <summary>How far apart along the shared span <see cref="WalksAcross"/> tries a body walking across.</summary>
+        private const float WalkSpacing = 1f;
+
+        /// <summary>How deep into each area a walk across starts and ends (<see cref="WalksAcross"/>).</summary>
+        private static readonly float[] WalkDepths = [SpanEnd, Inset];
+
+        /// <summary>
+        /// The last resort, after every other crossing has failed: whether a crouching body walks from one
+        /// area to the other over a level crossing - the floors under its two ends within a step of each
+        /// other - carried at the height it rests at over the ground under it at each stride
+        /// (<see cref="BodyWalks"/>), tried every <see cref="WalkSpacing"/> along the span, a unit in from
+        /// its ends, from a unit and from <see cref="Inset"/> into each area.
+        ///
+        /// Every other crossing drags the body, where it drags one at all, at the height of the higher floor
+        /// under the middle of its two ends, and tries the span on an eight unit grid six units in. Both
+        /// cut off ground a player walks onto. On a slope falling away across the crossing the body rests
+        /// on its uphill side, up to sixteen units' worth of slope above the floor under its middle, so the
+        /// body dragged half a step over that floor starts inside the slope - and on a span narrower than a
+        /// body every crossing off the middle is dragged. And where the way through is a gap little wider
+        /// than a body, off the middle of the span, the grid's positions put the body into one side of it or
+        /// the other, the middle's clearance lines run into a side, and the positions nearest the middle are
+        /// skipped as the middle already tried. On the twelve benchmark maps that left 11 cut-off groups a
+        /// body fits in, one area each, walled off from ground beside them that a hull checker walks onto
+        /// in a cell or two: areas 18 to 25 units across against a prop, a brush or a brush entity standing
+        /// within 16 units of the middle of the span, two of them on a 35 degree slope on pl_upward.
+        ///
+        /// Only across a span narrower than a body, as <see cref="Relink"/> sweeps the middle only there: on
+        /// it every crossing off the middle hangs the body past the span's end and drags it, which is where
+        /// the slope bites, and the grid has no room to find a gap. On a longer span the middle and the grid
+        /// are tried with the clearance lines, measured from the floor beside each line on a slope. Of the
+        /// 244 links the walk added on the twelve maps tried on every span, 239 were across spans of 25 units
+        /// or less, and trying it on the longer ones as well made rp_downtown_tits_v25 take a sixth longer
+        /// to build; with the limit, linking and relinking take about a second and a half longer there.
+        ///
+        /// The walk asks more than the other crossings do of the body itself, so it adds links only where a
+        /// body really goes: a unit to spare either side (<see cref="WalkSpare"/>), every floor under it
+        /// within a step of the last and within half a step of the band between the two ends' floors, and
+        /// arriving on the floor the far end is on. Not a drop or a climb: those have their own fall and
+        /// headroom tests, which a walk would skip.
+        /// </summary>
+        private static bool WalksAcross(BspVisibility vis, NavArea area, NavArea other,
+            NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
+            float spanLow, float spanHigh, out float climb)
+        {
+            climb = 0;
+            float depth = Depth(bounds, direction), otherDepth = Depth(otherBounds, direction);
+            float low = spanLow + SpanEnd, high = spanHigh - SpanEnd;
+            int count = high > low ? (int)MathF.Ceiling((high - low) / WalkSpacing) : 0;
+
+            // Each end at each position, worked out once for every pairing of depths: where it is, its floor,
+            // and for the start, the height a body rests at there if it fits (NaN if not, or not tried).
+            int n = WalkDepths.Length;
+            Span<float> fromX = stackalloc float[n], fromY = stackalloc float[n], fromZ = stackalloc float[n];
+            Span<float> fromGround = stackalloc float[n], rest = stackalloc float[n];
+            Span<float> toX = stackalloc float[n], toY = stackalloc float[n], toZ = stackalloc float[n];
+            Span<float> toGround = stackalloc float[n];
+
+            for (int k = 0; k <= count; k++)
+            {
+                float c = MathF.Min(low + k * WalkSpacing, high);
+
+                for (int i = 0; i < n; i++)
+                {
+                    rest[i] = float.NaN;
+                    if (WalkDepths[i] > 1f && WalkDepths[i] > depth - 1f)
+                        continue;
+
+                    (fromX[i], fromY[i]) = EdgePoint(bounds, direction, c, -InsetWithin(WalkDepths[i], depth));
+                    fromZ[i] = NavGeometry.SurfaceZ(area, fromX[i], fromY[i]);
+                    fromGround[i] = GroundAt(vis, fromX[i], fromY[i], fromZ[i]);
+                    rest[i] = WalkStart(vis, fromX[i], fromY[i], fromGround[i]);
+                }
+
+                for (int j = 0; j < n; j++)
+                {
+                    toGround[j] = float.NaN;
+                    if (WalkDepths[j] > 1f && WalkDepths[j] > otherDepth - 1f)
+                        continue;
+
+                    (toX[j], toY[j]) = EdgePoint(otherBounds, NavGeometry.Opposite(direction), c,
+                        -InsetWithin(WalkDepths[j], otherDepth));
+                    toZ[j] = NavGeometry.SurfaceZ(other, toX[j], toY[j]);
+                    toGround[j] = GroundAt(vis, toX[j], toY[j], toZ[j]);
+                }
+
+                for (int i = 0; i < n; i++)
+                {
+                    if (float.IsNaN(rest[i]))
+                        continue;
+
+                    for (int j = 0; j < n; j++)
+                    {
+                        if (float.IsNaN(toGround[j]) || !Reachable(toZ[j] - fromZ[i]) ||
+                            MathF.Abs(toGround[j] - fromGround[i]) > NavConstants.StepHeight)
+                        {
+                            continue;
+                        }
+
+                        if (WalkFrom(vis, fromX[i], fromY[i], fromGround[i], rest[i], toX[j], toY[j], toGround[j]))
+                        {
+                            climb = toZ[j] - fromZ[i];
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>How far a body walking across (<see cref="BodyWalks"/>) moves between looks at the ground.</summary>
+        private const float WalkStride = 2f;
+
+        /// <summary>
+        /// Whether a crouching body walks from one point to another as a player does, carried over the ground
+        /// rather than dragged level: at every <see cref="WalkStride"/> it rests on the floor under it
+        /// (<see cref="Rest"/>, so on a slope on its uphill side), and it is swept from each resting height to
+        /// the next at the higher of the two, lifted half a step as <see cref="BodyCrosses(BspVisibility,
+        /// float, float, float, float, float)"/> is, rising first where the floor goes up. Start-solid aware
+        /// throughout, with <see cref="WalkSpare"/> to spare on either side.
+        ///
+        /// Refused where the floor under a stride is more than a step from the last, is found from inside
+        /// something, or lies more than half a step outside the band between the floors at the two ends: a
+        /// strip a step high and deeper than a body is floor in its own right, linked by steps onto it and
+        /// off it, not passed over (as <see cref="StepsOver"/> does not either), and a dip deeper than that is
+        /// not walked through. And the floor the body ends on has to be the one at <paramref name="toGround"/>,
+        /// not a ledge or a prop top over it.
+        /// </summary>
+        internal static bool BodyWalks(BspVisibility vis, float fromX, float fromY, float fromGround,
+            float toX, float toY, float toGround)
+        {
+            float z = WalkStart(vis, fromX, fromY, fromGround);
+            return !float.IsNaN(z) && WalkFrom(vis, fromX, fromY, fromGround, z, toX, toY, toGround);
+        }
+
+        /// <summary>
+        /// Where a body walking across (<see cref="BodyWalks"/>) starts: the height it rests at over
+        /// <paramref name="ground"/>, or NaN if that floor was found from inside something or a crouching body
+        /// does not fit there.
+        /// </summary>
+        private static float WalkStart(BspVisibility vis, float x, float y, float ground)
+        {
+            if (vis.IsPointSolid(x, y, ground + 1f, BspVisibility.GenerationMask))
+                return float.NaN;
+
+            float z = Rest(vis, x, y, ground);
+            return BodyFits(vis, x, y, z) ? z : float.NaN;
+        }
+
+        /// <summary><see cref="BodyWalks"/> from a body resting at <paramref name="z"/> where it starts.</summary>
+        private static bool WalkFrom(BspVisibility vis, float fromX, float fromY, float fromGround, float z,
+            float toX, float toY, float toGround)
+        {
+            const float Lift = NavConstants.StepHeight / 2f;
+            const int Mask = BspVisibility.GenerationMask;
+
+            float dx = toX - fromX, dy = toY - fromY;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+            int strides = Math.Max(1, (int)MathF.Ceiling(length / WalkStride));
+            float x0 = fromX, y0 = fromY, ground = fromGround;
+            float lowest = MathF.Min(fromGround, toGround) - Lift, highest = MathF.Max(fromGround, toGround) + Lift;
+
+            for (int i = 1; i <= strides; i++)
+            {
+                float t = i / (float)strides;
+                float x = fromX + dx * t, y = fromY + dy * t;
+
+                if (!StairMarker.TryFindFloor(vis, x, y, z + NavConstants.StepHeight, 2f * NavConstants.StepHeight,
+                        out ground) ||
+                    vis.IsPointSolid(x, y, ground + 1f, Mask) ||
+                    ground < lowest || ground > highest)
+                {
+                    return false;
+                }
+
+                float next = Rest(vis, x, y, ground);
+                if (MathF.Abs(next - z) > NavConstants.StepHeight)
+                    return false;
+
+                float carried = MathF.Max(z, next) + Lift;
+
+                if (next > z && !BodyMoves(vis, x0, y0, z + Lift, x0, y0, carried, WalkerHeight))
+                    return false;
+
+                if (!BodyMoves(vis, x0, y0, carried, x, y, carried, WalkerHeight))
+                    return false;
+
+                z = next;
+                x0 = x;
+                y0 = y;
+            }
+
+            return MathF.Abs(ground - toGround) <= 1f;
+        }
+
+        /// <summary>
+        /// How much room a body walking across (<see cref="BodyWalks"/>) has to have to spare on either side.
+        ///
+        /// A gap between 32 and 34 units wide lets a body through only centred to within a unit, which nothing
+        /// steering along the mesh is, and a walk tried every two units along a span finds those windows: with
+        /// no room to spare, 28 of the 248 level links it added on the five maps holding the refusals were ones
+        /// a hull checker sampling every two units gets no body through, against 1.1% of the level links kept.
+        /// </summary>
+        private const float WalkSpare = 1f;
+
+        /// <summary>The height of a crouching body lifted half a step, as <see cref="BodyWalks"/> sweeps it.</summary>
+        private const float WalkerHeight = NavConstants.HumanCrouchHeight - NavConstants.StepHeight / 2f;
+
+        /// <summary>
+        /// A box the width of a body with <see cref="WalkSpare"/> to spare either side, <paramref name="height"/>
+        /// tall, swept between two points without meeting anything or starting inside something.
+        /// </summary>
+        private static bool BodyMoves(BspVisibility vis, float fromX, float fromY, float fromZ, float toX, float toY, float toZ,
+            float height)
+        {
+            const float Half = NavConstants.HalfHumanWidth + WalkSpare;
+
+            bool hit = vis.TryTraceHull(
+                new BspFile.Vector3(fromX, fromY, fromZ), new BspFile.Vector3(toX, toY, toZ),
+                new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, height),
+                BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
+
+            return !startSolid && (!hit || fraction >= 1f);
         }
 
         /// <summary>
