@@ -978,10 +978,11 @@ namespace Meshwright
         /// to build; with the limit, linking and relinking take about a second and a half longer there.
         ///
         /// The walk asks more than the other crossings do of the body itself, so it adds links only where a
-        /// body really goes: a unit to spare either side (<see cref="WalkSpare"/>), every floor under it
-        /// within a step of the last and within half a step of the band between the two ends' floors, and
-        /// arriving on the floor the far end is on. Not a drop or a climb: those have their own fall and
-        /// headroom tests, which a walk would skip.
+        /// body really goes: a unit to spare either side - a body two units wider walking across
+        /// (<see cref="WalkSpare"/>), or one of its own width walking across at <see cref="WalkRun"/>
+        /// neighbouring positions along the span - every floor under it within a step of the last and within
+        /// half a step of the band between the two ends' floors, and arriving on the floor the far end is on.
+        /// Not a drop or a climb: those have their own fall and headroom tests, which a walk would skip.
         /// </summary>
         private static bool WalksAcross(BspVisibility vis, NavArea area, NavArea other,
             NavGeometry.Bounds bounds, NavGeometry.Bounds otherBounds, int direction,
@@ -993,12 +994,15 @@ namespace Meshwright
             int count = high > low ? (int)MathF.Ceiling((high - low) / WalkSpacing) : 0;
 
             // Each end at each position, worked out once for every pairing of depths: where it is, its floor,
-            // and for the start, the height a body rests at there if it fits (NaN if not, or not tried).
+            // and for the start, the height a body rests at there if it fits (NaN if not, or not tried). And for
+            // each pairing, how many positions in a row up to this one a body with no room to spare walked at.
             int n = WalkDepths.Length;
             Span<float> fromX = stackalloc float[n], fromY = stackalloc float[n], fromZ = stackalloc float[n];
             Span<float> fromGround = stackalloc float[n], rest = stackalloc float[n];
             Span<float> toX = stackalloc float[n], toY = stackalloc float[n], toZ = stackalloc float[n];
             Span<float> toGround = stackalloc float[n];
+            Span<int> run = stackalloc int[n * n];
+            run.Clear();
 
             for (int k = 0; k <= count; k++)
             {
@@ -1030,18 +1034,18 @@ namespace Meshwright
 
                 for (int i = 0; i < n; i++)
                 {
-                    if (float.IsNaN(rest[i]))
-                        continue;
-
                     for (int j = 0; j < n; j++)
                     {
-                        if (float.IsNaN(toGround[j]) || !Reachable(toZ[j] - fromZ[i]) ||
-                            MathF.Abs(toGround[j] - fromGround[i]) > NavConstants.StepHeight)
-                        {
-                            continue;
-                        }
+                        bool level = !float.IsNaN(rest[i]) && !float.IsNaN(toGround[j]) && Reachable(toZ[j] - fromZ[i]) &&
+                                     MathF.Abs(toGround[j] - fromGround[i]) <= NavConstants.StepHeight;
+                        bool spare = level &&
+                                     WalkFrom(vis, fromX[i], fromY[i], fromGround[i], rest[i], toX[j], toY[j], toGround[j], WalkSpare);
+                        bool walks = spare || level &&
+                                     WalkFrom(vis, fromX[i], fromY[i], fromGround[i], rest[i], toX[j], toY[j], toGround[j], 0f);
 
-                        if (WalkFrom(vis, fromX[i], fromY[i], fromGround[i], rest[i], toX[j], toY[j], toGround[j]))
+                        run[i * n + j] = walks ? run[i * n + j] + 1 : 0;
+
+                        if (spare || run[i * n + j] >= WalkRun)
                         {
                             climb = toZ[j] - fromZ[i];
                             return true;
@@ -1075,7 +1079,7 @@ namespace Meshwright
             float toX, float toY, float toGround)
         {
             float z = WalkStart(vis, fromX, fromY, fromGround);
-            return !float.IsNaN(z) && WalkFrom(vis, fromX, fromY, fromGround, z, toX, toY, toGround);
+            return !float.IsNaN(z) && WalkFrom(vis, fromX, fromY, fromGround, z, toX, toY, toGround, WalkSpare);
         }
 
         /// <summary>
@@ -1092,9 +1096,12 @@ namespace Meshwright
             return BodyFits(vis, x, y, z) ? z : float.NaN;
         }
 
-        /// <summary><see cref="BodyWalks"/> from a body resting at <paramref name="z"/> where it starts.</summary>
+        /// <summary>
+        /// <see cref="BodyWalks"/> from a body resting at <paramref name="z"/> where it starts, with
+        /// <paramref name="spare"/> to spare on either side.
+        /// </summary>
         private static bool WalkFrom(BspVisibility vis, float fromX, float fromY, float fromGround, float z,
-            float toX, float toY, float toGround)
+            float toX, float toY, float toGround, float spare)
         {
             const float Lift = NavConstants.StepHeight / 2f;
             const int Mask = BspVisibility.GenerationMask;
@@ -1124,10 +1131,10 @@ namespace Meshwright
 
                 float carried = MathF.Max(z, next) + Lift;
 
-                if (next > z && !BodyMoves(vis, x0, y0, z + Lift, x0, y0, carried, WalkerHeight))
+                if (next > z && !BodyMoves(vis, x0, y0, z + Lift, x0, y0, carried, WalkerHeight, spare))
                     return false;
 
-                if (!BodyMoves(vis, x0, y0, carried, x, y, carried, WalkerHeight))
+                if (!BodyMoves(vis, x0, y0, carried, x, y, carried, WalkerHeight, spare))
                     return false;
 
                 z = next;
@@ -1139,7 +1146,8 @@ namespace Meshwright
         }
 
         /// <summary>
-        /// How much room a body walking across (<see cref="BodyWalks"/>) has to have to spare on either side.
+        /// How much room a body walking across (<see cref="BodyWalks"/>) has to have to spare on either side,
+        /// unless one without it walks across at <see cref="WalkRun"/> neighbouring positions instead.
         ///
         /// A gap between 32 and 34 units wide lets a body through only centred to within a unit, which nothing
         /// steering along the mesh is, and a walk tried every two units along a span finds those windows: with
@@ -1148,21 +1156,45 @@ namespace Meshwright
         /// </summary>
         private const float WalkSpare = 1f;
 
+        /// <summary>
+        /// How many neighbouring positions along the span, <see cref="WalkSpacing"/> apart, a body with no room
+        /// to spare has to walk across at in <see cref="WalksAcross"/> for that to count as a unit to spare
+        /// either side.
+        ///
+        /// It is the same unit, measured across the way the body goes rather than all round it. Between two
+        /// straight sides, a body two units wider walks through at one position exactly when one of its own
+        /// width walks through there and a unit either side, and a gap where it walks at one position or two -
+        /// a unit or less wider than a body - is still refused. But the wider body also has to clear a unit
+        /// behind where it starts and ahead of where it ends, which no steering asks for, and in a corner that
+        /// unit is the whole of what it fails on. On both RP maps the site at (5538, 2387) is one area in the
+        /// corner a 45 degree wall makes with a displacement wall, open to the ground beside it: a body stands
+        /// in it only within two units of the edge they share, so a body two units wider never does, while
+        /// one of its own width walks out of it at three neighbouring positions. The meshes shipped with both
+        /// maps, built by the engine, cover the spot with an area linked onward.
+        ///
+        /// Positions in a row, not a body two units wider only to its sides: that walked into a pocket on rough
+        /// sloping ground on the RP maps at a single position, where a hull checker gets no body. And alongside
+        /// the wider body, not in place of it: on a slope each position's body rests at its own height, and
+        /// with three in a row alone the finished pl_upward mesh lost 9 links and gained 2, and an area there
+        /// its only way in, and koth_viaduct lost a link the wider body walks.
+        /// </summary>
+        private const int WalkRun = 3;
+
         /// <summary>The height of a crouching body lifted half a step, as <see cref="BodyWalks"/> sweeps it.</summary>
         private const float WalkerHeight = NavConstants.HumanCrouchHeight - NavConstants.StepHeight / 2f;
 
         /// <summary>
-        /// A box the width of a body with <see cref="WalkSpare"/> to spare either side, <paramref name="height"/>
+        /// A box the width of a body with <paramref name="spare"/> to spare either side, <paramref name="height"/>
         /// tall, swept between two points without meeting anything or starting inside something.
         /// </summary>
         private static bool BodyMoves(BspVisibility vis, float fromX, float fromY, float fromZ, float toX, float toY, float toZ,
-            float height)
+            float height, float spare)
         {
-            const float Half = NavConstants.HalfHumanWidth + WalkSpare;
+            float half = NavConstants.HalfHumanWidth + spare;
 
             bool hit = vis.TryTraceHull(
                 new BspFile.Vector3(fromX, fromY, fromZ), new BspFile.Vector3(toX, toY, toZ),
-                new BspFile.Vector3(-Half, -Half, 0f), new BspFile.Vector3(Half, Half, height),
+                new BspFile.Vector3(-half, -half, 0f), new BspFile.Vector3(half, half, height),
                 BspVisibility.GenerationMask, out float fraction, out _, out bool startSolid);
 
             return !startSolid && (!hit || fraction >= 1f);

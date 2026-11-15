@@ -649,11 +649,12 @@ edge back four units, kept a link no body gets across afterwards, the checker's 
 
 Ten of the twelve groups are joined: the four on pl_upward, the one on koth_viaduct, two sites on each
 RP map, and the cp_badlands area, now walked into from another neighbour. The site at (5538, 2387) on
-both RP maps stays cut off: its way out is a gap 34 to 35 units wide, with no unit to spare at any
-position tried. Across the twelve maps the finished meshes gain 239 links, 233 level and 6 between areas
-more than a step apart at the middle of the span, walked further along it where their floors are not,
-and lose 28, shortcuts the connection fixer now prunes and walked links the stale-link pass drops; a
-hull checker flags none of either, against 1.2% of the level links and 31% of the drops kept. Routes,
+both RP maps stayed cut off: its way out is a gap 34 to 35 units wide, with no unit to spare at any
+position tried (it is joined now; see below). Across the twelve maps the finished meshes gain 239
+links, 233 level and 6 between areas more than a step apart at the middle of the span, walked further
+along it where their floors are not, and lose 28, shortcuts the connection fixer now prunes and walked
+links the stale-link pass drops; a hull checker flags none of either, against 1.2% of the level links
+and 31% of the drops kept. Routes,
 coverage, floating and over-air areas do not move on any map. Islands fall on five maps (pl_upward 7 to
 3, both RP maps by 2) and areas no spawn reaches on five (pl_upward 15 to 11, koth_viaduct 1 to 0,
 rp_downtown_tits_v25 33 to 30), no area of unchanged shape loses its way in, and gm_construct and
@@ -661,6 +662,34 @@ gm_flatgrass come out byte-identical. Linking and relinking take about a second 
 to about 2.3 seconds, and about a second and a half on rp_downtown_tits_v25, 4.3 to 5.7, measured on a
 busy machine. Tried on spans of any length, the walk added 5 more links and made rp_downtown_tits_v25
 take a sixth longer to build.
+
+The site at (5538, 2387) on both RP maps is one area 25 units square in a corner, where a 45 degree
+wall meets a displacement wall at about 50 degrees, open on its east side to the area beside it. A
+crouching body stands in it only within two units of the edge the two share, so a body with a unit to
+spare all round never stands in it at all - the unit behind it is in the wall - while one of its own
+width walks out of it at three positions a unit apart. The meshes the engine built for both maps, shipped
+with them, cover the spot with an area linked onward. A body of its own width walking across at three
+neighbouring positions along the span now counts as a unit to spare either side as well. Between two
+straight sides it is the same unit: a body two units wider walks through at one position exactly when
+one of its own width walks there and a unit either side, and a gap a unit or less wider than a body,
+walked at one position or two, is still refused. What it does not ask for is the unit behind where the
+walk starts and ahead of where it ends, which no steering needs. A body two units wider only to its
+sides, tried first, walked into a pocket on rough sloping ground on the RP maps at a single position,
+where a hull checker gets no body; and three positions in a row in place of the wider body, rather than
+alongside it, lost pl_upward 9 links and one area its only way in, as on a slope each position's body
+rests at its own height. The finished meshes gain 6 links, all level and none flagged: the site on each
+RP map, both ways, and on cp_badlands the area beside the 12 unit span, both ways with the ground 26
+units north, a corner of the same shape against a prop. Islands and areas no spawn reaches fall by one
+on each RP map, routes and everything else measured do not move, no link is lost, and nine maps come out
+byte-identical. Linking and relinking take two to three seconds longer on rp_downtown_tits_v25, 10.5
+to 12.4 seconds in one pair of runs and 10.9 to 14.2 in another, and no measurably longer on pl_upward,
+measured on a busy machine.
+
+Spans under 16 units are still not tested. Run through every test from 2 units up, the twelve maps gain
+1,395 links, and a hull checker flags 3.9% of the 1,279 level ones against 1.2% of the level links
+kept. Tried with the walk alone, they gain 1,152, none flagged, but no area gains a way in on any map,
+and the cp_badlands pair is not among them: a body of its own width walks across it at only the two
+positions at the end of the span, and one two units wider at none.
 
 Fences a jump clears are not linked, because the reference meshes do not link them. Among the level
 pairs the builder refuses everywhere along their span, the ones a crouch jump would join - a thin
