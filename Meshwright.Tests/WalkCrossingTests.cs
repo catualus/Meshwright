@@ -104,6 +104,47 @@ namespace Meshwright.Tests
         }
 
         /// <summary>
+        /// The corridor with a wall across the north area up to y = 82.5, so a body stands in that area only
+        /// within one and a half units of the edge it shares with the south one, as in a corner. A body two units
+        /// wider never fits behind the edge, at the start of a walk south or the end of one north. One of a
+        /// body's own width walks across at x = 4.5, 5.5, 6.5 and 7.5, a unit apart, which is the same unit to
+        /// spare either side, measured across the way it goes.
+        /// </summary>
+        [Fact]
+        public void ABodyWalksOutOfACornerWhereItWalksAtThreeNeighbouringPositions()
+        {
+            var world = StartSolidTests.Boxes(
+                (new(-1000, -1000, 0), new(-12, 1000, 200)),
+                (new(24, -1000, 0), new(1000, 1000, 200)),
+                (new(-1000, -1000, 0), new(1000, 82.5f, 200)));
+
+            var north = TestWorlds.Area(1, -12.5f, 0f, 12.5f, 100f, 0f);
+            var south = TestWorlds.Area(2, -12.5f, 100f, 12.5f, 200f, 0f);
+
+            Assert.False(ConnectionBuilder.BodyWalks(world, 5.5f, 99f, 0f, 5.5f, 106f, 0f));
+            Assert.Contains(ConnectionBuilder.Explain(world, north, south),
+                line => line.StartsWith("south:") && line.Contains("REFUSED by Crossing at the middle, would connect further along"));
+            Assert.Contains(ConnectionBuilder.Explain(world, south, north),
+                line => line.StartsWith("north:") && line.Contains("REFUSED by Crossing at the middle, would connect further along"));
+        }
+
+        /// <summary>
+        /// The control: a corridor 34 units wide, from x = -12 to 22. A body two units wider fits through it only
+        /// centred on x = 5, which no position tried is; one of a body's own width walks across at x = 4.5 and
+        /// 5.5, two positions in a row, and that is still a window a unit wide.
+        /// </summary>
+        [Fact]
+        public void AGapABodyWalksAtOnlyTwoNeighbouringPositionsIsStillRefused()
+        {
+            var world = Corridor(22f);
+
+            var log = ConnectionBuilder.Explain(world,
+                TestWorlds.Area(1, -12.5f, 0f, 12.5f, 100f, 0f), TestWorlds.Area(2, -12.5f, 100f, 12.5f, 200f, 0f));
+
+            Assert.Contains(log, line => line == "south:   REFUSED by Crossing at the middle and everywhere along the span");
+        }
+
+        /// <summary>
         /// The build records a link it made only by a walk, and the stale-link pass removes it when the clip
         /// leaves no way across: the corridor's two areas pulled back to x = 3, where no body, walking or
         /// dragged, gets through between the wall at x = -12 and the areas' new edge, and none stands at both
