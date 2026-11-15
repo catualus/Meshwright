@@ -1955,12 +1955,16 @@ namespace Meshwright
             foreach (string note in result.Notes)
                 Console.WriteLine($"      note: {note}");
 
+            // Kept past the connect step: which links were made only at a span's end or by a walk, for
+            // DropStale to test again after the clip, as NavPipeline does.
+            ConnectionBuilder.Result? links = null;
+
             if (!args.Contains("-noconnect", StringComparer.OrdinalIgnoreCase) && result.Added > 0)
             {
                 using var connecting = new ConsoleProgress(new NavProgress.Step("Connecting areas", 1.0));
                 connecting.Progress.Enter(NavPipeline.PhaseConnections);
 
-                var links = ConnectionBuilder.Build(nav, vis, connecting.Progress);
+                links = ConnectionBuilder.Build(nav, vis, connecting.Progress);
                 connecting.Progress.Finish();
                 connecting.Dispose();
                 Console.WriteLine($"      connections: {links.Steps:N0} steps, {links.JumpsUp:N0} jumps up, " +
@@ -1995,7 +1999,8 @@ namespace Meshwright
                     if (relinked.Total > 0)
                         Console.WriteLine($"      relinked {relinked.Total:N0} connections across clipped edges");
 
-                    var unlinked = ConnectionBuilder.DropStale(nav, vis, trimmed.Reshaped, trimmed.Before);
+                    var unlinked = ConnectionBuilder.DropStale(nav, vis, trimmed.Reshaped, trimmed.Before,
+                        links?.AtSpanEnds, links?.Walked);
                     if (unlinked.Removed > 0)
                         Console.WriteLine($"      unlinked {unlinked.Removed:N0} connections no body gets across");
                 }
